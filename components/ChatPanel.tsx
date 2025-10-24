@@ -1,0 +1,433 @@
+// components/ChatPanel.tsx
+'use client';
+
+import { useState, useEffect, useRef } from 'react';
+import { Send, Loader2, Sparkles, BookOpen, FileText, Trash2, Plus } from 'lucide-react';
+
+interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+  documentsUsed?: string[];
+}
+
+interface ChatSession {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ChatPanelProps {
+  selectedDocuments: string[];
+}
+
+export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [currentSession, setCurrentSession] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [mode, setMode] = useState<'corpus' | 'general'>('corpus');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    fetchSessions();
+  }, []);
+
+  useEffect(() => {
+    if (currentSession) {
+      fetchMessages(currentSession);
+    }
+  }, [currentSession]);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const fetchSessions = async () => {
+    try {
+      const res = await fetch('/api/chat/sessions');
+      const data = await res.json();
+      setSessions(data);
+      
+      // Auto-select first session or create new one
+      if (data.length > 0 && !currentSession) {
+        setCurrentSession(data[0].id);
+      } else if (data.length === 0) {
+        createNewSession();
+      }
+    } catch (error) {
+      console.error('Error fetching sessions:', error);
+    }
+  };
+
+  const fetchMessages = async (sessionId: string) => {
+    try {
+      const res = await fetch(`/api/chat/messages?sessionId=${sessionId}`);
+      const data = await res.json();
+      setMessages(data.map((msg: any) => ({
+        id: msg.id,
+        role: msg.role,
+        content: msg.content,
+        timestamp: msg.timestamp,
+        documentsUsed: msg.documents_used ? JSON.parse(msg.documents_used) : undefined
+      })));
+    } catch (error) {
+      console.error('Error fetching messages:', error);
+    }
+  };
+
+  const createNewSession = async () => {
+    try {
+      const res = await fetch('/api/chat/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: `Chat ${new Date().toLocaleDateString()}` })
+      });
+      const data = await res.json();
+      setCurrentSession(data.id);
+      setMessages([]);
+      await fetchSessions();
+    } catch (error) {
+      console.error('Error creating session:', error);
+    }
+  };
+
+  const deleteSession = async (sessionId: string) => {
+    if (!confirm('Are you sure you want to delete this chat session?')) return;
+
+    try {
+      await fetch('/api/chat/sessions', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: sessionId })
+      });
+      
+      if (currentSession === sessionId) {
+        setCurrentSession(null);
+        setMessages([]);
+      }
+      
+      await fetchSessions();
+    } catch (error) {
+      console.error('Error deleting session:', error);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || loading || !currentSession) return;
+
+    if (mode === 'corpus' && selectedDocuments.length === 0) {
+      alert('Please select at least one document from the corpus');
+      return;
+    }
+
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: input,
+      timestamp: new Date().toISOString()
+    };
+
+    setMessages(prev => [...prev, userMessage]);
+    setInput('');
+    setLoading(true);
+
+    try {
+      const endpoint = mode === 'corpus' ? '/api/query' : '/api/chat';
+      const body = mode === 'corpus' 
+        ? { query: input, documentIds: selectedDocuments }
+        : { message: input, sessionId: currentSession };
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('No reader available');
+
+      const assistantMessage: Message = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: '',
+        timestamp: new Date().toISOString(),
+        documentsUsed: mode === 'corpus' ? selectedDocuments : undefined
+      };
+
+      setMessages(prev => [...prev, assistantMessage]);
+
+      const decoder = new TextDecoder();
+      let fullResponse = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        fullResponse += chunk;
+
+        setMessages(prev => prev.map(msg => 
+          msg.id === assistantMessage.id 
+            ? { ...msg, content: fullResponse }
+            : msg
+        ));
+      }
+
+      // Save messages to database
+      await fetch('/api/chat/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: currentSession,
+          userMessage: userMessage.content,
+          assistantMessage: fullResponse,
+          documentsUsed: mode === 'corpus' ? selectedDocuments : undefined,
+          mode
+        })
+      });
+
+    } catch (error) {
+      console.error('Chat error:', error);
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: 'Sorry, an error occurred. Please try again.',
+        timestamp: new Date().toISOString()
+      }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="h-full flex bg-slate-50">
+      {/* Sessions Sidebar */}
+      <div className="w-64 border-r border-slate-200 bg-white flex flex-col">
+        <div className="p-4 border-b border-slate-200">
+          <button
+            onClick={createNewSession}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+          >
+            <Plus size={18} />
+            <span className="font-medium">New Chat</span>
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-3">
+          <h3 className="text-xs font-semibold text-slate-500 uppercase mb-2 px-2">
+            Recent Chats
+          </h3>
+          {sessions.map(session => (
+            <div
+              key={session.id}
+              className={`group relative mb-2 p-3 rounded-lg cursor-pointer transition-all ${
+                currentSession === session.id
+                  ? 'bg-emerald-50 border-2 border-emerald-300'
+                  : 'bg-slate-50 border-2 border-transparent hover:border-slate-300'
+              }`}
+              onClick={() => setCurrentSession(session.id)}
+            >
+              <p className="text-sm font-medium text-slate-800 truncate mb-1">
+                {session.name}
+              </p>
+              <p className="text-xs text-slate-500">
+                {new Date(session.updated_at).toLocaleDateString()}
+              </p>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  deleteSession(session.id);
+                }}
+                className="absolute top-2 right-2 p-1 opacity-0 group-hover:opacity-100 hover:bg-red-100 rounded transition-all"
+              >
+                <Trash2 size={14} className="text-red-600" />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Chat Area */}
+      <div className="flex-1 flex flex-col">
+        {/* Header */}
+        <div className="p-4 border-b border-slate-200 bg-white">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-xl font-bold text-slate-800">AI Research Assistant</h2>
+            <div className="flex gap-2 bg-slate-100 p-1 rounded-lg">
+              <button
+                onClick={() => setMode('corpus')}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+                  mode === 'corpus'
+                    ? 'bg-white text-emerald-600 shadow-sm'
+                    : 'text-slate-600 hover:text-slate-800'
+                }`}
+              >
+                <BookOpen size={16} />
+                Corpus
+              </button>
+              <button
+                onClick={() => setMode('general')}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+                  mode === 'general'
+                    ? 'bg-white text-emerald-600 shadow-sm'
+                    : 'text-slate-600 hover:text-slate-800'
+                }`}
+              >
+                <Sparkles size={16} />
+                General
+              </button>
+            </div>
+          </div>
+
+          {mode === 'corpus' && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg">
+              <FileText size={16} className="text-emerald-600" />
+              <span className="text-sm text-emerald-800">
+                {selectedDocuments.length === 0 
+                  ? 'No corpus selected - please select documents'
+                  : `Searching ${selectedDocuments.length} document${selectedDocuments.length > 1 ? 's' : ''}`
+                }
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {messages.length === 0 ? (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-center max-w-md">
+                <div className="w-20 h-20 mx-auto mb-4 bg-gradient-to-br from-emerald-100 to-teal-100 rounded-full flex items-center justify-center">
+                  <Sparkles className="text-emerald-600" size={40} />
+                </div>
+                <h3 className="text-xl font-bold text-slate-800 mb-2">
+                  Start a Conversation
+                </h3>
+                <p className="text-slate-600 mb-4">
+                  {mode === 'corpus' 
+                    ? 'Ask questions about your selected documents and get AI-powered insights.'
+                    : 'Have a general conversation with the AI assistant.'
+                  }
+                </p>
+                {mode === 'corpus' && selectedDocuments.length === 0 && (
+                  <p className="text-sm text-yellow-700 bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                    ⚠️ Please select documents from the corpus library first
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-6 max-w-4xl mx-auto">
+              {messages.map((message) => (
+                <div
+                  key={message.id}
+                  className={`flex gap-4 ${
+                    message.role === 'user' ? 'justify-end' : 'justify-start'
+                  }`}
+                >
+                  {message.role === 'assistant' && (
+                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center flex-shrink-0">
+                      <Sparkles className="text-white" size={20} />
+                    </div>
+                  )}
+                  
+                  <div
+                    className={`max-w-3xl rounded-2xl px-6 py-4 ${
+                      message.role === 'user'
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-white border border-slate-200 text-slate-800'
+                    }`}
+                  >
+                    <p className="whitespace-pre-wrap leading-relaxed">
+                      {message.content}
+                    </p>
+                    
+                    {message.documentsUsed && message.documentsUsed.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-slate-200">
+                        <p className="text-xs text-slate-500 flex items-center gap-1">
+                          <FileText size={12} />
+                          Referenced {message.documentsUsed.length} document{message.documentsUsed.length > 1 ? 's' : ''}
+                        </p>
+                      </div>
+                    )}
+                    
+                    <p className="text-xs opacity-60 mt-2">
+                      {new Date(message.timestamp).toLocaleTimeString()}
+                    </p>
+                  </div>
+
+                  {message.role === 'user' && (
+                    <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
+                      <span className="text-slate-600 font-semibold">You</span>
+                    </div>
+                  )}
+                </div>
+              ))}
+              
+              {loading && (
+                <div className="flex gap-4 justify-start">
+                  <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center flex-shrink-0">
+                    <Sparkles className="text-white" size={20} />
+                  </div>
+                  <div className="bg-white border border-slate-200 rounded-2xl px-6 py-4">
+                    <Loader2 className="animate-spin text-emerald-600" size={20} />
+                  </div>
+                </div>
+              )}
+              
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+        </div>
+
+        {/* Input */}
+        <div className="p-4 border-t border-slate-200 bg-white">
+          <form onSubmit={handleSubmit} className="max-w-4xl mx-auto">
+            <div className="flex gap-3">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder={
+                  mode === 'corpus' 
+                    ? selectedDocuments.length === 0
+                      ? 'Select documents first...'
+                      : 'Ask a question about your documents...'
+                    : 'Type your message...'
+                }
+                disabled={loading || (mode === 'corpus' && selectedDocuments.length === 0)}
+                className="flex-1 px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:bg-slate-100 disabled:cursor-not-allowed"
+              />
+              <button
+                type="submit"
+                disabled={loading || !input.trim() || (mode === 'corpus' && selectedDocuments.length === 0)}
+                className="px-6 py-3 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2 font-medium"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="animate-spin" size={20} />
+                    Thinking...
+                  </>
+                ) : (
+                  <>
+                    <Send size={20} />
+                    Send
+                  </>
+                )}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
