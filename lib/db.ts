@@ -85,8 +85,47 @@ db.exec(`
     book_title TEXT,
     book_page INTEGER,
     extracted_text TEXT,
+    custom_prompt_name TEXT,
     FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
     FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE SET NULL
+  );
+
+  -- ✅ NEW: Conversation context tracking
+  CREATE TABLE IF NOT EXISTS conversation_contexts (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    keywords TEXT NOT NULL,
+    entities TEXT,
+    first_mentioned TEXT DEFAULT (datetime('now')),
+    last_mentioned TEXT DEFAULT (datetime('now')),
+    mention_count INTEGER DEFAULT 1,
+    relevance_score REAL DEFAULT 1.0,
+    FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+  );
+
+  -- ✅ NEW: Session summaries for long conversations
+  CREATE TABLE IF NOT EXISTS session_summaries (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    key_points TEXT,
+    message_count INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+  );
+
+  -- ✅ NEW: Cross-session memory (topics discussed across all sessions)
+  CREATE TABLE IF NOT EXISTS global_memory (
+    id TEXT PRIMARY KEY,
+    user_id TEXT DEFAULT 'default_user',
+    topic TEXT NOT NULL,
+    context TEXT NOT NULL,
+    sessions TEXT NOT NULL,
+    first_seen TEXT DEFAULT (datetime('now')),
+    last_seen TEXT DEFAULT (datetime('now')),
+    frequency INTEGER DEFAULT 1
   );
 
   CREATE TABLE IF NOT EXISTS prompts (
@@ -104,6 +143,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_messages_session ON chat_messages(session_id);
   CREATE INDEX IF NOT EXISTS idx_prompts_category ON prompts(category);
   CREATE INDEX IF NOT EXISTS idx_chat_sessions_book ON chat_sessions(book_id);
+  CREATE INDEX IF NOT EXISTS idx_contexts_session ON conversation_contexts(session_id);
+  CREATE INDEX IF NOT EXISTS idx_contexts_topic ON conversation_contexts(topic);
+  CREATE INDEX IF NOT EXISTS idx_summaries_session ON session_summaries(session_id);
+  CREATE INDEX IF NOT EXISTS idx_global_memory_topic ON global_memory(topic);
 `);
 
 // Insert default prompts if not exists
@@ -161,6 +204,7 @@ if (existingPrompts.count === 0) {
   console.log('✅ Inserted default prompts');
 }
 
+// ✅ Ensure custom_prompt_name column exists
 try {
   const columns = db.prepare("PRAGMA table_info(chat_messages)").all() as Array<{ name: string }>;
   const hasCustomPromptName = columns.some(col => col.name === 'custom_prompt_name');
@@ -388,8 +432,6 @@ export const renameChatSession = (id: string, name: string) => {
   return stmt.run(name, id);
 };
 
-// Replace the addChatMessage function (lines 426-459) with:
-
 export const addChatMessage = (message: {
   id: string;
   sessionId: string;
@@ -402,7 +444,7 @@ export const addChatMessage = (message: {
   bookTitle?: string;
   bookPage?: number;
   extractedText?: string;
-  customPromptName?: string; // ✅ ADD THIS
+  customPromptName?: string;
 }) => {
   const stmt = db.prepare(`
     INSERT INTO chat_messages (
@@ -423,7 +465,7 @@ export const addChatMessage = (message: {
     message.bookTitle || null,
     message.bookPage || null,
     message.extractedText || null,
-    message.customPromptName || null // ✅ ADD THIS
+    message.customPromptName || null
   );
 };
 
@@ -448,6 +490,177 @@ export const updateChatSessionTimestamp = (sessionId: string) => {
 export const deleteChatSession = (sessionId: string) => {
   const stmt = db.prepare('DELETE FROM chat_sessions WHERE id = ?');
   return stmt.run(sessionId);
+};
+
+// ==================== ✅ NEW: CONVERSATION CONTEXT FUNCTIONS ====================
+
+export const trackConversationContext = (context: {
+  id: string;
+  sessionId: string;
+  topic: string;
+  keywords: string[];
+  entities?: string[];
+  relevanceScore?: number;
+}) => {
+  // Check if topic already exists in this session
+  const existing = db.prepare(`
+    SELECT id, mention_count FROM conversation_contexts 
+    WHERE session_id = ? AND topic = ?
+  `).get(context.sessionId, context.topic) as { id: string; mention_count: number } | undefined;
+
+  if (existing) {
+    // Update existing context
+    const stmt = db.prepare(`
+      UPDATE conversation_contexts 
+      SET mention_count = ?,
+          last_mentioned = datetime('now'),
+          relevance_score = ?,
+          keywords = ?,
+          entities = ?
+      WHERE id = ?
+    `);
+    return stmt.run(
+      existing.mention_count + 1,
+      context.relevanceScore || 1.0,
+      JSON.stringify(context.keywords),
+      context.entities ? JSON.stringify(context.entities) : null,
+      existing.id
+    );
+  } else {
+    // Insert new context
+    const stmt = db.prepare(`
+      INSERT INTO conversation_contexts (
+        id, session_id, topic, keywords, entities, relevance_score, 
+        first_mentioned, last_mentioned, mention_count
+      )
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 1)
+    `);
+    return stmt.run(
+      context.id,
+      context.sessionId,
+      context.topic,
+      JSON.stringify(context.keywords),
+      context.entities ? JSON.stringify(context.entities) : null,
+      context.relevanceScore || 1.0
+    );
+  }
+};
+
+export const getSessionContexts = (sessionId: string) => {
+  const stmt = db.prepare(`
+    SELECT * FROM conversation_contexts 
+    WHERE session_id = ? 
+    ORDER BY relevance_score DESC, last_mentioned DESC
+    LIMIT 10
+  `);
+  return stmt.all(sessionId);
+};
+
+export const createSessionSummary = (summary: {
+  id: string;
+  sessionId: string;
+  summary: string;
+  keyPoints: string[];
+  messageCount: number;
+}) => {
+  const existing = db.prepare(`
+    SELECT id FROM session_summaries WHERE session_id = ?
+  `).get(summary.sessionId) as { id: string } | undefined;
+
+  if (existing) {
+    const stmt = db.prepare(`
+      UPDATE session_summaries 
+      SET summary = ?, key_points = ?, message_count = ?, updated_at = datetime('now')
+      WHERE session_id = ?
+    `);
+    return stmt.run(
+      summary.summary,
+      JSON.stringify(summary.keyPoints),
+      summary.messageCount,
+      summary.sessionId
+    );
+  } else {
+    const stmt = db.prepare(`
+      INSERT INTO session_summaries (
+        id, session_id, summary, key_points, message_count, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    `);
+    return stmt.run(
+      summary.id,
+      summary.sessionId,
+      summary.summary,
+      JSON.stringify(summary.keyPoints),
+      summary.messageCount
+    );
+  }
+};
+
+export const getSessionSummary = (sessionId: string) => {
+  const stmt = db.prepare(`
+    SELECT * FROM session_summaries WHERE session_id = ? ORDER BY updated_at DESC LIMIT 1
+  `);
+  return stmt.get(sessionId);
+};
+
+export const trackGlobalMemory = (memory: {
+  id: string;
+  topic: string;
+  context: string;
+  sessionId: string;
+}) => {
+  const existing = db.prepare(`
+    SELECT id, frequency, sessions FROM global_memory WHERE topic = ?
+  `).get(memory.topic) as { id: string; frequency: number; sessions: string } | undefined;
+
+  if (existing) {
+    const sessions = JSON.parse(existing.sessions);
+    if (!sessions.includes(memory.sessionId)) {
+      sessions.push(memory.sessionId);
+    }
+    
+    const stmt = db.prepare(`
+      UPDATE global_memory 
+      SET context = ?, sessions = ?, frequency = ?, last_seen = datetime('now')
+      WHERE id = ?
+    `);
+    return stmt.run(
+      memory.context,
+      JSON.stringify(sessions),
+      existing.frequency + 1,
+      existing.id
+    );
+  } else {
+    const stmt = db.prepare(`
+      INSERT INTO global_memory (id, topic, context, sessions, first_seen, last_seen, frequency)
+      VALUES (?, ?, ?, ?, datetime('now'), datetime('now'), 1)
+    `);
+    return stmt.run(
+      memory.id,
+      memory.topic,
+      memory.context,
+      JSON.stringify([memory.sessionId])
+    );
+  }
+};
+
+export const getGlobalMemory = (limit: number = 10) => {
+  const stmt = db.prepare(`
+    SELECT * FROM global_memory 
+    ORDER BY frequency DESC, last_seen DESC
+    LIMIT ?
+  `);
+  return stmt.all(limit);
+};
+
+export const searchGlobalMemory = (topic: string) => {
+  const stmt = db.prepare(`
+    SELECT * FROM global_memory 
+    WHERE topic LIKE ? 
+    ORDER BY frequency DESC
+    LIMIT 5
+  `);
+  return stmt.all(`%${topic}%`);
 };
 
 // ==================== BOOKMARK FUNCTIONS ====================

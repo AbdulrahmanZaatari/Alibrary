@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Clock, MessageSquare, FileText, Trash2, Calendar, Search, BookOpen, Database, Pencil } from 'lucide-react';
+import { Clock, MessageSquare, FileText, Trash2, Calendar, Search, BookOpen, Database, Pencil, Download, FileJson, FileCode } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -38,6 +38,7 @@ export default function HistoryPanel() {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterMode, setFilterMode] = useState<'all' | 'general' | 'reader'>('all');
   const [loading, setLoading] = useState(true);
+  const [showExportMenu, setShowExportMenu] = useState(false);
 
   useEffect(() => {
     fetchSessions();
@@ -205,6 +206,108 @@ export default function HistoryPanel() {
       console.error('Error clearing history:', error);
       alert('Failed to clear history');
     }
+  };
+
+  // ✅ NEW: Export as JSON
+  const exportAsJSON = () => {
+    if (!selectedSession || messages.length === 0) return;
+    
+    const session = sessions.find(s => s.id === selectedSession);
+    
+    const exportData = {
+      session: {
+        id: session?.id,
+        name: session?.name,
+        mode: session?.mode,
+        book_title: session?.book_title,
+        created_at: session?.created_at,
+        updated_at: session?.updated_at,
+      },
+      messages: messages.map(msg => ({
+        role: msg.role,
+        content: msg.content,
+        timestamp: msg.created_at,
+        documents_used: msg.documents_used ? JSON.parse(msg.documents_used) : null,
+        document_names: msg.document_names ? JSON.parse(msg.document_names) : null,
+        book_page: msg.book_page,
+        custom_prompt_name: msg.custom_prompt_name,
+      })),
+      exported_at: new Date().toISOString(),
+    };
+
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${session?.name.replace(/[^a-z0-9]/gi, '_')}_${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    
+    setShowExportMenu(false);
+  };
+
+  // ✅ NEW: Export as Markdown
+  const exportAsMarkdown = () => {
+    if (!selectedSession || messages.length === 0) return;
+    
+    const session = sessions.find(s => s.id === selectedSession);
+    
+    let markdown = `# ${session?.name}\n\n`;
+    markdown += `**Mode:** ${session?.mode}\n`;
+    if (session?.book_title) {
+      markdown += `**Book:** ${session.book_title}\n`;
+    }
+    markdown += `**Created:** ${new Date(session?.created_at || '').toLocaleString()}\n`;
+    markdown += `**Last Updated:** ${new Date(session?.updated_at || '').toLocaleString()}\n`;
+    markdown += `**Messages:** ${messages.length}\n\n`;
+    markdown += `---\n\n`;
+
+    messages.forEach((msg, index) => {
+      const timestamp = new Date(msg.created_at).toLocaleString();
+      
+      if (msg.role === 'user') {
+        markdown += `## 👤 User (${timestamp})\n\n`;
+        markdown += `${msg.content}\n\n`;
+        
+        if (msg.custom_prompt_name) {
+          markdown += `*Custom Prompt: ${msg.custom_prompt_name}*\n\n`;
+        }
+        
+        if (msg.book_page) {
+          markdown += `*Page: ${msg.book_page}*\n\n`;
+        }
+      } else {
+        markdown += `## 🤖 Assistant (${timestamp})\n\n`;
+        markdown += `${msg.content}\n\n`;
+        
+        const docNames = msg.document_names ? JSON.parse(msg.document_names) : [];
+        if (docNames.length > 0) {
+          markdown += `**Documents Used:**\n`;
+          docNames.forEach((name: string) => {
+            markdown += `- ${name}\n`;
+          });
+          markdown += `\n`;
+        }
+      }
+      
+      markdown += `---\n\n`;
+    });
+
+    markdown += `\n*Exported on ${new Date().toLocaleString()}*\n`;
+
+    const blob = new Blob([markdown], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${session?.name.replace(/[^a-z0-9]/gi, '_')}_${new Date().toISOString().split('T')[0]}.md`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    
+    setShowExportMenu(false);
   };
 
   const getDocumentNames = (message: ChatMessage): string[] => {
@@ -440,7 +543,7 @@ export default function HistoryPanel() {
             {/* Message Header */}
             <div className="p-4 border-b border-slate-200 bg-white">
               <div className="flex items-start justify-between">
-                <div>
+                <div className="flex-1">
                   <h3 className="text-lg font-semibold text-slate-800">
                     {selectedSessionData?.name}
                   </h3>
@@ -457,10 +560,55 @@ export default function HistoryPanel() {
                     </div>
                   )}
                 </div>
+
+                {/* ✅ NEW: Export Button */}
+                <div className="relative ml-4">
+                  <button
+                    onClick={() => setShowExportMenu(!showExportMenu)}
+                    disabled={messages.length === 0}
+                    className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <Download size={18} />
+                    Export
+                  </button>
+
+                  {/* Export Dropdown Menu */}
+                  {showExportMenu && (
+                    <>
+                      <div 
+                        className="fixed inset-0 z-10" 
+                        onClick={() => setShowExportMenu(false)}
+                      />
+                      <div className="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg border border-slate-200 z-20">
+                        <button
+                          onClick={exportAsJSON}
+                          className="w-full flex items-center gap-3 px-4 py-3 hover:bg-slate-50 transition-colors text-left"
+                        >
+                          <FileJson size={18} className="text-blue-600" />
+                          <div>
+                            <p className="text-sm font-medium text-slate-800">Export as JSON</p>
+                            <p className="text-xs text-slate-500">Structured data</p>
+                          </div>
+                        </button>
+                        <div className="border-t border-slate-200" />
+                        <button
+                          onClick={exportAsMarkdown}
+                          className="w-full flex items-center gap-3 px-4 py-3 hover:bg-slate-50 transition-colors text-left rounded-b-lg"
+                        >
+                          <FileCode size={18} className="text-purple-600" />
+                          <div>
+                            <p className="text-sm font-medium text-slate-800">Export as Markdown</p>
+                            <p className="text-xs text-slate-500">Formatted text</p>
+                          </div>
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
 
-                        {/* Messages */}
+            {/* Messages */}
             <div className="flex-1 overflow-y-auto p-6">
               <div className="space-y-6 max-w-4xl mx-auto">
                 {messages.map((message) => {
@@ -486,7 +634,6 @@ export default function HistoryPanel() {
                             : 'bg-white border border-slate-200 text-slate-800'
                         }`}
                       >
-                        {/* ✅ MARKDOWN RENDERING FOR ASSISTANT */}
                         {message.role === 'assistant' ? (
                           <div 
                             className="prose prose-sm max-w-none"
@@ -552,13 +699,11 @@ export default function HistoryPanel() {
                             </ReactMarkdown>
                           </div>
                         ) : (
-                          // User messages remain plain text
                           <p className="whitespace-pre-wrap leading-relaxed">
                             {message.content}
                           </p>
                         )}
                         
-                        {/* ✅ CUSTOM PROMPT INDICATOR */}
                         {message.role === 'user' && message.custom_prompt_name && (
                           <div className="mt-3 pt-3 border-t border-white/20">
                             <p className="text-xs flex items-center gap-1 font-medium text-white/80">

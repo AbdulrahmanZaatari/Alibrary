@@ -1,6 +1,15 @@
 import { NextRequest } from 'next/server';
 import { generateResponse } from '@/lib/gemini';
-import { getDb } from '@/lib/db';
+import { 
+  getDb,
+  getChatMessages,
+  addChatMessage,
+  updateSessionTimestamp,
+  trackConversationContext,
+  createSessionSummary,
+  trackGlobalMemory,
+  getSessionContexts
+} from '@/lib/db';
 import { analyzeQuery } from '@/lib/queryProcessor';
 import { retrieveSmartContext } from '@/lib/smartRetrieval';
 import { correctChunksBatch } from '@/lib/spellingCorrection';
@@ -10,6 +19,11 @@ import {
   performMultiHopReasoning, 
   formatMultiHopResponse 
 } from '@/lib/multiHopReasoning';
+import {
+  analyzeConversationContext,
+  generateSessionSummary as generateContextSummary,
+  extractTopicsFromMessage
+} from '@/lib/contextAnalyzer';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -132,7 +146,7 @@ export async function POST(req: NextRequest) {
         correctSpelling = false,
         aggressiveCorrection = false,
         customPrompt,
-        enableMultiHop = false // ✅ NEW: Default is FALSE (opt-in)
+        enableMultiHop = false
       } = await req.json();
 
       const userMessage = message || query;
@@ -153,6 +167,94 @@ export async function POST(req: NextRequest) {
         return;
       }
 
+      // ✅ STEP 1: Load conversation history (if session exists)
+      let history: Array<{ role: string; content: string; created_at: string }> = [];
+      if (sessionId) {
+        const db = getDb();
+        history = db.prepare(`
+          SELECT role, content, created_at
+          FROM chat_messages 
+          WHERE session_id = ? 
+          ORDER BY created_at DESC
+          LIMIT 10
+        `).all(sessionId) as Array<{ role: string; content: string; created_at: string }>;
+        
+        history.reverse(); // Chronological order
+        console.log(`📜 Loaded ${history.length} previous messages`);
+      }
+
+      // ✅ STEP 2: Analyze conversation context (every 3 messages)
+      if (sessionId && history.length > 0 && history.length % 3 === 0) {
+        console.log('🧠 Analyzing reader chat context...');
+        
+        const queryLanguage = detectQueryLanguage(userMessage);
+        const conversationHistory = history.map(msg => ({
+          role: msg.role,
+          content: msg.content
+        }));
+
+        try {
+          const context = await analyzeConversationContext(conversationHistory, queryLanguage);
+          
+          if (context.topics.length > 0) {
+            for (const topic of context.topics.slice(0, 3)) {
+              const contextId = `ctx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+              trackConversationContext({
+                id: contextId,
+                sessionId,
+                topic,
+                keywords: context.keywords,
+                entities: context.entities,
+                relevanceScore: 0.8
+              });
+            }
+          }
+
+          if (context.mainTheme) {
+            const memoryId = `mem-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+            trackGlobalMemory({
+              id: memoryId,
+              topic: context.mainTheme,
+              context: `Book: ${bookTitle || 'Unknown'}, Page: ${bookPage || 'N/A'}, Intent: ${context.userIntent}`,
+              sessionId
+            });
+          }
+
+          console.log('✅ Reader context tracked');
+        } catch (error) {
+          console.error('⚠️ Context analysis failed:', error);
+        }
+      }
+
+      // ✅ STEP 3: Generate summary (every 10 messages)
+      if (sessionId && history.length > 0 && history.length % 10 === 0) {
+        console.log('📝 Generating reader session summary...');
+        
+        try {
+          const queryLanguage = detectQueryLanguage(userMessage);
+          const conversationHistory = history.map(msg => ({
+            role: msg.role,
+            content: msg.content
+          }));
+
+          const summaryResult = await generateContextSummary(conversationHistory, queryLanguage);
+          
+          const summaryId = `sum-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+          createSessionSummary({
+            id: summaryId,
+            sessionId,
+            summary: summaryResult.summary,
+            keyPoints: summaryResult.keyPoints,
+            messageCount: history.length
+          });
+
+          console.log('✅ Reader summary created');
+        } catch (error) {
+          console.error('⚠️ Summary generation failed:', error);
+        }
+      }
+
+      // ✅ Route to appropriate handler
       if (documentIds && documentIds.length > 0) {
         console.log('🔄 Using corpus retrieval for Reader Chat');
         await handleCorpusQuery(
@@ -164,16 +266,44 @@ export async function POST(req: NextRequest) {
           correctSpelling, 
           aggressiveCorrection,
           customPrompt,
-          enableMultiHop
+          enableMultiHop,
+          sessionId,
+          history,
+          bookTitle,
+          bookPage
         );
       } 
       else if (sessionId) {
         console.log('💬 Using general chat with history for Reader Chat');
-        await handleGeneralChat(writer, encoder, userMessage, sessionId, extractedText, bookPage);
+        await handleGeneralChat(writer, encoder, userMessage, sessionId, extractedText, bookPage, history);
       }
       else {
         console.log('📝 Using simple query response');
         await handleSimpleQuery(writer, encoder, userMessage, extractedText);
+      }
+
+      // ✅ STEP 4: Save user message
+      if (sessionId) {
+        const messageId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        addChatMessage({
+          id: messageId,
+          sessionId,
+          role: 'user',
+          content: userMessage,
+          mode: 'reader',
+          bookId,
+          bookTitle,
+          bookPage,
+          extractedText
+        });
+
+        updateSessionTimestamp(sessionId);
+
+        // Extract topics
+        const topics = extractTopicsFromMessage(userMessage);
+        if (topics.length > 0) {
+          console.log('📌 Extracted topics:', topics);
+        }
       }
 
       await writer.close();
@@ -207,8 +337,53 @@ async function handleCorpusQuery(
   correctSpelling?: boolean,
   aggressiveCorrection?: boolean,
   customPrompt?: string,
-  enableMultiHop: boolean = false
+  enableMultiHop: boolean = false,
+  sessionId?: string,
+  history?: Array<{ role: string; content: string }>,
+  bookTitle?: string,
+  bookPage?: number
 ) {
+  // ✅ Build conversation context string
+  let conversationContextString = '';
+  let contextualPromptAddition = '';
+  
+  if (sessionId && history && history.length > 0) {
+    const db = getDb();
+    const contexts = getSessionContexts(sessionId) as Array<{
+      topic: string;
+      keywords: string;
+      mention_count: number;
+    }>;
+
+    if (contexts.length > 0) {
+      const recentTopics = contexts
+        .slice(0, 3)
+        .map(c => c.topic)
+        .join(', ');
+      
+      const queryLanguage = detectQueryLanguage(query);
+      contextualPromptAddition = queryLanguage === 'ar'
+        ? `\n\n📋 **الوعي بالسياق:**\nالمواضيع التي ناقشناها مؤخراً: ${recentTopics}\n`
+        : `\n\n📋 **Context Awareness:**\nRecent topics we've discussed: ${recentTopics}\n`;
+    }
+
+    // Build recent conversation history (last 4 messages)
+    const recentHistory = history.slice(-4);
+    if (recentHistory.length > 0) {
+      const queryLanguage = detectQueryLanguage(query);
+      conversationContextString = queryLanguage === 'ar'
+        ? '\n\n📜 **محادثتنا الأخيرة:**\n'
+        : '\n\n📜 **Recent conversation:**\n';
+      
+      recentHistory.forEach(msg => {
+        const label = msg.role === 'user' 
+          ? (queryLanguage === 'ar' ? 'أنت' : 'You')
+          : (queryLanguage === 'ar' ? 'المساعد' : 'Assistant');
+        conversationContextString += `**${label}:** ${msg.content.substring(0, 100)}${msg.content.length > 100 ? '...' : ''}\n\n`;
+      });
+    }
+  }
+
   // ✅ Step 1: Detect languages for all documents
   const { primary: documentLanguage, languages: docLanguages, isMultilingual } = 
     await detectMultipleDocumentLanguages(documentIds);
@@ -232,14 +407,21 @@ async function handleCorpusQuery(
         query,
         documentIds,
         docLanguages,
-        4, // max hops
+        4,
         responseLanguage,
         correctSpelling || false,
         aggressiveCorrection || false
       );
       
-      // Format and stream the multi-hop response
-      const formattedResponse = formatMultiHopResponse(multiHopResult, responseLanguage);
+      // Add conversation context prefix
+      let conversationPrefix = '';
+      if (conversationContextString) {
+        conversationPrefix = responseLanguage === 'ar'
+          ? `💭 **استكمالاً لمحادثتنا:**\n\n${conversationContextString}\n\n---\n\n`
+          : `💭 **Continuing our conversation:**\n\n${conversationContextString}\n\n---\n\n`;
+      }
+      
+      const formattedResponse = conversationPrefix + formatMultiHopResponse(multiHopResult, responseLanguage);
       await writer.write(encoder.encode(formattedResponse));
       
       console.log('✅ Multi-hop response complete');
@@ -247,7 +429,6 @@ async function handleCorpusQuery(
       
     } catch (error) {
       console.error('❌ Multi-hop reasoning failed, falling back to standard retrieval:', error);
-      // Fall through to standard retrieval
     }
   }
 
@@ -408,19 +589,24 @@ async function handleCorpusQuery(
     console.warn('⚠️ No relevant chunks found');
   }
 
-  // ✅ Step 10: Build enhanced prompt
+  // ✅ Step 10: Build enhanced prompt with conversation awareness
   const isArabic = responseLanguage === 'ar';
   
   const systemPrompt = isArabic
-  ? `أنت مساعد بحثي دقيق ومتخصص. استخدم تنسيق Markdown في إجاباتك.
+  ? `أنت مساعد بحثي دقيق ومتخصص يتذكر السياق. استخدم تنسيق Markdown في إجاباتك.
 
 📋 **القواعد الأساسية:**
 
-1. **الأولوية للسياق المقدم:**
+1. **الوعي بالمحادثة:**
+   - **تذكر ما نوقش سابقاً** في هذه المحادثة
+   - عند سؤالك عن محادثات سابقة، ارجع إلى السياق أدناه
+   - اربط الأسئلة الجديدة بالمواضيع السابقة عند الصلة
+
+2. **الأولوية للسياق المقدم:**
    - إذا كانت الإجابة موجودة في المقاطع أدناه، استخدمها وأشر إلى رقم الصفحة والوثيقة
    - اقتبس المعلومات بدقة من السياق
 
-2. **دمج المعرفة العامة بثقة:**
+3. **دمج المعرفة العامة بثقة:**
    - **استخدم معرفتك العامة بحرية** لتقديم إجابات مفيدة وشاملة
    - عند تحليل الأسلوب الأدبي أو المقارنة، استخدم ما هو متاح في النص ثم أضف من معرفتك
    - ضع علامات واضحة:
@@ -428,35 +614,41 @@ async function handleCorpusQuery(
      * **[من المعرفة العامة]** للمعلومات الخارجية
    - **لا تقل "لا يمكنني" أو "يحتاج المزيد من المعلومات"** - قدم أفضل إجابة ممكنة
 
-3. **أجب على جميع الأسئلة بثقة:**
+4. **أجب على جميع الأسئلة بثقة:**
    - قدم إجابات مباشرة ومفيدة
    - إذا لم يكن السياق كافياً، استخدم معرفتك لتكملة الإجابة
    - **تجنب الإجابات الاعتذارية أو المترددة**
 
-4. **تحليل الأسلوب الأدبي - نهج عملي:**
+5. **تحليل الأسلوب الأدبي - نهج عملي:**
    - حلل العناصر المتاحة في النص (السرد، اللغة، المواضيع، الأسلوب)
    - قارن بكتّاب مشهورين بناءً على هذه العناصر
    - قدم أمثلة محددة من النص المتاح
    - أضف من معرفتك عن الكتّاب المشابهين
    - **كن حاسماً في استنتاجاتك**
 
-5. **تنسيق Markdown:**
+6. **تنسيق Markdown:**
    - استخدم **النص الغامق** للتأكيد
    - استخدم القوائم النقطية والمرقمة
    - استخدم > للاقتباسات من النص
 
-${isMultilingual ? '6. **تعدد اللغات:** قد تحتوي المقاطع على نصوص بالإنجليزية، ترجمها حسب الحاجة\n' : ''}
+${isMultilingual ? '7. **تعدد اللغات:** قد تحتوي المقاطع على نصوص بالإنجليزية، ترجمها حسب الحاجة\n' : ''}
 
+${contextualPromptAddition}
 ${customPrompt ? `\n**تعليمات إضافية:**\n${customPrompt}\n` : ''}`
-  : `You are an accurate and specialized research assistant. Use Markdown formatting in your responses.
+  : `You are an accurate and specialized research assistant with conversational memory. Use Markdown formatting in your responses.
 
 📋 **Core Guidelines:**
 
-1. **Prioritize Provided Context:**
+1. **Conversation Awareness:**
+   - **Remember what was discussed previously** in this conversation
+   - When asked about previous exchanges, refer to the context below
+   - Connect new questions to prior topics when relevant
+
+2. **Prioritize Provided Context:**
    - Use passages below and cite page numbers when available
    - Quote information accurately from context
 
-2. **Integrate General Knowledge Confidently:**
+3. **Integrate General Knowledge Confidently:**
    - **Use your general knowledge freely** to provide helpful, comprehensive answers
    - When analyzing literary style or making comparisons, use available text then add from your knowledge
    - Use clear markers:
@@ -464,39 +656,61 @@ ${customPrompt ? `\n**تعليمات إضافية:**\n${customPrompt}\n` : ''}`
      * **[From General Knowledge]** for external information
    - **Never say "I cannot" or "I need more information"** - provide the best answer possible
 
-3. **Answer ALL Questions Confidently:**
+4. **Answer ALL Questions Confidently:**
    - Provide direct, helpful answers
    - If context is insufficient, use your knowledge to complete the answer
    - **Avoid apologetic or hesitant responses**
 
-4. **Literary Style Analysis - Practical Approach:**
+5. **Literary Style Analysis - Practical Approach:**
    - Analyze available elements in text (narrative, language, themes, style)
    - Compare to famous writers based on these elements
    - Provide specific examples from available text
    - Add from your knowledge about similar writers
    - **Be decisive in your conclusions**
 
-5. **Markdown Formatting:**
+6. **Markdown Formatting:**
    - Use **bold** for emphasis
    - Use bullet and numbered lists
    - Use > for quotes from text
 
-${isMultilingual ? '6. **Multilingual:** Passages may contain Arabic text, translate as needed\n' : ''}
+${isMultilingual ? '7. **Multilingual:** Passages may contain Arabic text, translate as needed\n' : ''}
 
+${contextualPromptAddition}
 ${customPrompt ? `\n**Additional Instructions:**\n${customPrompt}\n` : ''}`;
 
   const userQuery = queryAnalysis?.originalQuery || query;
 
   const fullPrompt = contextParts.length > 0
-    ? `${systemPrompt}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n${contextParts.join('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n')}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**${isArabic ? 'سؤال المستخدم' : "User's Question"}:**\n${userQuery}\n\n**${isArabic ? 'إجابتك' : 'Your Answer'}:**`
-    : `${systemPrompt}\n\n**${isArabic ? 'سؤال المستخدم' : "User's Question"}:**\n${userQuery}\n\n**${isArabic ? 'إجابتك' : 'Your Answer'}:**`;
+    ? `${systemPrompt}${conversationContextString}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n${contextParts.join('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n')}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**${isArabic ? 'سؤال المستخدم' : "User's Question"}:**\n${userQuery}\n\n**${isArabic ? 'إجابتك' : 'Your Answer'}:**`
+    : `${systemPrompt}${conversationContextString}\n\n**${isArabic ? 'سؤال المستخدم' : "User's Question"}:**\n${userQuery}\n\n**${isArabic ? 'إجابتك' : 'Your Answer'}:**`;
 
-  console.log('🤖 Querying Gemini...');
+  console.log('🤖 Querying Gemini with conversation awareness...');
   const geminiStream = await generateResponse(fullPrompt);
+  
+  let assistantResponse = '';
   for await (const chunk of geminiStream) {
     const text = chunk.text();
-    if (text) await writer.write(encoder.encode(text));
+    if (text) {
+      assistantResponse += text;
+      await writer.write(encoder.encode(text));
+    }
   }
+  
+  // ✅ Save assistant response
+  if (sessionId) {
+    const messageId = `msg-${Date.now() + 1}-${Math.random().toString(36).substr(2, 9)}`;
+    addChatMessage({
+      id: messageId,
+      sessionId,
+      role: 'assistant',
+      content: assistantResponse,
+      mode: 'reader',
+      bookId: undefined,
+      bookTitle,
+      bookPage
+    });
+  }
+  
   console.log('✅ Response complete');
 }
 
@@ -507,18 +721,28 @@ async function handleGeneralChat(
   message: string,
   sessionId: string,
   extractedText?: string,
-  bookPage?: number
+  bookPage?: number,
+  history?: Array<{ role: string; content: string }>
 ) {
-  const db = getDb();
-  const history = db.prepare(`
-    SELECT role, content 
-    FROM chat_messages 
-    WHERE session_id = ? 
-    ORDER BY created_at ASC
-  `).all(sessionId) as Array<{ role: string; content: string }>;
-
+  // Build conversation context
   let conversationContext = '';
-  if (history.length > 0) {
+  let contextualPromptAddition = '';
+  
+  if (history && history.length > 0) {
+    const db = getDb();
+    const contexts = getSessionContexts(sessionId) as Array<{
+      topic: string;
+      keywords: string;
+    }>;
+
+    if (contexts.length > 0) {
+      const recentTopics = contexts.slice(0, 3).map(c => c.topic).join(', ');
+      const queryLang = detectQueryLanguage(message);
+      contextualPromptAddition = queryLang === 'ar'
+        ? `\n📋 **المواضيع المناقشة:** ${recentTopics}\n`
+        : `\n📋 **Topics discussed:** ${recentTopics}\n`;
+    }
+
     conversationContext = history
       .map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
       .join('\n\n');
@@ -534,11 +758,12 @@ ${extractedText}
 
   const queryLang = detectQueryLanguage(message);
   const langInstruction = queryLang === 'ar' 
-    ? 'Respond in Arabic using proper Markdown formatting.'
-    : 'Respond in English using proper Markdown formatting.';
+    ? 'أجب بالعربية مع استخدام تنسيق Markdown. تذكر المحادثة السابقة.'
+    : 'Respond in English using Markdown formatting. Remember the previous conversation.';
 
   const prompt = conversationContext
-    ? `You are a helpful assistant. ${langInstruction}
+    ? `You are a helpful assistant with conversation memory. ${langInstruction}
+${contextualPromptAddition}
 ${contextSection}
 
 **Previous conversation:**
@@ -553,12 +778,26 @@ ${contextSection}
 **Assistant:**`;
 
   const geminiStream = await generateResponse(prompt);
+  
+  let assistantResponse = '';
   for await (const chunk of geminiStream) {
     const text = chunk.text();
     if (text) {
+      assistantResponse += text;
       await writer.write(encoder.encode(text));
     }
   }
+  
+  // Save assistant response
+  const messageId = `msg-${Date.now() + 1}-${Math.random().toString(36).substr(2, 9)}`;
+  addChatMessage({
+    id: messageId,
+    sessionId,
+    role: 'assistant',
+    content: assistantResponse,
+    mode: 'reader',
+    bookPage
+  });
 }
 
 // ==================== SIMPLE QUERY HANDLER ====================
