@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { Send, Loader2, Sparkles, BookOpen, FileText, Trash2, Plus } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface Message {
   id: string;
@@ -351,66 +353,134 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
               </div>
             </div>
           ) : (
-            <div className="space-y-6 max-w-4xl mx-auto">
-              {messages.map((message) => (
-                <div
-                  key={message.id}
-                  className={`flex gap-4 ${
-                    message.role === 'user' ? 'justify-end' : 'justify-start'
-                  }`}
-                >
-                  {message.role === 'assistant' && (
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center flex-shrink-0">
-                      <Sparkles className="text-white" size={20} />
-                    </div>
-                  )}
-                  
-                  <div
-                    className={`max-w-3xl rounded-2xl px-6 py-4 ${
-                      message.role === 'user'
-                        ? 'bg-emerald-600 text-white'
-                        : 'bg-white border border-slate-200 text-slate-800'
-                    }`}
-                  >
-                    <p className="whitespace-pre-wrap leading-relaxed">
-                      {message.content}
-                    </p>
-                    
-                    {message.documentsUsed && message.documentsUsed.length > 0 && (
-                      <div className="mt-3 pt-3 border-t border-slate-200">
-                        <p className="text-xs text-slate-500 flex items-center gap-1">
-                          <FileText size={12} />
-                          Referenced {message.documentsUsed.length} document{message.documentsUsed.length > 1 ? 's' : ''}
-                        </p>
-                      </div>
-                    )}
-                    
-                    <p className="text-xs opacity-60 mt-2">
-                      {new Date(message.timestamp).toLocaleTimeString()}
-                    </p>
-                  </div>
-
-                  {message.role === 'user' && (
-                    <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
-                      <span className="text-slate-600 font-semibold text-sm">You</span>
-                    </div>
-                  )}
-                </div>
-              ))}
-              
-              {loading && (
-                <div className="flex gap-4 justify-start">
+          <div className="space-y-6 max-w-4xl mx-auto">
+            {messages.map((message) => (
+              <div
+                key={message.id}
+                className={`flex gap-4 ${
+                  message.role === 'user' ? 'justify-end' : 'justify-start'
+                }`}
+              >
+                {message.role === 'assistant' && (
                   <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center flex-shrink-0">
                     <Sparkles className="text-white" size={20} />
                   </div>
-                  <div className="bg-white border border-slate-200 rounded-2xl px-6 py-4">
-                    <Loader2 className="animate-spin text-emerald-600" size={20} />
-                  </div>
+                )}
+                
+                <div
+                  className={`max-w-3xl rounded-2xl px-6 py-4 ${
+                    message.role === 'user'
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-white border border-slate-200 text-slate-800'
+                  }`}
+                >
+                  {/* ✅ MARKDOWN RENDERING FOR ASSISTANT MESSAGES */}
+                  {message.role === 'assistant' ? (
+                    <div 
+                      className="prose prose-sm max-w-none dark:prose-invert"
+                      dir={message.content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
+                    >
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          h1: ({ node, ...props }) => (
+                            <h1 className="text-xl font-bold mb-3 mt-4 text-slate-900" {...props} />
+                          ),
+                          h2: ({ node, ...props }) => (
+                            <h2 className="text-lg font-bold mb-2 mt-3 text-slate-900" {...props} />
+                          ),
+                          h3: ({ node, ...props }) => (
+                            <h3 className="text-base font-bold mb-2 mt-2 text-slate-800" {...props} />
+                          ),
+                          strong: ({ node, ...props }) => (
+                            <strong className="font-bold text-emerald-700" {...props} />
+                          ),
+                          ul: ({ node, ...props }) => (
+                            <ul className="list-disc mr-6 ml-6 my-2 space-y-1" {...props} />
+                          ),
+                          ol: ({ node, ...props }) => (
+                            <ol className="list-decimal mr-6 ml-6 my-2 space-y-1" {...props} />
+                          ),
+                          li: ({ node, ...props }) => (
+                            <li className="leading-relaxed text-slate-700" {...props} />
+                          ),
+                          blockquote: ({ node, ...props }) => (
+                            <blockquote
+                              className="border-l-4 border-r-4 border-emerald-300 pl-4 pr-4 italic my-2 text-slate-600 bg-emerald-50 py-2 rounded-r"
+                              {...props}
+                            />
+                          ),
+                          code: ({ node, inline, ...props }: any) =>
+                            inline ? (
+                              <code
+                                className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                                {...props}
+                              />
+                            ) : (
+                              <code
+                                className="block bg-slate-100 text-slate-800 p-3 rounded my-2 text-sm font-mono overflow-x-auto"
+                                {...props}
+                              />
+                            ),
+                          a: ({ node, ...props }) => (
+                            <a
+                              className="text-emerald-600 hover:text-emerald-800 underline"
+                              {...props}
+                            />
+                          ),
+                          p: ({ node, ...props }) => (
+                            <p className="mb-2 leading-relaxed text-slate-700" {...props} />
+                          ),
+                          em: ({ node, ...props }) => (
+                            <em className="italic text-slate-600" {...props} />
+                          ),
+                        }}
+                      >
+                        {message.content}
+                      </ReactMarkdown>
+                    </div>
+                  ) : (
+                    // User messages remain as plain text
+                    <p className="whitespace-pre-wrap leading-relaxed">
+                      {message.content}
+                    </p>
+                  )}
+                  
+                  {message.documentsUsed && message.documentsUsed.length > 0 && (
+                    <div className="mt-3 pt-3 border-t border-slate-200">
+                      <p className="text-xs text-slate-500 flex items-center gap-1">
+                        <FileText size={12} />
+                        Referenced {message.documentsUsed.length} document{message.documentsUsed.length > 1 ? 's' : ''}
+                      </p>
+                    </div>
+                  )}
+                  
+                  <p className="text-xs opacity-60 mt-2">
+                    {new Date(message.timestamp).toLocaleTimeString()}
+                  </p>
                 </div>
-              )}
-              
-              <div ref={messagesEndRef} />
-            </div>
+
+                {message.role === 'user' && (
+                  <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
+                    <span className="text-slate-600 font-semibold text-sm">You</span>
+                  </div>
+                )}
+              </div>
+            ))}
+            
+            {loading && (
+              <div className="flex gap-4 justify-start">
+                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center flex-shrink-0">
+                  <Sparkles className="text-white" size={20} />
+                </div>
+                <div className="bg-white border border-slate-200 rounded-2xl px-6 py-4">
+                  <Loader2 className="animate-spin text-emerald-600" size={20} />
+                </div>
+              </div>
+            )}
+            
+            <div ref={messagesEndRef} />
+          </div>
           )}
         </div>
 

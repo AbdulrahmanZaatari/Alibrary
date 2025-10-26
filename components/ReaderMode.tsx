@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { 
   ChevronLeft, 
   ChevronRight, 
@@ -22,7 +24,9 @@ import {
   Database,
   Send,
   Clock,
-  Pencil
+  Pencil,
+  Menu,
+  Settings
 } from 'lucide-react';
 
 import 'react-pdf/dist/Page/AnnotationLayer.css';
@@ -105,11 +109,33 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [isLoadingBooks, setIsLoadingBooks] = useState(false);
   const [isLoadingCorpus, setIsLoadingCorpus] = useState(false);
 
+  // Prompts
+  const [availablePrompts, setAvailablePrompts] = useState<Array<{
+    id: string;
+    name: string;
+    template: string;
+    category: string;
+  }>>([]);
+  const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
+  const [showPromptSelector, setShowPromptSelector] = useState(false);
+
+  // UI State
+  const [libraryCollapsed, setLibraryCollapsed] = useState(false);
+  const [showChatSettings, setShowChatSettings] = useState(false);
+
   const hasRestoredRef = useRef(false);
+  const isRestoringRef = useRef(false);
+  const isMountingRef = useRef(true);
 
   useEffect(() => {
     fetchBooks();
     fetchCorpusDocuments();
+    fetchAvailablePrompts();
+    const timer = setTimeout(() => {
+      isMountingRef.current = false;
+    }, 100);
+    
+    return () => clearTimeout(timer);
   }, []);
 
   useEffect(() => {
@@ -141,30 +167,31 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     }
   }, [selectedBook?.id]);
 
-  // ✅ Notify parent of book selection changes
   useEffect(() => {
+    if (isMountingRef.current || isRestoringRef.current) {
+      return;
+    }
+    
     if (onBookSelect) {
+      console.log('📢 Notifying parent of book selection:', selectedBook?.id || null);
       onBookSelect(selectedBook?.id || null);
     }
   }, [selectedBook?.id, onBookSelect]);
 
   useEffect(() => {
-  if (persistedBookId && books.length > 0 && !hasRestoredRef.current) {
-    const book = books.find(b => b.id === persistedBookId);
-    if (book) {
-      console.log('🔄 Restoring book from persistence:', book.title);
-      setSelectedBook(book);
-      hasRestoredRef.current = true;
+    if (persistedBookId && books.length > 0 && !hasRestoredRef.current) {
+      const book = books.find(b => b.id === persistedBookId);
+      if (book) {
+        console.log('🔄 Restoring book from persistence:', book.title);
+        isRestoringRef.current = true; 
+        setSelectedBook(book);
+        hasRestoredRef.current = true;
+        setTimeout(() => {
+          isRestoringRef.current = false;
+        }, 0);
+      }
     }
-  }
-}, [persistedBookId, books]);
-
-// ✅ Notify parent when book selection changes (but don't trigger on mount)
-useEffect(() => {
-  if (hasRestoredRef.current && onBookSelect) {
-    onBookSelect(selectedBook?.id || null);
-  }
-}, [selectedBook?.id, onBookSelect]);
+  }, [persistedBookId, books]);
 
   useEffect(() => {
     if (!selectedBook?.id || currentPage <= 0 || currentPage === selectedBook.current_page) {
@@ -189,7 +216,7 @@ useEffect(() => {
     updateWidth();
     window.addEventListener('resize', updateWidth);
     return () => window.removeEventListener('resize', updateWidth);
-  }, [showChat, showBookmarks, showCorpus]);
+  }, [showChat, showBookmarks, showCorpus, libraryCollapsed]);
 
   useEffect(() => {
     function handleKeyPress(e: KeyboardEvent) {
@@ -220,7 +247,7 @@ useEffect(() => {
 
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
-  }, [showTextPopup, selectedBook, scale]); 
+  }, [showTextPopup, selectedBook, scale]);
 
   // ==================== API FUNCTIONS ====================
 
@@ -273,6 +300,16 @@ useEffect(() => {
       setSelectedCorpus([]);
     } finally {
       setIsLoadingCorpus(false);
+    }
+  }
+
+  async function fetchAvailablePrompts() {
+    try {
+      const res = await fetch('/api/prompts');
+      const data = await res.json();
+      setAvailablePrompts(data.prompts || []);
+    } catch (error) {
+      console.error('Error fetching prompts:', error);
     }
   }
 
@@ -379,7 +416,6 @@ useEffect(() => {
     }
   }
 
-  // ✅ NEW: Rename session function
   async function renameSession(sessionId: string, newName: string) {
     try {
       const res = await fetch('/api/reader-chat/sessions', {
@@ -569,24 +605,26 @@ useEffect(() => {
   async function sendMessageWithSession(sessionId: string, userMessage: string, isNewSession: boolean) {
     const hasCorpus = selectedCorpus.length > 0;
     
-    const endpoint = hasCorpus ? '/api/reader-query' : '/api/chat';
+    const selectedPrompt = selectedPromptId 
+      ? availablePrompts.find(p => p.id === selectedPromptId)?.template 
+      : '';
     
-    const body = hasCorpus 
-      ? {
-          query: userMessage,
-          documentIds: selectedCorpus,
-          extractedText: extractedText || undefined,
-          correctSpelling: correctSpelling,
-          aggressiveCorrection: false,
-        }
-      : {
-          message: extractedText 
-            ? `Context from "${selectedBook!.title}" (Page ${currentPage}):\n\n${extractedText}\n\n---\n\nQuestion: ${userMessage}`
-            : `Book: "${selectedBook!.title}", Page: ${currentPage}.\n\nQuestion: ${userMessage}`,
-          sessionId: sessionId,
-        };
+    const endpoint = '/api/reader-chat';
+    
+    const body = {
+      message: userMessage,
+      sessionId: sessionId,
+      documentIds: hasCorpus ? selectedCorpus : [],
+      bookId: selectedBook?.id,
+      bookTitle: selectedBook?.title,
+      bookPage: currentPage,
+      extractedText: extractedText || undefined,
+      correctSpelling: correctSpelling,
+      aggressiveCorrection: false,
+      customPrompt: selectedPrompt || ''
+    };
 
-    console.log('🔄 Sending to:', endpoint, 'Session:', sessionId);
+    console.log('🔄 Sending to:', endpoint, 'Session:', sessionId, 'Has Corpus:', hasCorpus);
 
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -595,7 +633,8 @@ useEffect(() => {
     });
 
     if (!res.ok) {
-      throw new Error(`API error: ${res.status}`);
+      const errorText = await res.text();
+      throw new Error(`API error: ${res.status} - ${errorText}`);
     }
 
     const reader = res.body?.getReader();
@@ -612,50 +651,47 @@ useEffect(() => {
       const { done, value } = await reader.read();
       if (done) break;
 
-      const chunk = decoder.decode(value);
+      const chunk = decoder.decode(value, { stream: true });
       fullResponse += chunk;
 
       setChatMessages(prev => {
         const newMessages = [...prev];
-        newMessages[newMessages.length - 1] = {
-          role: 'assistant',
-          content: fullResponse
-        };
+        if (newMessages.length > 0) {
+          newMessages[newMessages.length - 1] = {
+            role: 'assistant',
+            content: fullResponse
+          };
+        }
         return newMessages;
       });
     }
 
     console.log('✅ Chat response received');
     
-    await fetch('/api/reader-chat/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionId: sessionId,
-        userMessage,
-        assistantMessage: fullResponse,
-        bookId: selectedBook!.id,
-        bookTitle: selectedBook!.title,
-        bookPage: currentPage,
-        extractedText: extractedText || null,
-        documentsUsed: hasCorpus ? selectedCorpus : null,
-      }),
-    });
+    try {
+      await fetch('/api/reader-chat/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId,
+          userMessage,
+          assistantMessage: fullResponse,
+          customPromptName: selectedPromptId 
+            ? availablePrompts.find(p => p.id === selectedPromptId)?.name 
+            : null,
+        }),
+      });
+      console.log('✅ Messages saved to database');
+    } catch (error) {
+      console.error('❌ Failed to save messages:', error);
+    }
 
     if (isNewSession) {
       try {
-        // Generate simple name from first few words of user message
         const words = userMessage.trim().split(/\s+/).slice(0, 5).join(' ');
         const autoName = words.length > 40 ? words.substring(0, 40) + '...' : words;
         
-        await fetch('/api/reader-chat/sessions', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            id: sessionId, 
-            name: `Chat: ${autoName}` 
-          }),
-        });
+        await renameSession(sessionId, autoName);
         
         if (selectedBook) {
           await loadBookSessions(selectedBook.id);
@@ -664,7 +700,9 @@ useEffect(() => {
         console.error('Failed to auto-name session:', error);
       }
     }
-  } 
+  }
+
+  // ==================== BOOKMARKS ====================
 
   async function loadBookmarks() {
     if (!selectedBook) return;
@@ -763,114 +801,133 @@ useEffect(() => {
 
   return (
     <div className="h-full flex bg-slate-50">
-      {/* Book Library Sidebar */}
-      <div className="w-80 flex flex-col bg-white border-r border-slate-200">
-        <div className="p-4 border-b border-slate-200">
-          <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-            <BookOpen className="text-emerald-600" />
-            My Library
-          </h2>
-
-          {/* Upload Button */}
-          <label className="block mb-3">
-            <input
-              type="file"
-              accept=".pdf"
-              onChange={handleUpload}
-              className="hidden"
-              disabled={uploading}
-            />
-            <div
-              className={`w-full px-4 py-3 rounded-lg cursor-pointer text-center font-medium flex items-center justify-center gap-2 transition-colors ${
-                uploading
-                  ? 'bg-slate-300 cursor-not-allowed'
-                  : 'bg-emerald-600 text-white hover:bg-emerald-700'
-              }`}
+      {/* Book Library Sidebar - Collapsible */}
+      <div className={`bg-white border-r border-slate-200 transition-all duration-300 ${libraryCollapsed ? 'w-14' : 'w-80'} flex flex-col`}>
+        {libraryCollapsed ? (
+          <div className="p-3 border-b border-slate-200">
+            <button
+              onClick={() => setLibraryCollapsed(false)}
+              className="w-full p-2 hover:bg-slate-100 rounded-lg transition-colors"
+              title="Expand Library"
             >
-              {uploading ? (
-                <>
-                  <Loader2 size={18} className="animate-spin" />
-                  Uploading...
-                </>
-              ) : (
-                <>
-                  <Upload size={18} />
-                  Upload Book
-                </>
+              <Menu size={20} className="mx-auto" />
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="p-4 border-b border-slate-200">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-bold flex items-center gap-2">
+                  <BookOpen className="text-emerald-600" />
+                  My Library
+                </h2>
+                <button
+                  onClick={() => setLibraryCollapsed(true)}
+                  className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+                  title="Collapse Library"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <label className="block mb-3">
+                <input
+                  type="file"
+                  accept=".pdf"
+                  onChange={handleUpload}
+                  className="hidden"
+                  disabled={uploading}
+                />
+                <div
+                  className={`w-full px-4 py-3 rounded-lg cursor-pointer text-center font-medium flex items-center justify-center gap-2 transition-colors ${
+                    uploading
+                      ? 'bg-slate-300 cursor-not-allowed'
+                      : 'bg-emerald-600 text-white hover:bg-emerald-700'
+                  }`}
+                >
+                  {uploading ? (
+                    <>
+                      <Loader2 size={18} className="animate-spin" />
+                      Uploading...
+                    </>
+                  ) : (
+                    <>
+                      <Upload size={18} />
+                      Upload Book
+                    </>
+                  )}
+                </div>
+              </label>
+
+              {books.length > 0 && (
+                <select
+                  value={selectedBook?.id || ''}
+                  onChange={(e) => {
+                    const book = books.find(b => b.id === e.target.value);
+                    if (book) setSelectedBook(book);
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                  <option value="">Select a book...</option>
+                  {books.map(book => (
+                    <option key={book.id} value={book.id}>
+                      {book.title} (Page {book.current_page}/{book.page_count})
+                    </option>
+                  ))}
+                </select>
               )}
             </div>
-          </label>
 
-          {/* Book Dropdown Selector */}
-          {books.length > 0 && (
-            <select
-              value={selectedBook?.id || ''}
-              onChange={(e) => {
-                const book = books.find(b => b.id === e.target.value);
-                if (book) setSelectedBook(book);
-              }}
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
-            >
-              <option value="">Select a book...</option>
-              {books.map(book => (
-                <option key={book.id} value={book.id}>
-                  {book.title} (Page {book.current_page}/{book.page_count})
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-
-        {/* Book List */}
-        <div className="flex-1 overflow-y-auto p-4">
-          {books.length === 0 ? (
-            <div className="text-center py-12">
-              <BookOpen size={48} className="mx-auto text-slate-300 mb-3" />
-              <p className="text-slate-500 text-sm">No books yet</p>
-              <p className="text-slate-400 text-xs mt-1">Upload your first book to start reading</p>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {books.map((book) => (
-                <div
-                  key={book.id}
-                  className={`p-3 rounded-lg border cursor-pointer transition-colors ${
-                    selectedBook?.id === book.id
-                      ? 'bg-emerald-50 border-emerald-300'
-                      : 'hover:bg-slate-50 border-slate-200'
-                  }`}
-                  onClick={() => setSelectedBook(book)}
-                >
-                  <div className="flex justify-between items-start">
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-sm truncate">{book.title}</p>
-                      <p className="text-xs text-slate-500">
-                        Page {book.current_page} of {book.page_count}
-                      </p>
-                      <p className="text-xs text-slate-400">
-                        {new Date(book.last_read).toLocaleDateString()}
-                      </p>
-                    </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteBook(book.id);
-                      }}
-                      className="p-1 hover:bg-red-100 rounded transition-colors"
-                    >
-                      <Trash2 size={16} className="text-red-600" />
-                    </button>
-                  </div>
+            <div className="flex-1 overflow-y-auto p-4">
+              {books.length === 0 ? (
+                <div className="text-center py-12">
+                  <BookOpen size={48} className="mx-auto text-slate-300 mb-3" />
+                  <p className="text-slate-500 text-sm">No books yet</p>
+                  <p className="text-slate-400 text-xs mt-1">Upload your first book to start reading</p>
                 </div>
-              ))}
+              ) : (
+                <div className="space-y-2">
+                  {books.map((book) => (
+                    <div
+                      key={book.id}
+                      className={`p-3 rounded-lg border cursor-pointer transition-colors ${
+                        selectedBook?.id === book.id
+                          ? 'bg-emerald-50 border-emerald-300'
+                          : 'hover:bg-slate-50 border-slate-200'
+                      }`}
+                      onClick={() => setSelectedBook(book)}
+                    >
+                      <div className="flex justify-between items-start">
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium text-sm truncate">{book.title}</p>
+                          <p className="text-xs text-slate-500">
+                            Page {book.current_page} of {book.page_count}
+                          </p>
+                          <p className="text-xs text-slate-400">
+                            {new Date(book.last_read).toLocaleDateString()}
+                          </p>
+                        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteBook(book.id);
+                          }}
+                          className="p-1 hover:bg-red-100 rounded transition-colors"
+                        >
+                          <Trash2 size={16} className="text-red-600" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          </>
+        )}
       </div>
 
       {/* PDF Viewer Section */}
       <div className="flex-1 flex flex-col bg-white">
-        {/* Header */}
         <div className="p-4 border-b border-slate-200 flex items-center justify-between">
           <h3 className="font-semibold text-lg truncate">
             {selectedBook?.title || 'Select a book to read'}
@@ -886,6 +943,7 @@ useEffect(() => {
                   <FileText size={18} />
                   {extracting ? 'Extracting...' : 'Extract Text'}
                 </button>
+                
                 <button
                   onClick={() => setShowChat(!showChat)}
                   className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
@@ -893,31 +951,11 @@ useEffect(() => {
                   <MessageSquare size={18} />
                   AI Chat
                 </button>
-                <button
-                  onClick={() => setShowCorpus(!showCorpus)}
-                  className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
-                >
-                  <Database size={18} />
-                  Corpus ({selectedCorpus.length})
-                </button>
-                <button
-                  onClick={() => setCorrectSpelling(!correctSpelling)}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                    correctSpelling 
-                      ? 'bg-orange-600 text-white hover:bg-orange-700' 
-                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                  }`}
-                  title="Auto-correct spelling errors in retrieved text"
-                >
-                  <Sparkles size={18} />
-                  {correctSpelling ? 'Correction ON' : 'Correction OFF'}
-                </button>
               </>
             )}
           </div>
         </div>
 
-        {/* PDF Controls */}
         {selectedBook && (
           <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 bg-slate-50">
             <div className="flex items-center gap-3">
@@ -999,7 +1037,6 @@ useEffect(() => {
           </div>
         )}
 
-        {/* PDF Viewer */}
         <div 
           id="pdf-container"
           className="flex-1 overflow-auto bg-slate-100"
@@ -1057,7 +1094,6 @@ useEffect(() => {
           )}
         </div>
 
-        {/* Keyboard Shortcuts Help */}
         {selectedBook && (
           <div className="px-4 py-2 border-t border-slate-200 bg-slate-50">
             <p className="text-xs text-slate-600 text-center">
@@ -1122,24 +1158,92 @@ useEffect(() => {
         </div>
       )}
 
-      {/* AI Chat Sidebar */}
+      {/* AI Chat Sidebar - Enhanced */}
       {showChat && selectedBook && (
-        <div className="w-96 bg-white border-l border-slate-200 flex flex-col">
+        <div className="w-[500px] bg-white border-l border-slate-200 flex flex-col">
           <div className="p-4 border-b border-slate-200">
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-semibold text-lg flex items-center gap-2">
                 <MessageSquare size={20} className="text-blue-600" />
                 AI Assistant
               </h3>
-              <button
-                onClick={() => setShowChat(false)}
-                className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
-              >
-                <X size={20} />
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowChatSettings(!showChatSettings)}
+                  className={`p-2 rounded-lg transition-colors ${showChatSettings ? 'bg-blue-100' : 'hover:bg-slate-100'}`}
+                  title="Chat Settings"
+                >
+                  <Settings size={20} />
+                </button>
+                <button
+                  onClick={() => setShowChat(false)}
+                  className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
             </div>
 
-            {/* Session Management Controls */}
+            {/* Chat Settings Panel */}
+            {showChatSettings && (
+              <div className="mb-3 p-3 bg-slate-50 rounded-lg space-y-3">
+                {/* Prompt Selector */}
+                <div>
+                  <label className="text-xs font-medium text-slate-700 mb-2 block">Custom Prompt</label>
+                  <select
+                    value={selectedPromptId || ''}
+                    onChange={(e) => setSelectedPromptId(e.target.value || null)}
+                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  >
+                    <option value="">No custom prompt</option>
+                    {availablePrompts.map(prompt => (
+                      <option key={prompt.id} value={prompt.id}>
+                        {prompt.name} ({prompt.category})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Corpus Selection */}
+                <div>
+                  <label className="text-xs font-medium text-slate-700 mb-2 block">Corpus Documents ({selectedCorpus.length} selected)</label>
+                  <div className="max-h-32 overflow-y-auto border border-slate-200 rounded-lg p-2 space-y-1">
+                    {corpusDocuments.length === 0 ? (
+                      <p className="text-xs text-slate-500 text-center py-2">No corpus documents available</p>
+                    ) : (
+                      corpusDocuments.map((doc) => (
+                        <label key={doc.id} className="flex items-center gap-2 p-1.5 hover:bg-slate-100 rounded cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedCorpus.includes(doc.id)}
+                            onChange={() => toggleCorpusDocument(doc.id)}
+                            className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500"
+                          />
+                          <span className="text-xs text-slate-700">{doc.display_name}</span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Spelling Correction Toggle */}
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-medium text-slate-700">Spelling Correction</label>
+                  <button
+                    onClick={() => setCorrectSpelling(!correctSpelling)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                      correctSpelling 
+                        ? 'bg-orange-600 text-white' 
+                        : 'bg-slate-200 text-slate-700'
+                    }`}
+                  >
+                    {correctSpelling ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Session Management */}
             <div className="space-y-2">
               <div className="flex gap-2">
                 <button
@@ -1164,7 +1268,7 @@ useEffect(() => {
               )}
             </div>
 
-            {/* Session List Dropdown */}
+            {/* Session List */}
             {showSessionList && bookSessions.length > 0 && (
               <div className="mt-3 max-h-48 overflow-y-auto border border-slate-200 rounded-lg">
                 {bookSessions.map((session) => (
@@ -1190,7 +1294,6 @@ useEffect(() => {
                         </p>
                       </div>
                       <div className="flex gap-1">
-                        {/* ✅ NEW: Rename button */}
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1221,6 +1324,7 @@ useEffect(() => {
             )}
           </div>
 
+          {/* Messages */}
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {chatMessages.length === 0 ? (
               <div className="text-center py-12">
@@ -1229,18 +1333,54 @@ useEffect(() => {
                 <p className="text-slate-400 text-xs mt-1">
                   {selectedCorpus.length > 0 
                     ? `Using ${selectedCorpus.length} corpus document${selectedCorpus.length !== 1 ? 's' : ''}`
-                    : 'No corpus documents selected'}
+                    : 'Configure settings above to enhance responses'}
                 </p>
               </div>
             ) : (
               chatMessages.map((msg, idx) => (
                 <div key={`${currentSessionId}-msg-${idx}`} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[80%] p-3 rounded-lg ${
+                  <div className={`max-w-[85%] rounded-lg ${
                     msg.role === 'user' 
-                      ? 'bg-blue-600 text-white' 
-                      : 'bg-slate-100 text-slate-800'
+                      ? 'bg-blue-600 text-white p-3' 
+                      : 'bg-slate-50 border border-slate-200'
                   }`}>
-                    <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                    {msg.role === 'assistant' ? (
+                      <div 
+                        className="prose prose-sm max-w-none p-3"
+                        dir={msg.content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
+                      >
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            h1: ({ node, ...props }) => <h1 className="text-lg font-bold mb-2 mt-3 text-slate-900" {...props} />,
+                            h2: ({ node, ...props }) => <h2 className="text-base font-bold mb-2 mt-2 text-slate-900" {...props} />,
+                            h3: ({ node, ...props }) => <h3 className="text-sm font-bold mb-1 mt-2 text-slate-800" {...props} />,
+                            strong: ({ node, ...props }) => <strong className="font-bold text-blue-700" {...props} />,
+                            ul: ({ node, ...props }) => <ul className="list-disc mr-5 ml-5 my-2 space-y-1" {...props} />,
+                            ol: ({ node, ...props }) => <ol className="list-decimal mr-5 ml-5 my-2 space-y-1" {...props} />,
+                            li: ({ node, ...props }) => <li className="leading-relaxed text-slate-700 text-sm" {...props} />,
+                            blockquote: ({ node, ...props }) => (
+                              <blockquote className="border-l-4 border-r-4 border-blue-300 pl-3 pr-3 italic my-2 text-slate-600 bg-blue-50 py-2 rounded-r text-sm" {...props} />
+                            ),
+                            code: (props: any) => {
+                              const { inline, ...rest } = props || {};
+                              return inline ? (
+                                <code className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-xs font-mono" {...rest} />
+                              ) : (
+                                <code className="block bg-slate-100 text-slate-800 p-2 rounded my-2 text-xs font-mono overflow-x-auto" {...rest} />
+                              );
+                            },
+                            a: ({ node, ...props }) => <a className="text-blue-600 hover:text-blue-800 underline" {...props} />,
+                            p: ({ node, ...props }) => <p className="mb-2 leading-relaxed text-slate-700 text-sm" {...props} />,
+                            em: ({ node, ...props }) => <em className="italic text-slate-600" {...props} />,
+                          }}
+                        >
+                          {msg.content}
+                        </ReactMarkdown>
+                      </div>
+                    ) : (
+                      <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                    )}
                   </div>
                 </div>
               ))
@@ -1254,6 +1394,7 @@ useEffect(() => {
             )}
           </div>
 
+          {/* Input */}
           <div className="p-4 border-t border-slate-200">
             <div className="flex gap-2 items-end">
               <textarea
@@ -1268,10 +1409,7 @@ useEffect(() => {
                 placeholder="Ask a question... (Shift+Enter for new line)"
                 rows={1}
                 className="flex-1 px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none min-h-[40px] max-h-[200px] overflow-y-auto"
-                style={{
-                  height: 'auto',
-                  minHeight: '40px',
-                }}
+                style={{ height: 'auto', minHeight: '40px' }}
                 onInput={(e) => {
                   const target = e.target as HTMLTextAreaElement;
                   target.style.height = 'auto';
@@ -1286,54 +1424,6 @@ useEffect(() => {
                 <Send size={20} />
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* Corpus Selector Sidebar */}
-      {showCorpus && selectedBook && (
-        <div className="w-96 bg-white border-l border-slate-200 flex flex-col">
-          <div className="flex items-center justify-between p-4 border-b border-slate-200">
-            <h3 className="font-semibold text-lg flex items-center gap-2">
-              <Database size={20} className="text-purple-600" />
-              Corpus Selection
-            </h3>
-            <button
-              onClick={() => setShowCorpus(false)}
-              className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
-            >
-              <X size={20} />
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-4">
-            <p className="text-sm text-slate-600 mb-4">
-              Select corpus documents for AI queries ({selectedCorpus.length} selected)
-            </p>
-            {corpusDocuments.length === 0 ? (
-              <div className="text-center py-12">
-                <Database size={48} className="mx-auto text-slate-300 mb-3" />
-                <p className="text-slate-500 text-sm">No corpus documents</p>
-                <p className="text-slate-400 text-xs mt-1">Upload documents in Chat view</p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {corpusDocuments.map((doc) => (
-                  <label
-                    key={doc.id}
-                    className="flex items-center gap-3 p-3 border border-slate-200 rounded-lg cursor-pointer hover:bg-slate-50 transition-colors"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedCorpus.includes(doc.id)}
-                      onChange={() => toggleCorpusDocument(doc.id)}
-                      className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500"
-                    />
-                    <span className="text-sm font-medium text-slate-700">{doc.display_name}</span>
-                  </label>
-                ))}
-              </div>
-            )}
           </div>
         </div>
       )}

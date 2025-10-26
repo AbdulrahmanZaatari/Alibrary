@@ -1,12 +1,11 @@
 import { NextRequest } from 'next/server';
 import { generateResponse } from '@/lib/gemini';
+import { getDb } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 export async function POST(request: NextRequest) {
-  console.log('💬 /api/chat - General chat request received');
-  
   const encoder = new TextEncoder();
   const stream = new TransformStream();
   const writer = stream.writable.getWriter();
@@ -15,36 +14,42 @@ export async function POST(request: NextRequest) {
     try {
       const { message, sessionId } = await request.json();
 
-      // ✅ GUARD: Don't handle reader sessions here
-      if (sessionId && sessionId.startsWith('reader-')) {
-        console.warn('⚠️  Reader session detected - redirecting to /api/reader-chat');
-        await writer.write(encoder.encode('Error: Use /api/reader-chat for reader mode sessions'));
-        await writer.close();
-        return;
-      }
-
       if (!message || !sessionId) {
-        console.error('❌ Missing message or sessionId');
-        await writer.write(encoder.encode('Error: Missing message or session ID'));
+        await writer.write(encoder.encode('Error: Missing message or sessionId'));
         await writer.close();
         return;
       }
 
-      console.log('📝 Message:', message);
-      console.log('🔖 Session:', sessionId);
+      const db = getDb();
+      // Fetch history from the 'messages' table for the main chat panel
+      const history = db.prepare(`
+        SELECT role, content 
+        FROM chat_messages 
+        WHERE session_id = ? 
+        ORDER BY created_at ASC
+      `).all(sessionId) as Array<{ role: string; content: string }>;
 
-      // Build general conversation prompt
-      const prompt = `You are a knowledgeable Islamic studies assistant. Answer the following question in a helpful, accurate, and respectful manner. If the question is in Arabic, respond in Arabic. If it's in English, respond in English.
+      let conversationContext = '';
+      if (history.length > 0) {
+        conversationContext = history
+          .map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
+          .join('\n\n');
+      }
 
-User question: ${message}
+      const prompt = conversationContext
+        ? `You are a helpful and knowledgeable research assistant. Continue the conversation naturally.
 
-Please provide a clear and informative answer.`;
+**Previous conversation:**
+${conversationContext}
 
-      console.log('🤖 Querying Gemini for general chat...');
+**User:** ${message}
+**Assistant:**`
+        : `You are a helpful and knowledgeable research assistant.
 
-      // ✅ Use gemini.ts generateResponse
+**User:** ${message}
+**Assistant:**`;
+
       const geminiStream = await generateResponse(prompt);
-
       for await (const chunk of geminiStream) {
         const text = chunk.text();
         if (text) {
@@ -52,27 +57,23 @@ Please provide a clear and informative answer.`;
         }
       }
 
-      console.log('✅ General chat response complete');
       await writer.close();
 
     } catch (error) {
-      console.error('❌ Error in /api/chat:', error);
-      console.error('Error details:', error instanceof Error ? error.message : 'Unknown error');
-      
+      console.error('❌ General chat error:', error);
       try {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-        await writer.write(encoder.encode(`Error: ${errorMessage}`));
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+        await writer.write(encoder.encode(`Error: ${errorMsg}`));
         await writer.close();
-      } catch (writeError) {
-        console.error('Failed to write error:', writeError);
-      }
+      } catch {}
     }
   })();
 
   return new Response(stream.readable, {
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',
-      'Transfer-Encoding': 'chunked',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
     },
   });
 }

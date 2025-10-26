@@ -161,6 +161,19 @@ if (existingPrompts.count === 0) {
   console.log('✅ Inserted default prompts');
 }
 
+try {
+  const columns = db.prepare("PRAGMA table_info(chat_messages)").all() as Array<{ name: string }>;
+  const hasCustomPromptName = columns.some(col => col.name === 'custom_prompt_name');
+  
+  if (!hasCustomPromptName) {
+    console.log('🔄 Adding custom_prompt_name column to chat_messages...');
+    db.exec('ALTER TABLE chat_messages ADD COLUMN custom_prompt_name TEXT');
+    console.log('✅ Migration complete');
+  }
+} catch (error) {
+  console.error('Migration error:', error);
+}
+
 export const getDb = () => db;
 
 // ==================== DOCUMENT FUNCTIONS ====================
@@ -375,6 +388,8 @@ export const renameChatSession = (id: string, name: string) => {
   return stmt.run(name, id);
 };
 
+// Replace the addChatMessage function (lines 426-459) with:
+
 export const addChatMessage = (message: {
   id: string;
   sessionId: string;
@@ -387,13 +402,14 @@ export const addChatMessage = (message: {
   bookTitle?: string;
   bookPage?: number;
   extractedText?: string;
+  customPromptName?: string; // ✅ ADD THIS
 }) => {
   const stmt = db.prepare(`
     INSERT INTO chat_messages (
       id, session_id, role, content, documents_used, document_names, mode, 
-      book_id, book_title, book_page, extracted_text, created_at
+      book_id, book_title, book_page, extracted_text, custom_prompt_name, created_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
   `);
   return stmt.run(
     message.id,
@@ -406,7 +422,8 @@ export const addChatMessage = (message: {
     message.bookId || null,
     message.bookTitle || null,
     message.bookPage || null,
-    message.extractedText || null
+    message.extractedText || null,
+    message.customPromptName || null // ✅ ADD THIS
   );
 };
 

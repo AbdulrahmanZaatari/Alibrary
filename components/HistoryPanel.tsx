@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { Clock, MessageSquare, FileText, Trash2, Calendar, Search, BookOpen, Database, Pencil } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface ChatSession {
   id: string;
@@ -25,6 +27,8 @@ interface ChatMessage {
   created_at: string;
   book_page?: number;
   extracted_text?: string;
+  custom_prompt?: string; 
+  custom_prompt_name?: string; 
 }
 
 export default function HistoryPanel() {
@@ -456,7 +460,7 @@ export default function HistoryPanel() {
               </div>
             </div>
 
-            {/* Messages */}
+                        {/* Messages */}
             <div className="flex-1 overflow-y-auto p-6">
               <div className="space-y-6 max-w-4xl mx-auto">
                 {messages.map((message) => {
@@ -482,9 +486,87 @@ export default function HistoryPanel() {
                             : 'bg-white border border-slate-200 text-slate-800'
                         }`}
                       >
-                        <p className="whitespace-pre-wrap leading-relaxed">
-                          {message.content}
-                        </p>
+                        {/* ✅ MARKDOWN RENDERING FOR ASSISTANT */}
+                        {message.role === 'assistant' ? (
+                          <div 
+                            className="prose prose-sm max-w-none"
+                            dir={message.content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
+                          >
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={{
+                                h1: ({ node, ...props }) => (
+                                  <h1 className="text-lg font-bold mb-2 mt-3 text-slate-900" {...props} />
+                                ),
+                                h2: ({ node, ...props }) => (
+                                  <h2 className="text-base font-bold mb-2 mt-2 text-slate-900" {...props} />
+                                ),
+                                h3: ({ node, ...props }) => (
+                                  <h3 className="text-sm font-bold mb-1 mt-2 text-slate-800" {...props} />
+                                ),
+                                strong: ({ node, ...props }) => (
+                                  <strong className="font-bold text-emerald-700" {...props} />
+                                ),
+                                ul: ({ node, ...props }) => (
+                                  <ul className="list-disc mr-5 ml-5 my-2 space-y-1" {...props} />
+                                ),
+                                ol: ({ node, ...props }) => (
+                                  <ol className="list-decimal mr-5 ml-5 my-2 space-y-1" {...props} />
+                                ),
+                                li: ({ node, ...props }) => (
+                                  <li className="leading-relaxed text-slate-700 text-sm" {...props} />
+                                ),
+                                blockquote: ({ node, ...props }) => (
+                                  <blockquote
+                                    className="border-l-4 border-r-4 border-emerald-300 pl-3 pr-3 italic my-2 text-slate-600 bg-emerald-50 py-2 rounded-r text-sm"
+                                    {...props}
+                                  />
+                                ),
+                                code: ({ node, inline, ...props }: any) =>
+                                  inline ? (
+                                    <code
+                                      className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-xs font-mono"
+                                      {...props}
+                                    />
+                                  ) : (
+                                    <code
+                                      className="block bg-slate-100 text-slate-800 p-2 rounded my-2 text-xs font-mono overflow-x-auto"
+                                      {...props}
+                                    />
+                                  ),
+                                a: ({ node, ...props }) => (
+                                  <a
+                                    className="text-emerald-600 hover:text-emerald-800 underline"
+                                    {...props}
+                                  />
+                                ),
+                                p: ({ node, ...props }) => (
+                                  <p className="mb-2 leading-relaxed text-slate-700 text-sm" {...props} />
+                                ),
+                                em: ({ node, ...props }) => (
+                                  <em className="italic text-slate-600" {...props} />
+                                ),
+                              }}
+                            >
+                              {message.content}
+                            </ReactMarkdown>
+                          </div>
+                        ) : (
+                          // User messages remain plain text
+                          <p className="whitespace-pre-wrap leading-relaxed">
+                            {message.content}
+                          </p>
+                        )}
+                        
+                        {/* ✅ CUSTOM PROMPT INDICATOR */}
+                        {message.role === 'user' && message.custom_prompt_name && (
+                          <div className="mt-3 pt-3 border-t border-white/20">
+                            <p className="text-xs flex items-center gap-1 font-medium text-white/80">
+                              <FileText size={12} />
+                              Custom Prompt Used: {message.custom_prompt_name}
+                            </p>
+                          </div>
+                        )}
                         
                         {message.book_page && (
                           <div className={`mt-3 pt-3 border-t ${message.role === 'user' ? 'border-white/20' : 'border-purple-200'}`}>

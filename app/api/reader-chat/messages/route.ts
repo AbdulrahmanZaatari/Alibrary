@@ -30,6 +30,8 @@ export async function GET(request: NextRequest) {
   }
 }
 
+// Replace the POST function (lines 33-124) with:
+
 export async function POST(request: NextRequest) {
   try {
     const { 
@@ -40,7 +42,8 @@ export async function POST(request: NextRequest) {
       bookTitle, 
       bookPage,
       extractedText,
-      documentsUsed 
+      documentsUsed,
+      customPromptName // ✅ ADD THIS
     } = await request.json();
 
     if (!sessionId || !userMessage || !assistantMessage) {
@@ -53,7 +56,7 @@ export async function POST(request: NextRequest) {
     const db = getDb();
     const now = new Date().toISOString();
     
-    // ✅ Get document names if corpus was used
+    // Get document names if corpus was used
     let documentNames: string[] = [];
     if (documentsUsed && Array.isArray(documentsUsed) && documentsUsed.length > 0) {
       const placeholders = documentsUsed.map(() => '?').join(',');
@@ -64,14 +67,14 @@ export async function POST(request: NextRequest) {
       documentNames = docs.map((doc: any) => doc.display_name);
     }
 
-    // Insert user message
+    // ✅ Insert user message WITH custom_prompt_name
     const userMsgId = randomUUID();
     db.prepare(`
       INSERT INTO chat_messages (
         id, session_id, role, content, mode, 
         book_id, book_title, book_page, extracted_text,
-        documents_used, document_names, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        documents_used, document_names, custom_prompt_name, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       userMsgId,
       sessionId,
@@ -84,6 +87,7 @@ export async function POST(request: NextRequest) {
       extractedText || null,
       null,
       null,
+      customPromptName || null, // ✅ ADD THIS
       now
     );
 
