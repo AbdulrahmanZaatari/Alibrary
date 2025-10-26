@@ -76,7 +76,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [containerWidth, setContainerWidth] = useState<number>(0);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(false);
-  
+  const [enableMultiHop, setEnableMultiHop] = useState(false);
   // Text extraction
   const [extractedText, setExtractedText] = useState('');
   const [showTextPopup, setShowTextPopup] = useState(false);
@@ -621,7 +621,8 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
       extractedText: extractedText || undefined,
       correctSpelling: correctSpelling,
       aggressiveCorrection: false,
-      customPrompt: selectedPrompt || ''
+      customPrompt: selectedPrompt || '',
+      enableMultiHop: enableMultiHop
     };
 
     console.log('🔄 Sending to:', endpoint, 'Session:', sessionId, 'Has Corpus:', hasCorpus);
@@ -1226,6 +1227,24 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                   </div>
                 </div>
 
+                {/* ✅ NEW: Multi-Hop Reasoning Toggle */}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-xs font-medium text-slate-700">Multi-Hop Reasoning</label>
+                    <p className="text-[10px] text-slate-500 mt-0.5">For complex analysis questions</p>
+                  </div>
+                  <button
+                    onClick={() => setEnableMultiHop(!enableMultiHop)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                      enableMultiHop 
+                        ? 'bg-blue-600 text-white' 
+                        : 'bg-slate-200 text-slate-700'
+                    }`}
+                  >
+                    {enableMultiHop ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+
                 {/* Spelling Correction Toggle */}
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-medium text-slate-700">Spelling Correction</label>
@@ -1335,6 +1354,12 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                     ? `Using ${selectedCorpus.length} corpus document${selectedCorpus.length !== 1 ? 's' : ''}`
                     : 'Configure settings above to enhance responses'}
                 </p>
+                 {/* ✅ NEW: Multi-hop indicator */}
+                {enableMultiHop && selectedCorpus.length > 0 && (
+                  <p className="text-blue-600 text-xs mt-2 font-medium">
+                    🧠 Multi-hop reasoning enabled
+                  </p>
+                )}
               </div>
             ) : (
               chatMessages.map((msg, idx) => (

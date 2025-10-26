@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Send, Loader2, Sparkles, BookOpen, FileText, Trash2, Plus } from 'lucide-react';
+import { Send, Loader2, Sparkles, BookOpen, FileText, Trash2, Plus, Settings, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -31,6 +31,8 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
   const [currentSession, setCurrentSession] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [mode, setMode] = useState<'corpus' | 'general'>('corpus');
+  const [showSettings, setShowSettings] = useState(false);
+  const [enableMultiHop, setEnableMultiHop] = useState(false); // ✅ NEW: Multi-hop toggle
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -57,7 +59,6 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
       const data = await res.json();
       setSessions(data);
       
-      // Auto-select first session or create new one
       if (data.length > 0 && !currentSession) {
         setCurrentSession(data[0].id);
       } else if (data.length === 0) {
@@ -130,7 +131,6 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
       return;
     }
 
-    // ✅ Check if this is the first message in the session
     const isNewSession = messages.length === 0;
     const userMessageContent = input.trim();
 
@@ -148,8 +148,19 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
     try {
       const endpoint = mode === 'corpus' ? '/api/query' : '/api/chat';
       const body = mode === 'corpus' 
-        ? { query: userMessageContent, documentIds: selectedDocuments }
-        : { message: userMessageContent, sessionId: currentSession };
+        ? { 
+            query: userMessageContent, 
+            documentIds: selectedDocuments,
+            enableMultiHop // ✅ Pass multi-hop setting for corpus mode
+          }
+        : { 
+            message: userMessageContent, 
+            sessionId: currentSession,
+            documentIds: selectedDocuments.length > 0 ? selectedDocuments : undefined,
+            enableMultiHop // ✅ Pass multi-hop setting for general mode
+          };
+
+      console.log('🔄 Sending request:', { endpoint, mode, enableMultiHop, hasDocuments: selectedDocuments.length > 0 });
 
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -165,7 +176,7 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
         role: 'assistant',
         content: '',
         timestamp: new Date().toISOString(),
-        documentsUsed: mode === 'corpus' ? selectedDocuments : undefined
+        documentsUsed: mode === 'corpus' || selectedDocuments.length > 0 ? selectedDocuments : undefined
       };
 
       setMessages(prev => [...prev, assistantMessage]);
@@ -195,15 +206,14 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
           sessionId: currentSession,
           userMessage: userMessageContent,
           assistantMessage: fullResponse,
-          documentsUsed: mode === 'corpus' ? selectedDocuments : undefined,
+          documentsUsed: mode === 'corpus' || selectedDocuments.length > 0 ? selectedDocuments : undefined,
           mode
         })
       });
 
-      // ✅ Auto-name session based on first prompt
+      // Auto-name session based on first prompt
       if (isNewSession) {
         try {
-          // Generate simple name from first few words
           const words = userMessageContent.split(/\s+/).slice(0, 5).join(' ');
           const autoName = words.length > 40 ? words.substring(0, 40) + '...' : words;
           
@@ -289,31 +299,64 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
         <div className="p-4 border-b border-slate-200 bg-white">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-xl font-bold text-slate-800">AI Research Assistant</h2>
-            <div className="flex gap-2 bg-slate-100 p-1 rounded-lg">
+            <div className="flex items-center gap-2">
+              <div className="flex gap-2 bg-slate-100 p-1 rounded-lg">
+                <button
+                  onClick={() => setMode('corpus')}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+                    mode === 'corpus'
+                      ? 'bg-white text-emerald-600 shadow-sm'
+                      : 'text-slate-600 hover:text-slate-800'
+                  }`}
+                >
+                  <BookOpen size={16} />
+                  Corpus
+                </button>
+                <button
+                  onClick={() => setMode('general')}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+                    mode === 'general'
+                      ? 'bg-white text-emerald-600 shadow-sm'
+                      : 'text-slate-600 hover:text-slate-800'
+                  }`}
+                >
+                  <Sparkles size={16} />
+                  General
+                </button>
+              </div>
+
+              {/* ✅ NEW: Settings Button */}
               <button
-                onClick={() => setMode('corpus')}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
-                  mode === 'corpus'
-                    ? 'bg-white text-emerald-600 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-800'
-                }`}
+                onClick={() => setShowSettings(!showSettings)}
+                className={`p-2 rounded-lg transition-colors ${showSettings ? 'bg-emerald-100' : 'hover:bg-slate-100'}`}
+                title="Chat Settings"
               >
-                <BookOpen size={16} />
-                Corpus
-              </button>
-              <button
-                onClick={() => setMode('general')}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
-                  mode === 'general'
-                    ? 'bg-white text-emerald-600 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-800'
-                }`}
-              >
-                <Sparkles size={16} />
-                General
+                <Settings size={20} />
               </button>
             </div>
           </div>
+
+          {/* ✅ NEW: Settings Panel */}
+          {showSettings && (
+            <div className="mb-3 p-3 bg-slate-50 rounded-lg">
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Multi-Hop Reasoning</label>
+                  <p className="text-xs text-slate-500 mt-0.5">For complex analysis questions</p>
+                </div>
+                <button
+                  onClick={() => setEnableMultiHop(!enableMultiHop)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                    enableMultiHop 
+                      ? 'bg-blue-600 text-white' 
+                      : 'bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  {enableMultiHop ? 'ON' : 'OFF'}
+                </button>
+              </div>
+            </div>
+          )}
 
           {mode === 'corpus' && (
             <div className="flex items-center gap-2 px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg">
@@ -324,6 +367,27 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                   : `Searching ${selectedDocuments.length} document${selectedDocuments.length > 1 ? 's' : ''}`
                 }
               </span>
+              {/* ✅ NEW: Multi-hop indicator */}
+              {enableMultiHop && selectedDocuments.length > 0 && (
+                <span className="ml-auto text-xs text-blue-600 font-medium">
+                  🧠 Multi-hop enabled
+                </span>
+              )}
+            </div>
+          )}
+
+          {mode === 'general' && selectedDocuments.length > 0 && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg">
+              <FileText size={16} className="text-blue-600" />
+              <span className="text-sm text-blue-800">
+                Using {selectedDocuments.length} document{selectedDocuments.length > 1 ? 's' : ''} as context
+              </span>
+              {/* ✅ NEW: Multi-hop indicator */}
+              {enableMultiHop && (
+                <span className="ml-auto text-xs text-blue-600 font-medium">
+                  🧠 Multi-hop enabled
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -350,6 +414,12 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                     ⚠️ Please select documents from the corpus library first
                   </p>
                 )}
+                {/* ✅ NEW: Multi-hop info */}
+                {enableMultiHop && selectedDocuments.length > 0 && (
+                  <p className="text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded-lg p-3 mt-2">
+                    🧠 Multi-hop reasoning is enabled for complex queries
+                  </p>
+                )}
               </div>
             </div>
           ) : (
@@ -374,7 +444,6 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                       : 'bg-white border border-slate-200 text-slate-800'
                   }`}
                 >
-                  {/* ✅ MARKDOWN RENDERING FOR ASSISTANT MESSAGES */}
                   {message.role === 'assistant' ? (
                     <div 
                       className="prose prose-sm max-w-none dark:prose-invert"
@@ -440,7 +509,6 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                       </ReactMarkdown>
                     </div>
                   ) : (
-                    // User messages remain as plain text
                     <p className="whitespace-pre-wrap leading-relaxed">
                       {message.content}
                     </p>

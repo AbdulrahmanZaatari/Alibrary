@@ -5,6 +5,11 @@ import { analyzeQuery } from '@/lib/queryProcessor';
 import { retrieveSmartContext } from '@/lib/smartRetrieval';
 import { correctChunksBatch } from '@/lib/spellingCorrection';
 import { createClient } from '@supabase/supabase-js';
+import { 
+  isComplexQuery, 
+  performMultiHopReasoning, 
+  formatMultiHopResponse 
+} from '@/lib/multiHopReasoning';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -126,7 +131,8 @@ export async function POST(req: NextRequest) {
         documentIds,
         correctSpelling = false,
         aggressiveCorrection = false,
-        customPrompt
+        customPrompt,
+        enableMultiHop = false // ✅ NEW: Default is FALSE (opt-in)
       } = await req.json();
 
       const userMessage = message || query;
@@ -137,7 +143,8 @@ export async function POST(req: NextRequest) {
         hasCorpus: documentIds?.length > 0,
         corpusCount: documentIds?.length || 0,
         correctSpelling,
-        aggressiveCorrection
+        aggressiveCorrection,
+        enableMultiHop
       });
 
       if (!userMessage) {
@@ -156,7 +163,8 @@ export async function POST(req: NextRequest) {
           extractedText, 
           correctSpelling, 
           aggressiveCorrection,
-          customPrompt
+          customPrompt,
+          enableMultiHop
         );
       } 
       else if (sessionId) {
@@ -189,7 +197,7 @@ export async function POST(req: NextRequest) {
   });
 }
 
-// ==================== CORPUS QUERY HANDLER (UPGRADED) ====================
+// ==================== CORPUS QUERY HANDLER (WITH OPTIONAL MULTI-HOP) ====================
 async function handleCorpusQuery(
   writer: WritableStreamDefaultWriter,
   encoder: TextEncoder,
@@ -198,10 +206,9 @@ async function handleCorpusQuery(
   extractedText?: string,
   correctSpelling?: boolean,
   aggressiveCorrection?: boolean,
-  customPrompt?: string
+  customPrompt?: string,
+  enableMultiHop: boolean = false
 ) {
-  const contextParts: string[] = [];
-
   // ✅ Step 1: Detect languages for all documents
   const { primary: documentLanguage, languages: docLanguages, isMultilingual } = 
     await detectMultipleDocumentLanguages(documentIds);
@@ -214,7 +221,42 @@ async function handleCorpusQuery(
   const responseLanguage = queryLanguage;
   console.log(`💬 Response will be in: ${responseLanguage}`);
 
-  // ✅ Step 4: Analyze and translate query
+  // ✅ Step 4: Check if query requires multi-hop reasoning (only if enabled)
+  const requiresMultiHop = enableMultiHop && isComplexQuery(query);
+  
+  if (requiresMultiHop) {
+    console.log('🧠 Complex query detected - activating multi-hop reasoning');
+    
+    try {
+      const multiHopResult = await performMultiHopReasoning(
+        query,
+        documentIds,
+        docLanguages,
+        4, // max hops
+        responseLanguage,
+        correctSpelling || false,
+        aggressiveCorrection || false
+      );
+      
+      // Format and stream the multi-hop response
+      const formattedResponse = formatMultiHopResponse(multiHopResult, responseLanguage);
+      await writer.write(encoder.encode(formattedResponse));
+      
+      console.log('✅ Multi-hop response complete');
+      return;
+      
+    } catch (error) {
+      console.error('❌ Multi-hop reasoning failed, falling back to standard retrieval:', error);
+      // Fall through to standard retrieval
+    }
+  }
+
+  // ==================== STANDARD RETRIEVAL (DEFAULT OR FALLBACK) ====================
+  console.log(enableMultiHop ? '📖 Using standard retrieval (fallback)' : '📖 Using standard retrieval strategy');
+  
+  const contextParts: string[] = [];
+
+  // ✅ Step 5: Analyze and translate query
   const queryAnalysis = await analyzeQuery(query, documentLanguage);
   console.log('🔍 Query Analysis:', {
     original: queryAnalysis.originalQuery,
@@ -224,7 +266,7 @@ async function handleCorpusQuery(
     isMultiDoc: queryAnalysis.isMultiDocumentQuery
   });
 
-  // ✅ Step 5: Add extracted text if provided
+  // ✅ Step 6: Add extracted text if provided
   if (extractedText) {
     const extractLabel = responseLanguage === 'ar' 
       ? '**📄 نص الصفحة الحالية:**'
@@ -232,7 +274,7 @@ async function handleCorpusQuery(
     contextParts.push(`${extractLabel}\n${extractedText}`);
   }
 
-  // ✅ Step 6: Smart corpus retrieval
+  // ✅ Step 7: Smart corpus retrieval
   console.log('🔄 Starting smart retrieval...');
   const { chunks, strategy, confidence } = await retrieveSmartContext(queryAnalysis, documentIds);
   
@@ -241,7 +283,7 @@ async function handleCorpusQuery(
    - Chunks found: ${chunks.length}
    - Confidence: ${(confidence * 100).toFixed(1)}%`);
 
-  // ✅ Step 7: Process chunks with optional spelling correction
+  // ✅ Step 8: Process chunks with optional spelling correction
   let processedChunks = chunks;
   if (correctSpelling && chunks.length > 0) {
     console.log('🔧 Applying spelling correction...');
@@ -263,7 +305,7 @@ async function handleCorpusQuery(
     }
   }
 
-  // ✅ Step 8: Group chunks by document and format context
+  // ✅ Step 9: Group chunks by document and format context
   if (processedChunks.length > 0) {
     const chunksByDocument = new Map<string, any[]>();
     
@@ -366,11 +408,11 @@ async function handleCorpusQuery(
     console.warn('⚠️ No relevant chunks found');
   }
 
-  // ✅ Step 9: Build enhanced prompt
+  // ✅ Step 10: Build enhanced prompt
   const isArabic = responseLanguage === 'ar';
   
   const systemPrompt = isArabic
-    ? `أنت مساعد بحثي دقيق ومتخصص. استخدم تنسيق Markdown في إجاباتك.
+  ? `أنت مساعد بحثي دقيق ومتخصص. استخدم تنسيق Markdown في إجاباتك.
 
 📋 **القواعد الأساسية:**
 
@@ -378,47 +420,68 @@ async function handleCorpusQuery(
    - إذا كانت الإجابة موجودة في المقاطع أدناه، استخدمها وأشر إلى رقم الصفحة والوثيقة
    - اقتبس المعلومات بدقة من السياق
 
-2. **دمج المعرفة العامة:**
-   - إذا كان السياق ناقصًا، يمكنك إضافة معلومات من معرفتك
-   - **وضّح بوضوح** المعلومات من خارج السياق
+2. **دمج المعرفة العامة بثقة:**
+   - **استخدم معرفتك العامة بحرية** لتقديم إجابات مفيدة وشاملة
+   - عند تحليل الأسلوب الأدبي أو المقارنة، استخدم ما هو متاح في النص ثم أضف من معرفتك
+   - ضع علامات واضحة:
+     * **[من النص - صفحة X]** للمعلومات من السياق
+     * **[من المعرفة العامة]** للمعلومات الخارجية
+   - **لا تقل "لا يمكنني" أو "يحتاج المزيد من المعلومات"** - قدم أفضل إجابة ممكنة
 
-3. **الإجابات المتكاملة:**
-   - اجمع بين معلومات السياق والمعرفة العامة
-   - رتب الإجابة بشكل منطقي ومنظم
-   - استخدم أقسام واضحة:
-     * **[من النص]** للمعلومات من السياق
-     * **[معلومات إضافية]** للمعرفة العامة
+3. **أجب على جميع الأسئلة بثقة:**
+   - قدم إجابات مباشرة ومفيدة
+   - إذا لم يكن السياق كافياً، استخدم معرفتك لتكملة الإجابة
+   - **تجنب الإجابات الاعتذارية أو المترددة**
 
-4. **تنسيق Markdown:**
+4. **تحليل الأسلوب الأدبي - نهج عملي:**
+   - حلل العناصر المتاحة في النص (السرد، اللغة، المواضيع، الأسلوب)
+   - قارن بكتّاب مشهورين بناءً على هذه العناصر
+   - قدم أمثلة محددة من النص المتاح
+   - أضف من معرفتك عن الكتّاب المشابهين
+   - **كن حاسماً في استنتاجاتك**
+
+5. **تنسيق Markdown:**
    - استخدم **النص الغامق** للتأكيد
    - استخدم القوائم النقطية والمرقمة
-   - استخدم > للاقتباسات
+   - استخدم > للاقتباسات من النص
 
-${isMultilingual ? '5. **تعدد اللغات:** قد تحتوي المقاطع على نصوص بالإنجليزية، ترجمها حسب الحاجة\n' : ''}
+${isMultilingual ? '6. **تعدد اللغات:** قد تحتوي المقاطع على نصوص بالإنجليزية، ترجمها حسب الحاجة\n' : ''}
 
 ${customPrompt ? `\n**تعليمات إضافية:**\n${customPrompt}\n` : ''}`
-    : `You are an accurate and specialized research assistant. Use Markdown formatting in your responses.
+  : `You are an accurate and specialized research assistant. Use Markdown formatting in your responses.
 
 📋 **Core Guidelines:**
 
 1. **Prioritize Provided Context:**
-   - Use passages below and cite page numbers and document numbers
-   - Quote information accurately
+   - Use passages below and cite page numbers when available
+   - Quote information accurately from context
 
-2. **Integrate General Knowledge:**
-   - Add general knowledge if context is limited
-   - **Clearly indicate** information NOT from context
+2. **Integrate General Knowledge Confidently:**
+   - **Use your general knowledge freely** to provide helpful, comprehensive answers
+   - When analyzing literary style or making comparisons, use available text then add from your knowledge
+   - Use clear markers:
+     * **[From Text - Page X]** for context information
+     * **[From General Knowledge]** for external information
+   - **Never say "I cannot" or "I need more information"** - provide the best answer possible
 
-3. **Comprehensive Answers:**
-   - Combine context with general knowledge
-   - Use clear sections:
-     * **[From Text]** for context information
-     * **[Additional Information]** for general knowledge
+3. **Answer ALL Questions Confidently:**
+   - Provide direct, helpful answers
+   - If context is insufficient, use your knowledge to complete the answer
+   - **Avoid apologetic or hesitant responses**
 
-4. **Markdown Formatting:**
-   - Use **bold**, lists, > for quotes
+4. **Literary Style Analysis - Practical Approach:**
+   - Analyze available elements in text (narrative, language, themes, style)
+   - Compare to famous writers based on these elements
+   - Provide specific examples from available text
+   - Add from your knowledge about similar writers
+   - **Be decisive in your conclusions**
 
-${isMultilingual ? '5. **Multilingual:** Passages may contain Arabic text, translate as needed\n' : ''}
+5. **Markdown Formatting:**
+   - Use **bold** for emphasis
+   - Use bullet and numbered lists
+   - Use > for quotes from text
+
+${isMultilingual ? '6. **Multilingual:** Passages may contain Arabic text, translate as needed\n' : ''}
 
 ${customPrompt ? `\n**Additional Instructions:**\n${customPrompt}\n` : ''}`;
 
