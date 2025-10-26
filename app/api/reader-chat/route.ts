@@ -15,23 +15,21 @@ const supabaseAdmin = createClient(
 );
 
 /**
- * ✅ FIXED: Detect document language from Supabase embeddings
- * Increased sample size and improved detection logic
+ * ✅ Detect document language from Supabase embeddings
  */
 async function detectDocumentLanguage(documentId: string): Promise<'ar' | 'en'> {
   try {
     console.log(`🔍 Detecting language for document: ${documentId}`);
 
-    // ✅ Increased sample size from 5 to 20 chunks for better accuracy
     const { data, error } = await supabaseAdmin
       .from('embeddings')
       .select('chunk_text')
       .eq('document_id', documentId)
-      .limit(20); // Increased sample size
+      .limit(20);
 
     if (error) {
       console.error('⚠️ Error fetching embeddings:', error);
-      return 'ar'; // Default to Arabic
+      return 'ar';
     }
 
     if (!data || data.length === 0) {
@@ -39,10 +37,8 @@ async function detectDocumentLanguage(documentId: string): Promise<'ar' | 'en'> 
       return 'ar';
     }
 
-    // ✅ Filter out common English-only sections (TOC, headers, page numbers)
     const contentChunks = data.filter(row => {
       const text = row.chunk_text.toLowerCase();
-      // Skip common non-content sections
       return !(
         text.includes('table of contents') ||
         text.includes('chapter') && text.length < 100 ||
@@ -51,7 +47,6 @@ async function detectDocumentLanguage(documentId: string): Promise<'ar' | 'en'> 
       );
     });
 
-    // Use filtered chunks if available, otherwise use all
     const chunksToAnalyze = contentChunks.length > 0 ? contentChunks : data;
     const combinedText = chunksToAnalyze.map(row => row.chunk_text).join(' ');
     
@@ -59,8 +54,6 @@ async function detectDocumentLanguage(documentId: string): Promise<'ar' | 'en'> 
     const totalChars = combinedText.replace(/\s/g, '').length;
 
     const arabicRatio = arabicChars / totalChars;
-    
-    // ✅ Lowered threshold from 0.5 to 0.3 (more sensitive to Arabic)
     const detectedLang = arabicRatio > 0.3 ? 'ar' : 'en';
 
     console.log(`   ✅ Language detected: ${detectedLang} (${(arabicRatio * 100).toFixed(1)}% Arabic, analyzed ${chunksToAnalyze.length} chunks)`);
@@ -69,7 +62,7 @@ async function detectDocumentLanguage(documentId: string): Promise<'ar' | 'en'> 
 
   } catch (error) {
     console.error('❌ Error in detectDocumentLanguage:', error);
-    return 'ar'; // Safe default
+    return 'ar';
   }
 }
 
@@ -124,7 +117,7 @@ export async function POST(req: NextRequest) {
     try {
       const { 
         message, 
-        query, // Support both 'message' and 'query' for compatibility
+        query,
         sessionId, 
         bookId, 
         bookTitle, 
@@ -153,7 +146,6 @@ export async function POST(req: NextRequest) {
         return;
       }
 
-      // Route to appropriate handler
       if (documentIds && documentIds.length > 0) {
         console.log('🔄 Using corpus retrieval for Reader Chat');
         await handleCorpusQuery(
@@ -172,7 +164,6 @@ export async function POST(req: NextRequest) {
         await handleGeneralChat(writer, encoder, userMessage, sessionId, extractedText, bookPage);
       }
       else {
-        // Fallback: simple response without history
         console.log('📝 Using simple query response');
         await handleSimpleQuery(writer, encoder, userMessage, extractedText);
       }
@@ -219,7 +210,7 @@ async function handleCorpusQuery(
   const queryLanguage = detectQueryLanguage(query);
   console.log(`🗣️ Query language: ${queryLanguage}`);
 
-  // ✅ Step 3: Determine response language (user's query language takes priority)
+  // ✅ Step 3: Determine response language
   const responseLanguage = queryLanguage;
   console.log(`💬 Response will be in: ${responseLanguage}`);
 
@@ -229,7 +220,8 @@ async function handleCorpusQuery(
     original: queryAnalysis.originalQuery,
     translated: queryAnalysis.translatedQuery,
     type: queryAnalysis.queryType,
-    keywords: queryAnalysis.keywords
+    keywords: queryAnalysis.keywords,
+    isMultiDoc: queryAnalysis.isMultiDocumentQuery
   });
 
   // ✅ Step 5: Add extracted text if provided
@@ -254,7 +246,6 @@ async function handleCorpusQuery(
   if (correctSpelling && chunks.length > 0) {
     console.log('🔧 Applying spelling correction...');
     
-    // Group chunks by document for language-specific correction
     const chunksByDoc = new Map<string, any[]>();
     chunks.forEach(chunk => {
       const docId = chunk.document_id;
@@ -264,7 +255,6 @@ async function handleCorpusQuery(
       chunksByDoc.get(docId)!.push(chunk);
     });
 
-    // Correct each document's chunks in its language
     processedChunks = [];
     for (const [docId, docChunks] of chunksByDoc.entries()) {
       const docLang = docLanguages.get(docId) || documentLanguage;
@@ -273,54 +263,72 @@ async function handleCorpusQuery(
     }
   }
 
-  // ✅ Step 8: Format retrieved context
+  // ✅ Step 8: Group chunks by document and format context
   if (processedChunks.length > 0) {
-    const chunksByPage = new Map<string, any[]>(); // Key: "docId:pageNum"
+    const chunksByDocument = new Map<string, any[]>();
     
-    processedChunks.slice(0, 30).forEach((chunk: any) => {
-      const key = `${chunk.document_id}:${chunk.page_number}`;
-      if (!chunksByPage.has(key)) {
-        chunksByPage.set(key, []);
+    processedChunks.forEach(chunk => {
+      if (!chunksByDocument.has(chunk.document_id)) {
+        chunksByDocument.set(chunk.document_id, []);
       }
-      chunksByPage.get(key)!.push(chunk);
+      chunksByDocument.get(chunk.document_id)!.push(chunk);
     });
 
-    const isArabic = responseLanguage === 'ar';
-    const pageEntries = Array.from(chunksByPage.entries())
-      .sort((a, b) => {
-        const maxSimA = Math.max(...a[1].map(c => c.similarity || 0));
-        const maxSimB = Math.max(...b[1].map(c => c.similarity || 0));
-        return maxSimB - maxSimA;
-      })
-      .slice(0, 15);
+    console.log(`📚 Chunks distributed across ${chunksByDocument.size} document(s)`);
 
-    const corpusContext = pageEntries
-      .map(([key, pageChunks]) => {
-        const [docId, pageNum] = key.split(':');
-        const bestSimilarity = Math.max(...pageChunks.map(c => c.similarity || 0));
-        const relevanceIcon = bestSimilarity >= 0.5 ? '🎯' : bestSimilarity >= 0.4 ? '✓' : '📄';
-        const hasCorrected = pageChunks.some(c => c.corrected);
-        const correctionBadge = hasCorrected ? ' ✨' : '';
-        
-        // Show document info if multiple documents
-        const docInfo = documentIds.length > 1 
-          ? (isArabic ? ` (وثيقة ${documentIds.indexOf(docId) + 1})` : ` (Doc ${documentIds.indexOf(docId) + 1})`)
-          : '';
-        
-        const pageHeader = isArabic 
-          ? `**${relevanceIcon} صفحة ${pageNum}**${docInfo}${correctionBadge}`
-          : `**${relevanceIcon} Page ${pageNum}**${docInfo}${correctionBadge}`;
-        
-        const pageText = pageChunks.map(c => c.chunk_text).join('\n\n');
-        return `${pageHeader}\n${pageText}`;
-      })
-      .join('\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n');
+    const isArabic = responseLanguage === 'ar';
+    
+    // ✅ Build document-separated context
+    const documentContexts = Array.from(chunksByDocument.entries()).map(([docId, docChunks], docIndex) => {
+      const docNumber = docIndex + 1;
+      const docLang = docLanguages.get(docId);
+      const langLabel = docLang === 'ar' ? 'عربي' : 'English';
+      
+      const docHeader = isArabic
+        ? `## 📘 الوثيقة ${docNumber} (${langLabel})`
+        : `## 📘 Document ${docNumber} (${langLabel})`;
+      
+      // Group by pages within this document
+      const pageGroups = new Map<number, any[]>();
+      docChunks.forEach(chunk => {
+        if (!pageGroups.has(chunk.page_number)) {
+          pageGroups.set(chunk.page_number, []);
+        }
+        pageGroups.get(chunk.page_number)!.push(chunk);
+      });
+      
+      const pageEntries = Array.from(pageGroups.entries())
+        .sort((a, b) => {
+          const maxSimA = Math.max(...a[1].map(c => c.similarity || 0));
+          const maxSimB = Math.max(...b[1].map(c => c.similarity || 0));
+          return maxSimB - maxSimA;
+        })
+        .slice(0, 10);
+      
+      const pagesText = pageEntries
+        .map(([pageNum, pageChunks]) => {
+          const bestSimilarity = Math.max(...pageChunks.map(c => c.similarity || 0));
+          const relevanceIcon = bestSimilarity >= 0.5 ? '🎯' : bestSimilarity >= 0.4 ? '✓' : '📄';
+          const hasCorrected = pageChunks.some(c => c.corrected);
+          const correctionBadge = hasCorrected ? ' ✨' : '';
+          
+          const pageHeader = isArabic 
+            ? `**${relevanceIcon} صفحة ${pageNum}**${correctionBadge}`
+            : `**${relevanceIcon} Page ${pageNum}**${correctionBadge}`;
+          
+          const pageText = pageChunks.map(c => c.chunk_text).join('\n\n');
+          return `${pageHeader}\n${pageText}`;
+        })
+        .join('\n\n---\n\n');
+      
+      return `${docHeader}\n\n${pagesText}`;
+    }).join('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n');
 
     const contextTitle = isArabic 
       ? '**📚 مقاطع ذات صلة من الكتب:**'
       : '**📚 Relevant Passages from the Books:**';
 
-    contextParts.push(`${contextTitle}\n\n${corpusContext}`);
+    contextParts.push(`${contextTitle}\n\n${documentContexts}`);
 
     // ✅ Add multilingual note if applicable
     if (isMultilingual) {
@@ -330,21 +338,35 @@ async function handleCorpusQuery(
       contextParts.push(multilingualNote);
     }
 
+    // ✅ Add multi-document analysis instruction
+    if (documentIds.length > 1 && queryAnalysis.isMultiDocumentQuery) {
+      const comparisonInstruction = isArabic
+        ? '\n\n⚠️ **تعليمات مهمة:** هذا سؤال مقارن. قارن وحلل المعلومات من جميع الوثائق المقدمة. أشر بوضوح إلى أوجه التشابه والاختلاف والجوانب الفريدة لكل وثيقة.'
+        : '\n\n⚠️ **Important Instructions:** This is a comparative question. Compare and analyze information from ALL provided documents. Clearly indicate similarities, differences, and unique aspects of each document.';
+      contextParts.push(comparisonInstruction);
+    }
+
     // ✅ Add page validation
-    const actualPages = Array.from(new Set(processedChunks.map((c: any) => `${c.document_id}:${c.page_number}`)))
-      .map(key => key.split(':')[1])
-      .sort((a, b) => Number(a) - Number(b));
+    const docPageMap = new Map<string, number[]>();
+    processedChunks.forEach(chunk => {
+      if (!docPageMap.has(chunk.document_id)) {
+        docPageMap.set(chunk.document_id, []);
+      }
+      if (!docPageMap.get(chunk.document_id)!.includes(chunk.page_number)) {
+        docPageMap.get(chunk.document_id)!.push(chunk.page_number);
+      }
+    });
     
     const pageListNote = isArabic
-      ? `\n\n⚠️ **ملاحظة مهمة:** الصفحات المتاحة في السياق هي: ${actualPages.join(', ')}. لا تذكر أي صفحات أخرى.`
-      : `\n\n⚠️ **Important Note:** The available pages in the context are: ${actualPages.join(', ')}. Do not reference any other pages.`;
+      ? `\n\n⚠️ **ملاحظة مهمة:** أجب فقط استنادًا إلى الصفحات المتاحة في السياق أعلاه. لا تذكر أي صفحات أخرى.`
+      : `\n\n⚠️ **Important Note:** Answer only based on the available pages in the context above. Do not reference any other pages.`;
     
     contextParts.push(pageListNote);
   } else {
     console.warn('⚠️ No relevant chunks found');
   }
 
-  // ✅ Step 9: Build enhanced prompt with Markdown formatting
+  // ✅ Step 9: Build enhanced prompt
   const isArabic = responseLanguage === 'ar';
   
   const systemPrompt = isArabic
@@ -353,37 +375,26 @@ async function handleCorpusQuery(
 📋 **القواعد الأساسية:**
 
 1. **الأولوية للسياق المقدم:**
-   - إذا كانت الإجابة موجودة في المقاطع أدناه، استخدمها وأشر إلى رقم الصفحة (مثال: "**صفحة 15**")
+   - إذا كانت الإجابة موجودة في المقاطع أدناه، استخدمها وأشر إلى رقم الصفحة والوثيقة
    - اقتبس المعلومات بدقة من السياق
 
 2. **دمج المعرفة العامة:**
-   - إذا كان السياق ناقصًا أو محدودًا، يمكنك إضافة معلومات من معرفتك العامة
-   - **وضّح بوضوح** أي معلومات ليست من السياق المقدم
-   - استخدم عبارات مثل: "بناءً على المقاطع المتاحة..." و "من المعرفة العامة..."
+   - إذا كان السياق ناقصًا، يمكنك إضافة معلومات من معرفتك
+   - **وضّح بوضوح** المعلومات من خارج السياق
 
 3. **الإجابات المتكاملة:**
-   - اجمع بين معلومات السياق والمعرفة العامة لإعطاء إجابة شاملة
+   - اجمع بين معلومات السياق والمعرفة العامة
    - رتب الإجابة بشكل منطقي ومنظم
-   - إذا كان هناك تناقض، أعط الأولوية لمحتوى السياق
-
-4. **الشفافية:**
-   - اذكر بوضوح مصدر كل معلومة
-   - إذا لم تجد معلومات كافية في السياق، قل ذلك ثم قدم ما تعرفه
-   - استخدم أقسام واضحة مع عناوين Markdown:
-     * **[من النص]** للمعلومات المأخوذة من السياق
+   - استخدم أقسام واضحة:
+     * **[من النص]** للمعلومات من السياق
      * **[معلومات إضافية]** للمعرفة العامة
 
-5. **تنسيق Markdown:**
+4. **تنسيق Markdown:**
    - استخدم **النص الغامق** للتأكيد
-   - استخدم *النص المائل* للعناوين الفرعية
-   - استخدم القوائم النقطية (- أو *) للنقاط المتعددة
-   - استخدم القوائم المرقمة (1. 2. 3.) للخطوات أو الترتيب
+   - استخدم القوائم النقطية والمرقمة
    - استخدم > للاقتباسات
-   - استخدم \`\`\` لأمثلة الكود إن وجدت
 
-6. **اللغة:**
-   - أجب بالعربية كما طلب المستخدم
-   ${isMultilingual ? '- قد تحتوي المقاطع على نصوص بالإنجليزية، ترجمها حسب الحاجة' : ''}
+${isMultilingual ? '5. **تعدد اللغات:** قد تحتوي المقاطع على نصوص بالإنجليزية، ترجمها حسب الحاجة\n' : ''}
 
 ${customPrompt ? `\n**تعليمات إضافية:**\n${customPrompt}\n` : ''}`
     : `You are an accurate and specialized research assistant. Use Markdown formatting in your responses.
@@ -391,37 +402,23 @@ ${customPrompt ? `\n**تعليمات إضافية:**\n${customPrompt}\n` : ''}`
 📋 **Core Guidelines:**
 
 1. **Prioritize Provided Context:**
-   - If the answer exists in the passages below, use it and cite page numbers (e.g., "**page 15**")
-   - Quote information accurately from the context
+   - Use passages below and cite page numbers and document numbers
+   - Quote information accurately
 
 2. **Integrate General Knowledge:**
-   - If the context is incomplete or limited, you may add information from your general knowledge
-   - **Clearly indicate** which information is NOT from the provided context
-   - Use phrases like: "Based on the available passages..." and "From general knowledge..."
+   - Add general knowledge if context is limited
+   - **Clearly indicate** information NOT from context
 
 3. **Comprehensive Answers:**
-   - Combine context information with general knowledge for complete answers
-   - Organize the response logically and clearly
-   - If there's a conflict, prioritize the context content
-
-4. **Transparency:**
-   - Clearly state the source of each piece of information
-   - If you don't find sufficient information in the context, say so then provide what you know
-   - Use clear sections with Markdown headings:
-     * **[From Text]** for information from the context
+   - Combine context with general knowledge
+   - Use clear sections:
+     * **[From Text]** for context information
      * **[Additional Information]** for general knowledge
 
-5. **Markdown Formatting:**
-   - Use **bold text** for emphasis
-   - Use *italic text* for subheadings
-   - Use bullet lists (- or *) for multiple points
-   - Use numbered lists (1. 2. 3.) for steps or ordering
-   - Use > for blockquotes
-   - Use \`\`\` for code examples if applicable
+4. **Markdown Formatting:**
+   - Use **bold**, lists, > for quotes
 
-6. **Language:**
-   - Respond in English as requested by the user
-   ${isMultilingual ? '- The passages may contain Arabic text, translate as needed' : ''}
+${isMultilingual ? '5. **Multilingual:** Passages may contain Arabic text, translate as needed\n' : ''}
 
 ${customPrompt ? `\n**Additional Instructions:**\n${customPrompt}\n` : ''}`;
 
@@ -472,14 +469,13 @@ ${extractedText}
 ---`;
   }
 
-  // Detect language and respond accordingly
   const queryLang = detectQueryLanguage(message);
   const langInstruction = queryLang === 'ar' 
-    ? 'Respond in Arabic using proper Markdown formatting (bold, italic, lists, etc.).'
-    : 'Respond in English using proper Markdown formatting (bold, italic, lists, etc.).';
+    ? 'Respond in Arabic using proper Markdown formatting.'
+    : 'Respond in English using proper Markdown formatting.';
 
   const prompt = conversationContext
-    ? `You are a helpful assistant for reading books. Continue the conversation naturally. ${langInstruction}
+    ? `You are a helpful assistant. ${langInstruction}
 ${contextSection}
 
 **Previous conversation:**
@@ -487,7 +483,7 @@ ${conversationContext}
 
 **User:** ${message}
 **Assistant:**`
-    : `You are a helpful assistant for reading books. ${langInstruction}
+    : `You are a helpful assistant. ${langInstruction}
 ${contextSection}
 
 **User:** ${message}
@@ -511,8 +507,8 @@ async function handleSimpleQuery(
 ) {
   const queryLang = detectQueryLanguage(query);
   const langInstruction = queryLang === 'ar' 
-    ? 'أجب بالعربية مع استخدام تنسيق Markdown المناسب.'
-    : 'Respond in English using proper Markdown formatting.';
+    ? 'أجب بالعربية مع استخدام تنسيق Markdown.'
+    : 'Respond in English using Markdown formatting.';
 
   let contextSection = '';
   if (extractedText) {

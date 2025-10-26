@@ -2,6 +2,8 @@ import { NextRequest } from 'next/server';
 import { searchSimilarChunks } from '@/lib/vectorStore';
 import { getDb } from '@/lib/db';
 import { embedText, generateResponse } from '@/lib/gemini';
+import { analyzeQuery } from '@/lib/queryProcessor';
+import { retrieveSmartContext } from '@/lib/smartRetrieval';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -27,76 +29,89 @@ export async function POST(request: NextRequest) {
         return;
       }
 
-      // Step 1: Embed query
-      const queryEmbedding = await embedText(query);
-
-      // Step 2: Search
-      const rawResults = await searchSimilarChunks(queryEmbedding, documentIds, 50);
+      // ✅ Step 1: Analyze query
+      const queryAnalysis = await analyzeQuery(query, 'ar');
       
-      const filteredResults = rawResults
-        .filter((r: any) => 
-          r.chunk_text && 
-          r.chunk_text.length >= 150 &&
-          (r.similarity || 0) >= 0.3
-        )
-        .slice(0, 10);
+      // ✅ Step 2: Smart retrieval
+      const { chunks, strategy, confidence } = await retrieveSmartContext(queryAnalysis, documentIds);
 
-      console.log(`🔍 Search results: ${rawResults.length} → ${filteredResults.length} after filtering`);
+      console.log(`✅ Retrieved ${chunks.length} chunks using ${strategy} (confidence: ${(confidence * 100).toFixed(1)}%)`);
 
-      if (filteredResults.length === 0) {
+      if (chunks.length === 0) {
         await writer.write(encoder.encode(
           'No relevant information found in the selected documents.\n\n' +
-          'لم يتم العثور على معلومات ذات صلة في المستندات المحددة.\n\n' +
-          `Debug: Found ${rawResults.length} chunks but none passed quality filters (similarity > 0.3, length > 150 chars)`
+          'لم يتم العثور على معلومات ذات صلة في المستندات المحددة.'
         ));
         await writer.close();
         return;
       }
 
-      // Step 3: Build context
+      // ✅ Step 3: Group chunks by document
+      const chunksByDocument = new Map<string, any[]>();
+      
+      chunks.forEach(chunk => {
+        if (!chunksByDocument.has(chunk.document_id)) {
+          chunksByDocument.set(chunk.document_id, []);
+        }
+        chunksByDocument.get(chunk.document_id)!.push(chunk);
+      });
+
+      console.log(`📚 Chunks distributed across ${chunksByDocument.size} document(s)`);
+
+      // ✅ Step 4: Build context with document separation
       const db = getDb();
-      const context = filteredResults.map((r: any, i: number) => {
-        const doc = db.prepare('SELECT display_name FROM documents WHERE id = ?').get(r.document_id) as any;
-        return `━━━ Excerpt ${i + 1} / مقتطف ${i + 1} ━━━
-📖 Source / المصدر: ${doc?.display_name || 'Unknown'}
-📄 Page / الصفحة: ${r.page_number}
-🎯 Similarity / التشابه: ${((r.similarity || 0) * 100).toFixed(1)}%
+      
+      const documentContexts = Array.from(chunksByDocument.entries()).map(([docId, docChunks], index) => {
+        const doc = db.prepare('SELECT display_name FROM documents WHERE id = ?').get(docId) as any;
+        const docName = doc?.display_name || `Document ${index + 1}`;
+        
+        const docHeader = `## 📘 ${docName}`;
+        
+        const excerpts = docChunks.map((chunk, i) => {
+          const similarity = ((chunk.similarity || 0) * 100).toFixed(1);
+          return `**📄 Page ${chunk.page_number}** (Similarity: ${similarity}%)\n${chunk.chunk_text}`;
+        }).join('\n\n---\n\n');
+        
+        return `${docHeader}\n\n${excerpts}`;
+      }).join('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n');
 
-${r.chunk_text}`;
-      }).join('\n\n');
+      // ✅ Step 5: Build prompt
+      const isMultiDoc = documentIds.length > 1;
+      const isComparative = queryAnalysis.isMultiDocumentQuery;
+      
+      let multiDocInstruction = '';
+      if (isMultiDoc && isComparative) {
+        multiDocInstruction = '\n\n**IMPORTANT:** This is a comparative question. Compare and contrast information across ALL documents. Clearly indicate similarities, differences, and unique aspects of each document.\n\n';
+      } else if (isMultiDoc) {
+        multiDocInstruction = '\n\n**IMPORTANT:** Multiple documents are provided. Analyze information from ALL documents and synthesize findings.\n\n';
+      }
 
-      console.log(`📄 Context: ${context.length} chars, ${filteredResults.length} excerpts`);
-
-      // Step 4: Generate response with improved prompt
-      // Replace the prompt with this MUCH BETTER version:
-
-const prompt = `You are an expert literary and research assistant with deep knowledge of Arabic and Islamic studies.
+      const prompt = `You are an expert literary and research assistant with deep knowledge of Arabic and Islamic studies.
 
 **RESPONSE STRATEGY:**
 
 1. **Primary Source**: Use the document excerpts below as your PRIMARY evidence
 2. **Reasoning**: Apply literary analysis, psychology, and critical thinking to interpret the excerpts
-3. **Synthesis**: Connect ideas across multiple excerpts to form coherent answers
-4. **Language**: Match the user's language (English question → English answer, Arabic → Arabic), make sure you follow this
-Also if the user specifies a language, follow that strictly.
-5. **Citations**: Always cite page numbers when referencing specific excerpts
+3. **Synthesis**: Connect ideas across multiple excerpts/documents to form coherent answers
+4. **Language**: Match the user's language (English question → English answer, Arabic → Arabic)
+5. **Citations**: Always cite document names and page numbers
 
-**IMPORTANT - Be Helpful, Not Restrictive:**
-- If excerpts contain relevant information, analyze and synthesize it
-- Use your knowledge to INTERPRET the excerpts (character psychology, literary themes, etc.)
-- Only say "insufficient information" if the excerpts are truly unrelated to the question
-- For narrative questions, feel free to discuss themes, character development, symbolism
+**Be Helpful:**
+- Analyze and synthesize the excerpts
+- Use your knowledge to INTERPRET the content
+- For narrative questions, discuss themes, character development, symbolism
+- Only say "insufficient information" if excerpts are truly unrelated
 
-**Document Excerpts:**
+${multiDocInstruction}**Document Excerpts:**
 
-${context}
+${documentContexts}
 
 **━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━**
 
 **User's Question:**
 ${query}
 
-**Your Answer (cite pages, analyze deeply, synthesize insights):**`;
+**Your Answer (cite sources, analyze deeply, synthesize insights):**`;
 
       console.log('🤖 Querying Gemini...');
 

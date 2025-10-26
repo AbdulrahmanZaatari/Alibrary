@@ -1,8 +1,8 @@
 import { embedText } from './gemini';
 import { searchSimilarChunks } from './vectorStore';
 import { createClient } from '@supabase/supabase-js';
+import { retrieveBalancedCorpus, assessRetrievalQuality } from './multiDocRetrieval';
 
-// ✅ Initialize Supabase
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -15,19 +15,68 @@ interface RetrievalResult {
 }
 
 /**
- * Retrieve context based on query type
+ * Retrieve context based on query type with multi-document support
  */
 export async function retrieveSmartContext(
   queryAnalysis: any,
   documentIds: string[]
 ): Promise<RetrievalResult> {
-  const { expandedQuery, queryType, keywords } = queryAnalysis;
+  const { expandedQuery, queryType, keywords, isMultiDocumentQuery } = queryAnalysis;
 
   console.log(`🎯 Retrieval strategy for "${queryType}" question`);
 
   // Generate embedding from expanded query
   const embedding = await embedText(expandedQuery);
 
+  const isMultiDoc = documentIds.length > 1;
+
+  // ✅ PRIORITY 1: Comparative multi-document strategy
+  if (isMultiDoc && isMultiDocumentQuery) {
+    console.log('🔄 Using COMPARATIVE multi-document strategy');
+    
+    const chunks = await retrieveBalancedCorpus(
+      embedding,
+      documentIds,
+      {
+        chunksPerDoc: 15,
+        totalChunks: 50,
+        ensureAllDocs: true,
+      }
+    );
+    
+    const metrics = assessRetrievalQuality(chunks, documentIds);
+    
+    return {
+      chunks,
+      strategy: 'comparative_balanced',
+      confidence: metrics.coverageRatio * 0.9,
+    };
+  }
+
+  // ✅ PRIORITY 2: Multi-document (non-comparative)
+  if (isMultiDoc) {
+    console.log('🔄 Using multi-document balanced strategy');
+    
+    const chunks = await retrieveBalancedCorpus(
+      embedding,
+      documentIds,
+      {
+        chunksPerDoc: 10,
+        totalChunks: 35,
+        ensureAllDocs: true,
+      }
+    );
+    
+    const metrics = assessRetrievalQuality(chunks, documentIds);
+    
+    return {
+      chunks,
+      strategy: 'multi_document_balanced',
+      confidence: metrics.coverageRatio * 0.85,
+    };
+  }
+
+  // ✅ Single document strategies
   let chunks: any[] = [];
   let strategy = 'hybrid';
   let confidence = 0;
@@ -70,7 +119,7 @@ export async function retrieveSmartContext(
 }
 
 /**
- * ✅ FIXED: Narrative retrieval using Supabase
+ * Narrative retrieval using Supabase
  */
 async function narrativeRetrieval(
   embedding: number[],
@@ -79,7 +128,7 @@ async function narrativeRetrieval(
 ): Promise<any[]> {
   const chunks: any[] = [];
 
-  // 1. Get early chapters (where characters are introduced)
+  // 1. Get early chapters
   const { data: earlyChunks, error } = await supabaseAdmin
     .from('embeddings')
     .select('*')
@@ -96,13 +145,13 @@ async function narrativeRetrieval(
     })));
   }
 
-  // 2. Vector search with lower threshold
+  // 2. Vector search
   const vectorResults = await searchSimilarChunks(embedding, documentIds, 50);
   const relevant = vectorResults.filter((r: any) => (r.similarity || 0) >= 0.3);
   chunks.push(...relevant.slice(0, 25));
 
-  // 3. Keyword matching for character names
-  for (const keyword of keywords) {
+  // 3. Keyword matching
+  for (const keyword of keywords.slice(0, 3)) { // Limit keywords to avoid too many queries
     const { data: keywordChunks } = await supabaseAdmin
       .from('embeddings')
       .select('*')
@@ -119,7 +168,6 @@ async function narrativeRetrieval(
     }
   }
 
-  // Deduplicate by chunk_text
   const uniqueChunks = Array.from(
     new Map(chunks.map(c => [c.chunk_text, c])).values()
   );
@@ -128,7 +176,7 @@ async function narrativeRetrieval(
 }
 
 /**
- * Analytical retrieval: diverse chunks from all sections
+ * Analytical retrieval: diverse chunks
  */
 async function analyticalRetrieval(
   embedding: number[],
@@ -137,7 +185,6 @@ async function analyticalRetrieval(
   const vectorResults = await searchSimilarChunks(embedding, documentIds, 100);
   const relevant = vectorResults.filter((r: any) => (r.similarity || 0) >= 0.35);
 
-  // Get diverse page numbers
   const pageGroups = new Map<number, any[]>();
   for (const chunk of relevant) {
     const pageGroup = Math.floor(chunk.page_number / 10) * 10;
@@ -147,7 +194,6 @@ async function analyticalRetrieval(
     pageGroups.get(pageGroup)!.push(chunk);
   }
 
-  // Take top 2 chunks from each page group
   const diverse: any[] = [];
   for (const chunks of pageGroups.values()) {
     diverse.push(...chunks.slice(0, 2));
@@ -171,7 +217,7 @@ async function factualRetrieval(
 }
 
 /**
- * ✅ FIXED: Thematic retrieval using Supabase
+ * Thematic retrieval using Supabase
  */
 async function thematicRetrieval(
   embedding: number[],

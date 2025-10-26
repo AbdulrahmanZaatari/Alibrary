@@ -7,8 +7,9 @@ interface QueryAnalysis {
   translatedQuery?: string;
   detectedLanguage: 'ar' | 'en' | 'mixed';
   expandedQuery: string;
-  queryType: 'narrative' | 'analytical' | 'factual' | 'thematic';
+  queryType: 'narrative' | 'analytical' | 'factual' | 'thematic' | 'comparative';
   keywords: string[];
+  isMultiDocumentQuery: boolean;
 }
 
 /**
@@ -64,6 +65,7 @@ Categories:
 - analytical: questions about themes, symbolism, literary devices (why, how, analyze)
 - factual: questions about specific facts, dates, places (when, where)
 - thematic: questions about meaning, interpretation, lessons
+- comparative: questions comparing or finding commonalities between documents
 
 Return ONLY the category name:`;
 
@@ -100,6 +102,19 @@ Keywords:`;
 }
 
 /**
+ * ✅ Detect if query is comparative/multi-document
+ */
+function isComparativeQuery(query: string): boolean {
+  const comparativePatterns = [
+    /\b(common|similar|shared|both|difference|differ|compare|contrast|versus|vs)\b/i,
+    /\b(between|across|among)\b.*\b(document|text|book|source)/i,
+    /مشترك|تشابه|فرق|مقارنة|كلاهما|بين/,
+  ];
+  
+  return comparativePatterns.some(pattern => pattern.test(query));
+}
+
+/**
  * Complete query analysis pipeline
  */
 export async function analyzeQuery(
@@ -122,9 +137,18 @@ export async function analyzeQuery(
     console.log(`   ✅ Translated: "${translatedQuery}"`);
   }
 
+  // ✅ Detect comparative nature FIRST
+  const isComparative = isComparativeQuery(query);
+
   // Classify query type
-  const queryType = await classifyQuery(query) as any;
-  console.log(`   📋 Query type: ${queryType}`);
+  let queryType = await classifyQuery(query) as any;
+  
+  // ✅ Override with 'comparative' if detected
+  if (isComparative && queryType !== 'comparative') {
+    queryType = 'comparative';
+  }
+  
+  console.log(`   📋 Query type: ${queryType}${isComparative ? ' (comparative detected)' : ''}`);
 
   // Expand query with keywords
   const keywords = await expandQuery(searchQuery, documentLanguage);
@@ -140,5 +164,6 @@ export async function analyzeQuery(
     expandedQuery,
     queryType,
     keywords,
+    isMultiDocumentQuery: isComparative,
   };
 }
