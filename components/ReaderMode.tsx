@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { 
   ChevronLeft, 
@@ -20,7 +20,9 @@ import {
   Check,
   MessageSquare,
   Database,
-  Send
+  Send,
+  Clock,
+  Pencil
 } from 'lucide-react';
 
 import 'react-pdf/dist/Page/AnnotationLayer.css';
@@ -55,13 +57,19 @@ interface CorpusDocument {
   is_selected: number;
 }
 
-export default function ReaderMode() {
+interface ReaderModeProps {
+  persistedBookId?: string | null;
+  onBookSelect?: (bookId: string | null) => void;
+}
+
+export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderModeProps = {}) {
   const [books, setBooks] = useState<Book[]>([]);
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [numPages, setNumPages] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [scale, setScale] = useState<number>(1.0);
+  const [containerWidth, setContainerWidth] = useState<number>(0);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(false);
   
@@ -80,11 +88,24 @@ export default function ReaderMode() {
   const [chatMessages, setChatMessages] = useState<Array<{role: string; content: string}>>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
-
+  const [correctSpelling, setCorrectSpelling] = useState(false);
+  const [bookSessions, setBookSessions] = useState<Array<{
+    id: string;
+    name: string;
+    created_at: string;
+    updated_at: string;
+  }>>([]);
+  const [showSessionList, setShowSessionList] = useState(false);
+  
   // Corpus Selector
   const [showCorpus, setShowCorpus] = useState(false);
   const [corpusDocuments, setCorpusDocuments] = useState<CorpusDocument[]>([]);
   const [selectedCorpus, setSelectedCorpus] = useState<string[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [isLoadingBooks, setIsLoadingBooks] = useState(false);
+  const [isLoadingCorpus, setIsLoadingCorpus] = useState(false);
+
+  const hasRestoredRef = useRef(false);
 
   useEffect(() => {
     fetchBooks();
@@ -92,30 +113,96 @@ export default function ReaderMode() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (pdfUrl) {
+        console.log('🧹 Cleaning up PDF URL');
+        URL.revokeObjectURL(pdfUrl);
+      }
+    };
+  }, [pdfUrl]);
+
+  useEffect(() => {
     if (selectedBook) {
+      console.log('📖 Loading book:', selectedBook.title);
       setCurrentPage(selectedBook.current_page);
+      setNumPages(0);
+      setPdfUrl(null);
       loadBookPdf(selectedBook);
-      loadBookmarks();
+    } else {
+      setPdfUrl(null);
+      setNumPages(0);
+      setCurrentPage(1);
     }
-  }, [selectedBook]);
+  }, [selectedBook?.id]);
 
   useEffect(() => {
-    if (selectedBook && currentPage !== selectedBook.current_page && currentPage > 0) {
-      const timeoutId = setTimeout(() => {
-        updateReadingPosition(selectedBook.id, currentPage);
-      }, 1000);
-      return () => clearTimeout(timeoutId);
+    if (selectedBook) {
+      loadBookSessions(selectedBook.id);
     }
-  }, [currentPage, selectedBook]);
+  }, [selectedBook?.id]);
+
+  // ✅ Notify parent of book selection changes
+  useEffect(() => {
+    if (onBookSelect) {
+      onBookSelect(selectedBook?.id || null);
+    }
+  }, [selectedBook?.id, onBookSelect]);
 
   useEffect(() => {
-    const handleKeyPress = (e: KeyboardEvent) => {
+  if (persistedBookId && books.length > 0 && !hasRestoredRef.current) {
+    const book = books.find(b => b.id === persistedBookId);
+    if (book) {
+      console.log('🔄 Restoring book from persistence:', book.title);
+      setSelectedBook(book);
+      hasRestoredRef.current = true;
+    }
+  }
+}, [persistedBookId, books]);
+
+// ✅ Notify parent when book selection changes (but don't trigger on mount)
+useEffect(() => {
+  if (hasRestoredRef.current && onBookSelect) {
+    onBookSelect(selectedBook?.id || null);
+  }
+}, [selectedBook?.id, onBookSelect]);
+
+  useEffect(() => {
+    if (!selectedBook?.id || currentPage <= 0 || currentPage === selectedBook.current_page) {
+      return;
+    }
+    
+    const timeoutId = setTimeout(() => {
+      updateReadingPosition(selectedBook.id, currentPage);
+    }, 1000);
+    
+    return () => clearTimeout(timeoutId);
+  }, [currentPage, selectedBook?.id, selectedBook?.current_page]);
+
+  useEffect(() => {
+    const updateWidth = () => {
+      const container = document.getElementById('pdf-container');
+      if (container) {
+        setContainerWidth(container.clientWidth);
+      }
+    };
+
+    updateWidth();
+    window.addEventListener('resize', updateWidth);
+    return () => window.removeEventListener('resize', updateWidth);
+  }, [showChat, showBookmarks, showCorpus]);
+
+  useEffect(() => {
+    function handleKeyPress(e: KeyboardEvent) {
+      if (showTextPopup) {
+        if (e.ctrlKey && e.key === 'e') {
+          e.preventDefault();
+          setShowTextPopup(false);
+        }
+        return;
+      }
+
       if (!selectedBook) return;
-      
-      if (e.key === 'ArrowLeft') goToPrevPage();
-      if (e.key === 'ArrowRight') goToNextPage();
-      if (e.key === '+' || e.key === '=') zoomIn();
-      if (e.key === '-') zoomOut();
+
       if (e.ctrlKey && e.key === 'b') {
         e.preventDefault();
         addBookmark();
@@ -124,57 +211,70 @@ export default function ReaderMode() {
         e.preventDefault();
         extractPageText();
       }
-    };
+      if (e.key === 'ArrowLeft') goToPrevPage();
+      if (e.key === 'ArrowRight') goToNextPage();
+      if (e.key === '+' || e.key === '=') zoomIn();
+      if (e.key === '-') zoomOut();
+      if (e.key === '0') resetZoom();
+    }
 
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
-  }, [currentPage, selectedBook, scale]);
+  }, [showTextPopup, selectedBook, scale]); 
 
   // ==================== API FUNCTIONS ====================
 
   async function fetchBooks() {
+    if (isLoadingBooks) return;
+    
+    setIsLoadingBooks(true);
     try {
       const res = await fetch('/api/books');
       const data = await res.json();
       setBooks(data.books || []);
     } catch (error) {
       console.error('Error fetching books:', error);
+    } finally {
+      setIsLoadingBooks(false);
     }
   }
 
-async function fetchCorpusDocuments() {
-  try {
-    const res = await fetch('/api/documents');
-    if (!res.ok) {
-      console.error('Failed to fetch corpus documents:', res.status);
+  async function fetchCorpusDocuments() {
+    if (isLoadingCorpus) return; 
+    
+    setIsLoadingCorpus(true);
+    try {
+      const res = await fetch('/api/documents');
+      if (!res.ok) {
+        console.error('Failed to fetch corpus documents:', res.status);
+        setCorpusDocuments([]);
+        setSelectedCorpus([]);
+        return;
+      }
+      
+      const data = await res.json();
+      
+      if (!data || !Array.isArray(data.documents)) {
+        console.warn('Invalid documents response:', data);
+        setCorpusDocuments([]);
+        setSelectedCorpus([]);
+        return;
+      }
+      
+      setCorpusDocuments(data.documents);
+      setSelectedCorpus(
+        data.documents
+          .filter((d: CorpusDocument) => d.is_selected === 1)
+          .map((d: CorpusDocument) => d.id)
+      );
+    } catch (error) {
+      console.error('Error fetching corpus:', error);
       setCorpusDocuments([]);
       setSelectedCorpus([]);
-      return;
+    } finally {
+      setIsLoadingCorpus(false);
     }
-    
-    const data = await res.json();
-    
-    // ✅ Add safety check
-    if (!data || !Array.isArray(data.documents)) {
-      console.warn('Invalid documents response:', data);
-      setCorpusDocuments([]);
-      setSelectedCorpus([]);
-      return;
-    }
-    
-    setCorpusDocuments(data.documents);
-    setSelectedCorpus(
-      data.documents
-        .filter((d: CorpusDocument) => d.is_selected === 1)
-        .map((d: CorpusDocument) => d.id)
-    );
-  } catch (error) {
-    console.error('Error fetching corpus:', error);
-    setCorpusDocuments([]);
-    setSelectedCorpus([]);
   }
-}
-
 
   async function toggleCorpusDocument(docId: string) {
     try {
@@ -195,15 +295,131 @@ async function fetchCorpusDocuments() {
     }
   }
 
+  // ==================== SESSION MANAGEMENT ====================
+
+  async function loadBookSessions(bookId: string) {
+    try {
+      const res = await fetch(`/api/reader-chat/sessions?bookId=${bookId}`);
+      if (!res.ok) {
+        console.error('Failed to fetch sessions:', res.status);
+        setBookSessions([]);
+        return;
+      }
+      const data = await res.json();
+      setBookSessions(data || []);
+    } catch (error) {
+      console.error('Error loading sessions:', error);
+      setBookSessions([]);
+    }
+  }
+
+  async function loadSessionMessages(sessionId: string) {
+    try {
+      const res = await fetch(`/api/reader-chat/messages?sessionId=${sessionId}`);
+      if (!res.ok) {
+        console.error('Failed to fetch messages:', res.status);
+        return;
+      }
+      const data = await res.json();
+      
+      const formattedMessages = data.map((msg: any) => ({
+        role: msg.role,
+        content: msg.content
+      }));
+      
+      setChatMessages(formattedMessages);
+      setCurrentSessionId(sessionId);
+    } catch (error) {
+      console.error('Error loading messages:', error);
+    }
+  }
+
+  async function startNewSession() {
+    if (!selectedBook) return;
+    
+    try {
+      const res = await fetch('/api/reader-chat/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookId: selectedBook.id,
+          bookTitle: selectedBook.title,
+        }),
+      });
+      const { sessionId } = await res.json();
+      
+      setCurrentSessionId(sessionId);
+      setChatMessages([]);
+      await loadBookSessions(selectedBook.id);
+    } catch (error) {
+      console.error('Error creating session:', error);
+    }
+  }
+
+  async function deleteSession(sessionId: string) {
+    if (!confirm('Delete this chat session?')) return;
+    
+    try {
+      await fetch('/api/reader-chat/sessions', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: sessionId }),
+      });
+      
+      if (currentSessionId === sessionId) {
+        setCurrentSessionId(null);
+        setChatMessages([]);
+      }
+      
+      if (selectedBook) {
+        await loadBookSessions(selectedBook.id);
+      }
+    } catch (error) {
+      console.error('Error deleting session:', error);
+    }
+  }
+
+  // ✅ NEW: Rename session function
+  async function renameSession(sessionId: string, newName: string) {
+    try {
+      const res = await fetch('/api/reader-chat/sessions', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: sessionId, name: `Chat: ${newName}` }),
+      });
+
+      if (!res.ok) {
+        throw new Error('Failed to rename session');
+      }
+
+      if (selectedBook) {
+        await loadBookSessions(selectedBook.id);
+      }
+    } catch (error) {
+      console.error('Error renaming session:', error);
+      alert('Failed to rename session');
+    }
+  }
+
   async function loadBookPdf(book: Book) {
     try {
       setLoading(true);
-      const res = await fetch(`/api/books/download?id=${book.id}`);
-      const data = await res.json();
-      setPdfUrl(data.url);
+      
+      const res = await fetch(`/api/books/${book.id}/pdf`);
+      
+      if (!res.ok) {
+        throw new Error(`Failed to load PDF: ${res.status} ${res.statusText}`);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      
+      console.log('✅ PDF loaded:', url.substring(0, 50) + '...');
+      setPdfUrl(url);
     } catch (error) {
-      console.error('Error loading PDF:', error);
-      alert('Failed to load PDF');
+      console.error('❌ Error loading PDF:', error);
+      alert(`Failed to load PDF: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setPdfUrl(null);
     } finally {
       setLoading(false);
     }
@@ -309,35 +525,171 @@ async function fetchCorpusDocuments() {
     setChatLoading(true);
 
     try {
-      const res = await fetch('/api/query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: userMessage,
-          selectedDocuments: selectedCorpus,
-          context: `Current book: ${selectedBook.title}, Page: ${currentPage}`,
-        }),
-      });
-
-      const data = await res.json();
-      setChatMessages(prev => [...prev, { role: 'assistant', content: data.answer || 'No response' }]);
+      if (!currentSessionId) {
+        console.log('🔄 Creating new session...');
+        const sessionRes = await fetch('/api/reader-chat/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            bookId: selectedBook.id,
+            bookTitle: selectedBook.title,
+          }),
+        });
+        
+        if (!sessionRes.ok) {
+          throw new Error('Failed to create chat session');
+        }
+        
+        const { sessionId } = await sessionRes.json();
+        setCurrentSessionId(sessionId);
+        
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        await sendMessageWithSession(sessionId, userMessage, true);
+        await loadBookSessions(selectedBook.id);
+      } else {
+        await sendMessageWithSession(currentSessionId, userMessage, false);
+      }
+      
     } catch (error) {
-      console.error('Chat error:', error);
-      setChatMessages(prev => [...prev, { role: 'assistant', content: '❌ Error getting response' }]);
+      console.error('❌ Chat error:', error);
+      
+      setChatMessages(prev => {
+        const filtered = prev.filter(msg => msg.content !== '');
+        return [...filtered, { 
+          role: 'assistant', 
+          content: `❌ Error: ${error instanceof Error ? error.message : 'Failed to get response'}` 
+        }];
+      });
     } finally {
       setChatLoading(false);
     }
   }
+
+  async function sendMessageWithSession(sessionId: string, userMessage: string, isNewSession: boolean) {
+    const hasCorpus = selectedCorpus.length > 0;
+    
+    const endpoint = hasCorpus ? '/api/reader-query' : '/api/chat';
+    
+    const body = hasCorpus 
+      ? {
+          query: userMessage,
+          documentIds: selectedCorpus,
+          extractedText: extractedText || undefined,
+          correctSpelling: correctSpelling,
+          aggressiveCorrection: false,
+        }
+      : {
+          message: extractedText 
+            ? `Context from "${selectedBook!.title}" (Page ${currentPage}):\n\n${extractedText}\n\n---\n\nQuestion: ${userMessage}`
+            : `Book: "${selectedBook!.title}", Page: ${currentPage}.\n\nQuestion: ${userMessage}`,
+          sessionId: sessionId,
+        };
+
+    console.log('🔄 Sending to:', endpoint, 'Session:', sessionId);
+
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      throw new Error(`API error: ${res.status}`);
+    }
+
+    const reader = res.body?.getReader();
+    if (!reader) {
+      throw new Error('No streaming reader available');
+    }
+
+    setChatMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+
+    const decoder = new TextDecoder();
+    let fullResponse = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value);
+      fullResponse += chunk;
+
+      setChatMessages(prev => {
+        const newMessages = [...prev];
+        newMessages[newMessages.length - 1] = {
+          role: 'assistant',
+          content: fullResponse
+        };
+        return newMessages;
+      });
+    }
+
+    console.log('✅ Chat response received');
+    
+    await fetch('/api/reader-chat/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: sessionId,
+        userMessage,
+        assistantMessage: fullResponse,
+        bookId: selectedBook!.id,
+        bookTitle: selectedBook!.title,
+        bookPage: currentPage,
+        extractedText: extractedText || null,
+        documentsUsed: hasCorpus ? selectedCorpus : null,
+      }),
+    });
+
+    if (isNewSession) {
+      try {
+        // Generate simple name from first few words of user message
+        const words = userMessage.trim().split(/\s+/).slice(0, 5).join(' ');
+        const autoName = words.length > 40 ? words.substring(0, 40) + '...' : words;
+        
+        await fetch('/api/reader-chat/sessions', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            id: sessionId, 
+            name: `Chat: ${autoName}` 
+          }),
+        });
+        
+        if (selectedBook) {
+          await loadBookSessions(selectedBook.id);
+        }
+      } catch (error) {
+        console.error('Failed to auto-name session:', error);
+      }
+    }
+  } 
 
   async function loadBookmarks() {
     if (!selectedBook) return;
 
     try {
       const res = await fetch(`/api/bookmarks?bookId=${selectedBook.id}`);
+      
+      if (!res.ok) {
+        console.warn(`Bookmarks fetch failed: ${res.status}`);
+        setBookmarks([]);
+        return;
+      }
+
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        console.warn('Non-JSON response from bookmarks API');
+        setBookmarks([]);
+        return;
+      }
+
       const data = await res.json();
-      setBookmarks(data);
+      setBookmarks(Array.isArray(data) ? data : []);
     } catch (error) {
       console.error('Error loading bookmarks:', error);
+      setBookmarks([]);
     }
   }
 
@@ -390,11 +742,15 @@ async function fetchCorpusDocuments() {
   };
 
   const zoomIn = () => {
-    setScale((prev) => Math.min(prev + 0.2, 2.0));
+    setScale((prev) => Math.min(prev + 0.2, 3.0));
   };
 
   const zoomOut = () => {
     setScale((prev) => Math.max(prev - 0.2, 0.5));
+  };
+
+  const resetZoom = () => {
+    setScale(1.0);
   };
 
   const copyToClipboard = () => {
@@ -544,6 +900,18 @@ async function fetchCorpusDocuments() {
                   <Database size={18} />
                   Corpus ({selectedCorpus.length})
                 </button>
+                <button
+                  onClick={() => setCorrectSpelling(!correctSpelling)}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                    correctSpelling 
+                      ? 'bg-orange-600 text-white hover:bg-orange-700' 
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                  title="Auto-correct spelling errors in retrieved text"
+                >
+                  <Sparkles size={18} />
+                  {correctSpelling ? 'Correction ON' : 'Correction OFF'}
+                </button>
               </>
             )}
           </div>
@@ -552,7 +920,7 @@ async function fetchCorpusDocuments() {
         {/* PDF Controls */}
         {selectedBook && (
           <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 bg-slate-50">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3">
               <button
                 onClick={goToPrevPage}
                 disabled={currentPage <= 1}
@@ -586,14 +954,21 @@ async function fetchCorpusDocuments() {
             </div>
 
             <div className="flex items-center gap-2">
-              <button onClick={zoomOut} className="p-2 rounded-lg hover:bg-white transition-colors">
+              <button onClick={zoomOut} className="p-2 rounded-lg hover:bg-white transition-colors" title="Zoom Out (-)">
                 <ZoomOut size={20} />
               </button>
-              <span className="text-sm font-medium text-slate-700 w-16 text-center">
+              <span className="text-sm font-medium text-slate-700 w-20 text-center">
                 {Math.round(scale * 100)}%
               </span>
-              <button onClick={zoomIn} className="p-2 rounded-lg hover:bg-white transition-colors">
+              <button onClick={zoomIn} className="p-2 rounded-lg hover:bg-white transition-colors" title="Zoom In (+)">
                 <ZoomIn size={20} />
+              </button>
+              <button 
+                onClick={resetZoom}
+                className="px-3 py-1.5 text-sm rounded-lg hover:bg-white transition-colors"
+                title="Reset to 100% (0)"
+              >
+                Reset
               </button>
 
               <div className="w-px h-6 bg-slate-300 mx-2"></div>
@@ -607,7 +982,10 @@ async function fetchCorpusDocuments() {
               </button>
 
               <button
-                onClick={() => setShowBookmarks(!showBookmarks)}
+                onClick={() => {
+                  setShowBookmarks(!showBookmarks);
+                  if (!showBookmarks) loadBookmarks();
+                }}
                 className="relative p-2 rounded-lg hover:bg-white transition-colors"
               >
                 <Bookmark size={20} />
@@ -622,16 +1000,34 @@ async function fetchCorpusDocuments() {
         )}
 
         {/* PDF Viewer */}
-        <div className="flex-1 overflow-auto bg-slate-100 p-8">
+        <div 
+          id="pdf-container"
+          className="flex-1 overflow-auto bg-slate-100"
+          style={{ 
+            display: 'flex', 
+            justifyContent: 'center',
+            padding: '2rem'
+          }}
+        >
           {loading ? (
             <div className="flex items-center justify-center h-full">
               <Loader2 className="animate-spin text-emerald-600" size={48} />
             </div>
           ) : pdfUrl ? (
-            <div className="max-w-5xl mx-auto">
+            <div style={{ width: '100%', display: 'flex', justifyContent: 'center' }}>
               <Document
                 file={pdfUrl}
-                onLoadSuccess={({ numPages }) => setNumPages(numPages)}
+                onLoadSuccess={({ numPages }) => {
+                  console.log('✅ PDF loaded successfully:', numPages, 'pages');
+                  setNumPages(numPages);
+                  loadBookmarks();
+                }}
+                onLoadError={(error) => {
+                  console.error('❌ PDF load error:', error);
+                  alert('Failed to load PDF. Please try uploading again.');
+                  setPdfUrl(null);
+                  setNumPages(0);
+                }}
                 loading={
                   <div className="flex items-center justify-center h-96">
                     <Loader2 className="animate-spin text-emerald-600" size={48} />
@@ -642,9 +1038,12 @@ async function fetchCorpusDocuments() {
                 <Page
                   pageNumber={currentPage}
                   scale={scale}
-                  className="mx-auto"
                   renderTextLayer={true}
                   renderAnnotationLayer={true}
+                  onLoadError={(error) => {
+                    console.error('❌ Page load error:', error);
+                  }}
+                  className="shadow-lg"
                 />
               </Document>
             </div>
@@ -662,8 +1061,7 @@ async function fetchCorpusDocuments() {
         {selectedBook && (
           <div className="px-4 py-2 border-t border-slate-200 bg-slate-50">
             <p className="text-xs text-slate-600 text-center">
-              <span className="font-medium">Shortcuts:</span> ← → (Navigate) | +/- (Zoom) | Ctrl+B
-              (Bookmark) | Ctrl+E (Extract Text)
+              <span className="font-medium">Shortcuts:</span> ← → (Navigate) | +/- (Zoom) | 0 (Reset) | Ctrl+B (Bookmark) | Ctrl+E (Extract Text)
             </p>
           </div>
         )}
@@ -671,7 +1069,7 @@ async function fetchCorpusDocuments() {
 
       {/* Bookmarks Sidebar */}
       {showBookmarks && selectedBook && (
-        <div className="w-80 bg-white border-l border-slate-200 flex flex-col">
+        <div className="w-96 bg-white border-l border-slate-200 flex flex-col">
           <div className="flex items-center justify-between p-4 border-b border-slate-200">
             <h3 className="font-semibold text-lg flex items-center gap-2">
               <Bookmark size={20} className="text-emerald-600" />
@@ -727,17 +1125,100 @@ async function fetchCorpusDocuments() {
       {/* AI Chat Sidebar */}
       {showChat && selectedBook && (
         <div className="w-96 bg-white border-l border-slate-200 flex flex-col">
-          <div className="flex items-center justify-between p-4 border-b border-slate-200">
-            <h3 className="font-semibold text-lg flex items-center gap-2">
-              <MessageSquare size={20} className="text-blue-600" />
-              AI Assistant
-            </h3>
-            <button
-              onClick={() => setShowChat(false)}
-              className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
-            >
-              <X size={20} />
-            </button>
+          <div className="p-4 border-b border-slate-200">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold text-lg flex items-center gap-2">
+                <MessageSquare size={20} className="text-blue-600" />
+                AI Assistant
+              </h3>
+              <button
+                onClick={() => setShowChat(false)}
+                className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Session Management Controls */}
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowSessionList(!showSessionList)}
+                  className="flex-1 px-3 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors text-sm font-medium flex items-center justify-center gap-2"
+                >
+                  <Clock size={16} />
+                  {bookSessions.length > 0 ? `${bookSessions.length} Sessions` : 'No Sessions'}
+                </button>
+                <button
+                  onClick={startNewSession}
+                  className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm font-medium"
+                >
+                  New Chat
+                </button>
+              </div>
+
+              {currentSessionId && (
+                <div className="px-3 py-2 bg-slate-50 rounded-lg text-xs text-slate-600">
+                  {bookSessions.find(s => s.id === currentSessionId)?.name || 'Current Session'}
+                </div>
+              )}
+            </div>
+
+            {/* Session List Dropdown */}
+            {showSessionList && bookSessions.length > 0 && (
+              <div className="mt-3 max-h-48 overflow-y-auto border border-slate-200 rounded-lg">
+                {bookSessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className={`p-3 border-b last:border-b-0 group ${
+                      currentSessionId === session.id ? 'bg-blue-50' : ''
+                    }`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div 
+                        className="flex-1 min-w-0 cursor-pointer"
+                        onClick={() => {
+                          loadSessionMessages(session.id);
+                          setShowSessionList(false);
+                        }}
+                      >
+                        <p className="text-sm font-medium text-slate-800 truncate">
+                          {session.name?.replace('Chat: ', '') || `Session ${new Date(session.created_at).toLocaleDateString()}`}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          {new Date(session.updated_at).toLocaleTimeString()}
+                        </p>
+                      </div>
+                      <div className="flex gap-1">
+                        {/* ✅ NEW: Rename button */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const newName = prompt('Enter new name:', session.name?.replace('Chat: ', ''));
+                            if (newName && newName.trim()) {
+                              renameSession(session.id, newName.trim());
+                            }
+                          }}
+                          className="p-1 hover:bg-blue-100 rounded transition-colors"
+                          title="Rename session"
+                        >
+                          <Pencil size={14} className="text-blue-600" />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteSession(session.id);
+                          }}
+                          className="p-1 hover:bg-red-100 rounded transition-colors"
+                        >
+                          <Trash2 size={14} className="text-red-600" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -745,11 +1226,15 @@ async function fetchCorpusDocuments() {
               <div className="text-center py-12">
                 <Sparkles size={48} className="mx-auto text-slate-300 mb-3" />
                 <p className="text-slate-500 text-sm">Ask me anything about this book</p>
-                <p className="text-slate-400 text-xs mt-1">Using {selectedCorpus.length} corpus documents</p>
+                <p className="text-slate-400 text-xs mt-1">
+                  {selectedCorpus.length > 0 
+                    ? `Using ${selectedCorpus.length} corpus document${selectedCorpus.length !== 1 ? 's' : ''}`
+                    : 'No corpus documents selected'}
+                </p>
               </div>
             ) : (
               chatMessages.map((msg, idx) => (
-                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div key={`${currentSessionId}-msg-${idx}`} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[80%] p-3 rounded-lg ${
                     msg.role === 'user' 
                       ? 'bg-blue-600 text-white' 
@@ -770,19 +1255,33 @@ async function fetchCorpusDocuments() {
           </div>
 
           <div className="p-4 border-t border-slate-200">
-            <div className="flex gap-2">
-              <input
-                type="text"
+            <div className="flex gap-2 items-end">
+              <textarea
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && sendChatMessage()}
-                placeholder="Ask a question..."
-                className="flex-1 px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendChatMessage();
+                  }
+                }}
+                placeholder="Ask a question... (Shift+Enter for new line)"
+                rows={1}
+                className="flex-1 px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none min-h-[40px] max-h-[200px] overflow-y-auto"
+                style={{
+                  height: 'auto',
+                  minHeight: '40px',
+                }}
+                onInput={(e) => {
+                  const target = e.target as HTMLTextAreaElement;
+                  target.style.height = 'auto';
+                  target.style.height = Math.min(target.scrollHeight, 200) + 'px';
+                }}
               />
               <button
                 onClick={sendChatMessage}
                 disabled={!chatInput.trim() || chatLoading}
-                className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors flex-shrink-0"
               >
                 <Send size={20} />
               </button>
@@ -793,7 +1292,7 @@ async function fetchCorpusDocuments() {
 
       {/* Corpus Selector Sidebar */}
       {showCorpus && selectedBook && (
-        <div className="w-80 bg-white border-l border-slate-200 flex flex-col">
+        <div className="w-96 bg-white border-l border-slate-200 flex flex-col">
           <div className="flex items-center justify-between p-4 border-b border-slate-200">
             <h3 className="font-semibold text-lg flex items-center gap-2">
               <Database size={20} className="text-purple-600" />
@@ -849,20 +1348,43 @@ async function fetchCorpusDocuments() {
                 <button
                   onClick={copyToClipboard}
                   disabled={extracting || !extractedText}
-                  className="p-2 hover:bg-slate-100 rounded disabled:opacity-50"
+                  className="p-2 hover:bg-slate-100 rounded disabled:opacity-50 transition-colors"
                   title="Copy to clipboard"
                 >
                   {copied ? <Check size={20} className="text-green-600" /> : <Copy size={20} />}
                 </button>
-                <button onClick={() => setShowTextPopup(false)} className="p-2 hover:bg-slate-100 rounded">
+                <button
+                  onClick={() => {
+                    if (extractedText && extractedText.trim()) {
+                      setChatInput(prev => prev ? `${prev}\n\n${extractedText}` : extractedText);
+                      setShowTextPopup(false);
+                      setShowChat(true);
+                    }
+                  }}
+                  disabled={extracting || !extractedText}
+                  className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                  title="Add to chat"
+                >
+                  <MessageSquare size={18} />
+                  <span className="text-sm">Add to Chat</span>
+                </button>
+                <button 
+                  onClick={() => setShowTextPopup(false)} 
+                  className="p-2 hover:bg-slate-100 rounded transition-colors"
+                >
                   <X size={20} />
                 </button>
               </div>
             </div>
+            
             <div className="flex-1 overflow-y-auto p-4">
-              <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">
-                {extractedText}
-              </pre>
+              <textarea
+                value={extractedText}
+                onChange={(e) => setExtractedText(e.target.value)}
+                disabled={extracting}
+                className="w-full h-full min-h-[400px] p-3 font-sans text-sm leading-relaxed border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-none"
+                placeholder="Extracted text will appear here..."
+              />
             </div>
           </div>
         </div>

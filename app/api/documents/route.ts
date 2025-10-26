@@ -1,5 +1,5 @@
-import { NextResponse } from 'next/server';
-import { getDocuments } from '@/lib/db';
+import { NextRequest, NextResponse } from 'next/server';
+import { getDocuments, getDb } from '@/lib/db';
 import { supabaseAdmin } from '@/lib/supabase';
 
 interface Document {
@@ -17,7 +17,7 @@ interface Document {
 export async function GET() {
   try {
     // Get documents from SQLite
-    const documents = getDocuments() as Document[]; // ✅ Fixed type
+    const documents = getDocuments() as Document[];
 
     // ✅ Enrich with real-time Supabase chunk counts
     const enrichedDocs = await Promise.all(
@@ -51,11 +51,33 @@ export async function GET() {
       })
     );
 
-    return NextResponse.json(enrichedDocs);
+    // ✅ FIX: Return object with documents property (consistent with ChatPanel expectation)
+    return NextResponse.json({ documents: enrichedDocs });
   } catch (error) {
     console.error('❌ Error fetching documents:', error);
     return NextResponse.json(
       { error: 'Failed to fetch documents' }, 
+      { status: 500 }
+    );
+  }
+}
+
+export async function PATCH(request: NextRequest) {
+  try {
+    const { documentId, isSelected } = await request.json();
+    
+    const db = getDb();
+    db.prepare(`
+      UPDATE documents 
+      SET is_selected = ?
+      WHERE id = ?
+    `).run(isSelected ? 1 : 0, documentId);
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error('Error updating document selection:', error);
+    return NextResponse.json(
+      { error: 'Failed to update selection' },
       { status: 500 }
     );
   }

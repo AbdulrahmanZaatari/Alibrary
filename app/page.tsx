@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import dynamic from 'next/dynamic';
 import CorpusManager from '@/components/CorpusManager';
 import PromptLibrary from '@/components/PromptLibrary';
@@ -8,7 +8,6 @@ import ChatPanel from '@/components/ChatPanel';
 import HistoryPanel from '@/components/HistoryPanel';
 import { Book, MessageSquare, Clock, Sparkles, FileText, Loader2 } from 'lucide-react';
 
-// ✅ Dynamic import with SSR disabled to prevent DOMMatrix error
 const ReaderMode = dynamic(() => import('@/components/ReaderMode'), {
   ssr: false,
   loading: () => (
@@ -24,6 +23,24 @@ export default function Home() {
   const [selectedDocuments, setSelectedDocuments] = useState<string[]>([]);
   const [currentView, setCurrentView] = useState<ViewMode>('reader');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  
+  // ✅ Initialize from localStorage directly to avoid cascading updates
+  const [selectedBookId, setSelectedBookId] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('reader-book-id');
+    }
+    return null;
+  });
+
+  // ✅ Only update localStorage when book changes (no setState in effect)
+  const handleBookSelect = (bookId: string | null) => {
+    if (bookId) {
+      localStorage.setItem('reader-book-id', bookId);
+    } else {
+      localStorage.removeItem('reader-book-id');
+    }
+    setSelectedBookId(bookId);
+  };
 
   const views = [
     { id: 'reader', label: 'Reader', icon: Book },
@@ -112,7 +129,10 @@ export default function Home() {
         {/* Content Area */}
         <div className="flex-1 overflow-hidden">
           {currentView === 'reader' && (
-            <ReaderMode />
+            <ReaderMode 
+              persistedBookId={selectedBookId}
+              onBookSelect={handleBookSelect}
+            />
           )}
           {currentView === 'chat' && (
             <ChatPanel selectedDocuments={selectedDocuments} />

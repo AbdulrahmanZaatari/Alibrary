@@ -1,4 +1,3 @@
-// components/ChatPanel.tsx
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
@@ -75,7 +74,7 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
         id: msg.id,
         role: msg.role,
         content: msg.content,
-        timestamp: msg.timestamp,
+        timestamp: msg.created_at,
         documentsUsed: msg.documents_used ? JSON.parse(msg.documents_used) : undefined
       })));
     } catch (error) {
@@ -88,7 +87,7 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
       const res = await fetch('/api/chat/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: `Chat ${new Date().toLocaleDateString()}` })
+        body: JSON.stringify({ name: `New Chat` })
       });
       const data = await res.json();
       setCurrentSession(data.id);
@@ -129,10 +128,14 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
       return;
     }
 
+    // ✅ Check if this is the first message in the session
+    const isNewSession = messages.length === 0;
+    const userMessageContent = input.trim();
+
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: input,
+      content: userMessageContent,
       timestamp: new Date().toISOString()
     };
 
@@ -143,8 +146,8 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
     try {
       const endpoint = mode === 'corpus' ? '/api/query' : '/api/chat';
       const body = mode === 'corpus' 
-        ? { query: input, documentIds: selectedDocuments }
-        : { message: input, sessionId: currentSession };
+        ? { query: userMessageContent, documentIds: selectedDocuments }
+        : { message: userMessageContent, sessionId: currentSession };
 
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -188,12 +191,34 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sessionId: currentSession,
-          userMessage: userMessage.content,
+          userMessage: userMessageContent,
           assistantMessage: fullResponse,
           documentsUsed: mode === 'corpus' ? selectedDocuments : undefined,
           mode
         })
       });
+
+      // ✅ Auto-name session based on first prompt
+      if (isNewSession) {
+        try {
+          // Generate simple name from first few words
+          const words = userMessageContent.split(/\s+/).slice(0, 5).join(' ');
+          const autoName = words.length > 40 ? words.substring(0, 40) + '...' : words;
+          
+          await fetch('/api/chat/rename-session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              sessionId: currentSession, 
+              name: autoName 
+            }),
+          });
+          
+          await fetchSessions();
+        } catch (error) {
+          console.error('Failed to auto-name session:', error);
+        }
+      }
 
     } catch (error) {
       console.error('Chat error:', error);
@@ -367,7 +392,7 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
 
                   {message.role === 'user' && (
                     <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
-                      <span className="text-slate-600 font-semibold">You</span>
+                      <span className="text-slate-600 font-semibold text-sm">You</span>
                     </div>
                   )}
                 </div>

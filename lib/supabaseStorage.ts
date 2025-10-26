@@ -5,34 +5,38 @@ const BOOKS_BUCKET = 'reader-books';
 // Initialize bucket
 async function initBucket() {
   const { data: buckets } = await supabaseAdmin.storage.listBuckets();
-  
-  if (!buckets?.find(b => b.name === BOOKS_BUCKET)) {
+  const exists = buckets?.some(b => b.name === BOOKS_BUCKET);
+
+  if (!exists) {
     await supabaseAdmin.storage.createBucket(BOOKS_BUCKET, {
       public: false,
-      fileSizeLimit: 104857600, // 100MB
+      fileSizeLimit: 52428800,
     });
-    console.log('✅ Created Supabase bucket:', BOOKS_BUCKET);
+    console.log(`✅ Created bucket: ${BOOKS_BUCKET}`);
   }
 }
 
 initBucket().catch(console.error);
 
-// Upload book to Supabase
+// ✅ FIX: Upload book to Supabase with correct path
 export async function uploadBookToSupabase(
   bookId: string,
   fileBuffer: Buffer,
   filename: string
 ): Promise<string> {
-  const path = `${bookId}/${filename}`;
+  // ✅ CORRECT PATH: "books/bookId.pdf" instead of "bookId/bookId.pdf"
+  const path = `books/${bookId}.pdf`;
   
   const { error } = await supabaseAdmin.storage
     .from(BOOKS_BUCKET)
     .upload(path, fileBuffer, {
       contentType: 'application/pdf',
-      upsert: false,
+      upsert: false
     });
 
   if (error) throw new Error(`Supabase upload failed: ${error.message}`);
+  
+  console.log('✅ Uploaded to path:', path);
   return path;
 }
 

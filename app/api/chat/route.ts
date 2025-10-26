@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { generateResponse } from '@/lib/gemini'; // ✅ Changed from queryLLM
+import { generateResponse } from '@/lib/gemini';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -14,6 +14,14 @@ export async function POST(request: NextRequest) {
   (async () => {
     try {
       const { message, sessionId } = await request.json();
+
+      // ✅ GUARD: Don't handle reader sessions here
+      if (sessionId && sessionId.startsWith('reader-')) {
+        console.warn('⚠️  Reader session detected - redirecting to /api/reader-chat');
+        await writer.write(encoder.encode('Error: Use /api/reader-chat for reader mode sessions'));
+        await writer.close();
+        return;
+      }
 
       if (!message || !sessionId) {
         console.error('❌ Missing message or sessionId');

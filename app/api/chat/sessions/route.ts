@@ -10,7 +10,10 @@ export async function GET() {
       ORDER BY updated_at DESC
     `).all();
 
-    return NextResponse.json(sessions);
+    // ✅ Filter out reader-mode sessions (those with book_id)
+    const generalSessions = sessions.filter((session: any) => !session.book_id);
+
+    return NextResponse.json(generalSessions);
   } catch (error) {
     console.error('Error fetching sessions:', error);
     return NextResponse.json({ error: 'Failed to fetch sessions' }, { status: 500 });

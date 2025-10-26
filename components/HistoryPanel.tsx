@@ -1,8 +1,7 @@
-// components/HistoryPanel.tsx
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Clock, MessageSquare, FileText, Trash2, Calendar, Search, Filter } from 'lucide-react';
+import { Clock, MessageSquare, FileText, Trash2, Calendar, Search, BookOpen, Database, Pencil } from 'lucide-react';
 
 interface ChatSession {
   id: string;
@@ -10,6 +9,9 @@ interface ChatSession {
   created_at: string;
   updated_at: string;
   messageCount?: number;
+  mode?: 'general' | 'reader';
+  book_id?: string;
+  book_title?: string;
 }
 
 interface ChatMessage {
@@ -18,8 +20,11 @@ interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   documents_used: string | null;
+  document_names: string | null;
   mode: string;
   created_at: string;
+  book_page?: number;
+  extracted_text?: string;
 }
 
 export default function HistoryPanel() {
@@ -27,7 +32,7 @@ export default function HistoryPanel() {
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
-  const [filterMode, setFilterMode] = useState<'all' | 'corpus' | 'general'>('all');
+  const [filterMode, setFilterMode] = useState<'all' | 'general' | 'reader'>('all');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -43,22 +48,48 @@ export default function HistoryPanel() {
   const fetchSessions = async () => {
     try {
       setLoading(true);
-      const res = await fetch('/api/chat/sessions');
-      const data = await res.json();
       
-      // Fetch message counts for each session
-      const sessionsWithCounts = await Promise.all(
-        data.map(async (session: ChatSession) => {
+      const [generalRes, readerRes] = await Promise.all([
+        fetch('/api/chat/sessions'),
+        fetch('/api/reader-chat/sessions/all')
+      ]);
+      
+      const generalData = await generalRes.json();
+      const readerData = await readerRes.json();
+      
+      const generalSessions = await Promise.all(
+        generalData.map(async (session: ChatSession) => {
           const msgRes = await fetch(`/api/chat/messages?sessionId=${session.id}`);
           const messages = await msgRes.json();
+          
           return {
             ...session,
-            messageCount: messages.length
+            messageCount: messages.length,
+            mode: 'general' as const,
           };
         })
       );
       
-      setSessions(sessionsWithCounts);
+      const readerSessions = await Promise.all(
+        (readerData || []).map(async (session: any) => {
+          const msgRes = await fetch(`/api/reader-chat/messages?sessionId=${session.id}`);
+          const messages = await msgRes.json();
+          
+          return {
+            ...session,
+            messageCount: messages.length,
+            mode: 'reader' as const,
+            book_id: session.book_id,
+            book_title: session.book_title || 'Unknown Book'
+          };
+        })
+      );
+      
+      const allSessions = [...generalSessions, ...readerSessions].sort((a, b) => 
+        new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+      );
+      
+      setSessions(allSessions);
     } catch (error) {
       console.error('Error fetching sessions:', error);
     } finally {
@@ -68,7 +99,12 @@ export default function HistoryPanel() {
 
   const fetchMessages = async (sessionId: string) => {
     try {
-      const res = await fetch(`/api/chat/messages?sessionId=${sessionId}`);
+      const session = sessions.find(s => s.id === sessionId);
+      const endpoint = session?.mode === 'reader' 
+        ? `/api/reader-chat/messages?sessionId=${sessionId}`
+        : `/api/chat/messages?sessionId=${sessionId}`;
+      
+      const res = await fetch(endpoint);
       const data = await res.json();
       setMessages(data);
     } catch (error) {
@@ -76,7 +112,7 @@ export default function HistoryPanel() {
     }
   };
 
-  const deleteSession = async (sessionId: string, e: React.MouseEvent) => {
+  const deleteSession = async (sessionId: string, mode: 'general' | 'reader', e: React.MouseEvent) => {
     e.stopPropagation();
     
     if (!confirm('Are you sure you want to delete this chat session? This action cannot be undone.')) {
@@ -84,7 +120,11 @@ export default function HistoryPanel() {
     }
 
     try {
-      await fetch('/api/chat/sessions', {
+      const endpoint = mode === 'reader' 
+        ? '/api/reader-chat/sessions'
+        : '/api/chat/sessions';
+      
+      await fetch(endpoint, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: sessionId })
@@ -102,19 +142,57 @@ export default function HistoryPanel() {
     }
   };
 
+  const renameSession = async (sessionId: string, currentName: string, mode: 'general' | 'reader', e: React.MouseEvent) => {
+    e.stopPropagation();
+    
+    const cleanName = currentName.replace('Chat: ', '');
+    const newName = prompt('Enter new name:', cleanName);
+    
+    if (!newName || newName.trim() === cleanName) return;
+
+    try {
+      const endpoint = mode === 'reader'
+        ? '/api/reader-chat/sessions'
+        : '/api/chat/rename-session';
+      
+      if (mode === 'reader') {
+        await fetch(endpoint, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: sessionId, name: `Chat: ${newName.trim()}` })
+        });
+      } else {
+        await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId, name: newName.trim() })
+        });
+      }
+      
+      await fetchSessions();
+    } catch (error) {
+      console.error('Error renaming session:', error);
+      alert('Failed to rename session');
+    }
+  };
+
   const clearAllHistory = async () => {
     if (!confirm('Are you sure you want to delete ALL chat history? This action cannot be undone.')) {
       return;
     }
 
     try {
-      await Promise.all(sessions.map(session => 
-        fetch('/api/chat/sessions', {
+      await Promise.all(sessions.map(session => {
+        const endpoint = session.mode === 'reader'
+          ? '/api/reader-chat/sessions'
+          : '/api/chat/sessions';
+        
+        return fetch(endpoint, {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: session.id })
-        })
-      ));
+        });
+      }));
       
       setSessions([]);
       setSelectedSession(null);
@@ -125,14 +203,23 @@ export default function HistoryPanel() {
     }
   };
 
+  const getDocumentNames = (message: ChatMessage): string[] => {
+    if (message.document_names) {
+      try {
+        return JSON.parse(message.document_names);
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  };
+
   const filteredSessions = sessions.filter(session => {
-    // Search filter
-    const matchesSearch = session.name.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesSearch = session.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                          session.book_title?.toLowerCase().includes(searchQuery.toLowerCase());
     
-    // Mode filter (would need to check messages for this - simplified here)
     if (filterMode === 'all') return matchesSearch;
-    
-    return matchesSearch;
+    return matchesSearch && session.mode === filterMode;
   });
 
   const groupSessionsByDate = (sessions: ChatSession[]) => {
@@ -165,6 +252,7 @@ export default function HistoryPanel() {
   };
 
   const groupedSessions = groupSessionsByDate(filteredSessions);
+  const selectedSessionData = sessions.find(s => s.id === selectedSession);
 
   return (
     <div className="h-full flex bg-slate-50">
@@ -202,19 +290,38 @@ export default function HistoryPanel() {
 
           {/* Filters */}
           <div className="flex gap-2">
-            {(['all', 'corpus', 'general'] as const).map(mode => (
-              <button
-                key={mode}
-                onClick={() => setFilterMode(mode)}
-                className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
-                  filterMode === mode
-                    ? 'bg-emerald-100 text-emerald-700'
-                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                }`}
-              >
-                {mode.charAt(0).toUpperCase() + mode.slice(1)}
-              </button>
-            ))}
+            <button
+              onClick={() => setFilterMode('all')}
+              className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                filterMode === 'all'
+                  ? 'bg-emerald-100 text-emerald-700'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              All
+            </button>
+            <button
+              onClick={() => setFilterMode('general')}
+              className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-1 ${
+                filterMode === 'general'
+                  ? 'bg-blue-100 text-blue-700'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              <MessageSquare size={12} />
+              General
+            </button>
+            <button
+              onClick={() => setFilterMode('reader')}
+              className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-1 ${
+                filterMode === 'reader'
+                  ? 'bg-purple-100 text-purple-700'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              <BookOpen size={12} />
+              Reader
+            </button>
           </div>
         </div>
 
@@ -235,6 +342,11 @@ export default function HistoryPanel() {
               <p className="text-slate-600 font-medium mb-1">No chat history yet</p>
               <p className="text-sm text-slate-500">Your conversations will appear here</p>
             </div>
+          ) : filteredSessions.length === 0 ? (
+            <div className="text-center py-12">
+              <p className="text-slate-600 font-medium mb-1">No results</p>
+              <p className="text-sm text-slate-500">Try adjusting your filters</p>
+            </div>
           ) : (
             <div className="space-y-6">
               {Object.entries(groupedSessions).map(([period, periodSessions]) => (
@@ -254,16 +366,48 @@ export default function HistoryPanel() {
                             : 'bg-slate-50 border-2 border-transparent hover:border-slate-300 hover:shadow-sm'
                         }`}
                       >
+                        {/* Mode Badge */}
+                        <div className="flex items-center gap-2 mb-2">
+                          {session.mode === 'reader' ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 text-xs font-medium rounded">
+                              <BookOpen size={10} />
+                              Reader
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 text-xs font-medium rounded">
+                              <MessageSquare size={10} />
+                              General
+                            </span>
+                          )}
+                        </div>
+
                         <div className="flex items-start justify-between mb-2">
-                          <p className="font-medium text-sm text-slate-800 line-clamp-2 flex-1 mr-2">
-                            {session.name}
-                          </p>
-                          <button
-                            onClick={(e) => deleteSession(session.id, e)}
-                            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 rounded transition-all"
-                          >
-                            <Trash2 size={14} className="text-red-600" />
-                          </button>
+                          <div className="flex-1 mr-2">
+                            <p className="font-medium text-sm text-slate-800 line-clamp-2">
+                              {session.name}
+                            </p>
+                            {session.mode === 'reader' && session.book_title && (
+                              <p className="text-xs text-purple-600 mt-1 flex items-center gap-1">
+                                <BookOpen size={10} />
+                                {session.book_title}
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex gap-1">
+                            <button
+                              onClick={(e) => renameSession(session.id, session.name, session.mode!, e)}
+                              className="opacity-0 group-hover:opacity-100 p-1 hover:bg-blue-100 rounded transition-all"
+                              title="Rename"
+                            >
+                              <Pencil size={14} className="text-blue-600" />
+                            </button>
+                            <button
+                              onClick={(e) => deleteSession(session.id, session.mode!, e)}
+                              className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 rounded transition-all"
+                            >
+                              <Trash2 size={14} className="text-red-600" />
+                            </button>
+                          </div>
                         </div>
                         
                         <div className="flex items-center gap-3 text-xs text-slate-500">
@@ -291,62 +435,102 @@ export default function HistoryPanel() {
           <>
             {/* Message Header */}
             <div className="p-4 border-b border-slate-200 bg-white">
-              <h3 className="text-lg font-semibold text-slate-800">
-                {sessions.find(s => s.id === selectedSession)?.name}
-              </h3>
-              <p className="text-sm text-slate-500 mt-1">
-                {messages.length} messages • Last updated {new Date(sessions.find(s => s.id === selectedSession)?.updated_at || '').toLocaleString()}
-              </p>
+              <div className="flex items-start justify-between">
+                <div>
+                  <h3 className="text-lg font-semibold text-slate-800">
+                    {selectedSessionData?.name}
+                  </h3>
+                  <p className="text-sm text-slate-500 mt-1">
+                    {messages.length} messages • Last updated {new Date(selectedSessionData?.updated_at || '').toLocaleString()}
+                  </p>
+                  
+                  {selectedSessionData?.mode === 'reader' && selectedSessionData.book_title && (
+                    <div className="mt-3 p-3 bg-purple-50 rounded-lg border border-purple-200">
+                      <p className="text-sm font-medium text-purple-900 flex items-center gap-2">
+                        <BookOpen size={16} className="text-purple-600" />
+                        Reading: {selectedSessionData.book_title}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
 
             {/* Messages */}
             <div className="flex-1 overflow-y-auto p-6">
               <div className="space-y-6 max-w-4xl mx-auto">
-                {messages.map((message) => (
-                  <div
-                    key={message.id}
-                    className={`flex gap-4 ${
-                      message.role === 'user' ? 'justify-end' : 'justify-start'
-                    }`}
-                  >
-                    {message.role === 'assistant' && (
-                      <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center flex-shrink-0">
-                        <MessageSquare className="text-white" size={20} />
-                      </div>
-                    )}
-                    
+                {messages.map((message) => {
+                  const docNames = getDocumentNames(message);
+                  
+                  return (
                     <div
-                      className={`max-w-3xl rounded-2xl px-6 py-4 ${
-                        message.role === 'user'
-                          ? 'bg-emerald-600 text-white'
-                          : 'bg-white border border-slate-200 text-slate-800'
+                      key={message.id}
+                      className={`flex gap-4 ${
+                        message.role === 'user' ? 'justify-end' : 'justify-start'
                       }`}
                     >
-                      <p className="whitespace-pre-wrap leading-relaxed">
-                        {message.content}
-                      </p>
-                      
-                      {message.documents_used && (
-                        <div className="mt-3 pt-3 border-t border-slate-200">
-                          <p className="text-xs text-slate-500 flex items-center gap-1">
-                            <FileText size={12} />
-                            Corpus Search • {JSON.parse(message.documents_used).length} document(s)
-                          </p>
+                      {message.role === 'assistant' && (
+                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center flex-shrink-0">
+                          <MessageSquare className="text-white" size={20} />
                         </div>
                       )}
                       
-                      <p className="text-xs opacity-60 mt-2">
-                        {new Date(message.created_at).toLocaleString()}
-                      </p>
-                    </div>
-
-                    {message.role === 'user' && (
-                      <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
-                        <span className="text-slate-600 font-semibold text-sm">You</span>
+                      <div
+                        className={`max-w-3xl rounded-2xl px-6 py-4 ${
+                          message.role === 'user'
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-white border border-slate-200 text-slate-800'
+                        }`}
+                      >
+                        <p className="whitespace-pre-wrap leading-relaxed">
+                          {message.content}
+                        </p>
+                        
+                        {message.book_page && (
+                          <div className={`mt-3 pt-3 border-t ${message.role === 'user' ? 'border-white/20' : 'border-purple-200'}`}>
+                            <p className={`text-xs flex items-center gap-1 font-medium ${message.role === 'user' ? 'text-white/80' : 'text-purple-600'}`}>
+                              <BookOpen size={12} />
+                              Page {message.book_page}
+                            </p>
+                          </div>
+                        )}
+                        
+                        {docNames.length > 0 && (
+                          <div className={`mt-3 pt-3 border-t ${message.role === 'user' ? 'border-white/20' : 'border-slate-200'}`}>
+                            <p className={`text-xs flex items-center gap-1 mb-2 font-medium ${message.role === 'user' ? 'text-white/80' : 'text-slate-600'}`}>
+                              <Database size={12} />
+                              Corpus Documents Used:
+                            </p>
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {docNames.map((name: string, idx: number) => (
+                                <span
+                                  key={idx}
+                                  className={`text-xs px-2 py-0.5 rounded ${
+                                    message.role === 'user'
+                                      ? 'bg-white/20 text-white'
+                                      : 'bg-purple-100 text-purple-700'
+                                  }`}
+                                >
+                                  {name}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        
+                        <p className={`text-xs mt-2 ${message.role === 'user' ? 'text-white/60' : 'text-slate-500'}`}>
+                          {new Date(message.created_at).toLocaleString()}
+                        </p>
                       </div>
-                    )}
-                  </div>
-                ))}
+
+                      {message.role === 'user' && (
+                        <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
+                          <span className="text-slate-600 font-semibold text-sm">You</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </>
