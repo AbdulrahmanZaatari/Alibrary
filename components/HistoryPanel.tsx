@@ -4,6 +4,13 @@ import { useState, useEffect } from 'react';
 import { Clock, MessageSquare, FileText, Trash2, Calendar, Search, BookOpen, Database, Pencil, Download, FileJson, FileCode } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { jsPDF } from 'jspdf';
+import amiriFont from '../lib/fonts/Amiri-Regular-normal.js';
+
+jsPDF.API.events.push(['addFonts', function(this: any) {
+  this.addFileToVFS('Amiri-Regular.ttf', amiriFont);
+  this.addFont('Amiri-Regular.ttf', 'Amiri', 'normal');
+}]);
 
 interface ChatSession {
   id: string;
@@ -207,6 +214,118 @@ export default function HistoryPanel() {
       alert('Failed to clear history');
     }
   };
+
+  const exportAsPDF = () => {
+  if (!selectedSession || messages.length === 0) return;
+
+  const session = sessions.find(s => s.id === selectedSession);
+
+  const doc = new jsPDF({
+    orientation: 'portrait',
+    unit: 'pt',
+    format: 'a4',
+  });
+
+  doc.setFont('Amiri');
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const leftMargin = 60;
+  const rightMargin = pageWidth - 60;
+  let y = 40;
+
+  // Header
+  doc.setFontSize(18);
+  doc.text(session?.name || 'Chat Session', rightMargin, y, { align: 'right' });
+  y += 30;
+
+  doc.setFontSize(12);
+  doc.text(`Mode: ${session?.mode || ''}`, rightMargin, y, { align: 'right' });
+  y += 20;
+  if (session?.book_title) {
+    doc.text(`Book: ${session.book_title}`, rightMargin, y, { align: 'right' });
+    y += 20;
+  }
+  doc.text(`Created: ${new Date(session?.created_at || '').toLocaleString()}`, rightMargin, y, { align: 'right' });
+  y += 20;
+  doc.text(`Last Updated: ${new Date(session?.updated_at || '').toLocaleString()}`, rightMargin, y, { align: 'right' });
+  y += 20;
+  doc.text(`Messages: ${messages.length}`, rightMargin, y, { align: 'right' });
+  y += 30;
+
+  // Helper to render markdown-like text with direction support
+  const renderMarkdownWithDirection = (text: string, y: number) => {
+    const lines = text.split('\n');
+    lines.forEach(line => {
+      let cleanLine = line.replace(/\*\*(.*?)\*\*/g, '$1').replace(/\*(.*?)\*/g, '$1');
+      if (/^\s*[-*]\s+/.test(cleanLine)) {
+        cleanLine = '• ' + cleanLine.replace(/^\s*[-*]\s+/, '');
+      }
+      const isArabic = cleanLine.match(/[\u0600-\u06FF]/);
+      const align = isArabic ? 'right' : 'left';
+      const x = isArabic ? rightMargin : leftMargin;
+      // Split long lines manually to avoid wrapping issues
+      const chunkSize = isArabic ? 60 : 80;
+      for (let i = 0; i < cleanLine.length; i += chunkSize) {
+        const chunk = cleanLine.slice(i, i + chunkSize);
+        doc.text(chunk, x, y, { align });
+        y += 14;
+      }
+    });
+    return y;
+  };
+
+  messages.forEach((msg, idx) => {
+    if (y > 780) {
+      doc.addPage();
+      doc.setFont('Amiri');
+      y = 40;
+    }
+    doc.setFontSize(13);
+    doc.setTextColor(msg.role === 'user' ? '#1976d2' : '#009688');
+    // Always show label on its own line
+    const label = msg.role === 'user' ? '👤 User:' : '🤖 Assistant:';
+    const isLabelArabic = label.match(/[\u0600-\u06FF]/);
+    const labelAlign = isLabelArabic ? 'right' : 'left';
+    const labelX = isLabelArabic ? rightMargin : leftMargin;
+    doc.text(label, labelX, y, { align: labelAlign });
+    y += 18;
+
+    doc.setFontSize(11);
+    doc.setTextColor('#222');
+    // Render each line with correct direction
+    y = renderMarkdownWithDirection(msg.content, y);
+
+    if (msg.book_page) {
+      doc.setFontSize(10);
+      doc.setTextColor('#6d28d9');
+      doc.text(`Page: ${msg.book_page}`, rightMargin, y, { align: 'right' });
+      y += 14;
+    }
+
+    if (msg.document_names) {
+      try {
+        const docNames = JSON.parse(msg.document_names);
+        if (docNames.length > 0) {
+          doc.setFontSize(10);
+          doc.setTextColor('#e11d48');
+          doc.text(`Documents Used: ${docNames.join(', ')}`, rightMargin, y, { align: 'right' });
+          y += 14;
+        }
+      } catch {}
+    }
+
+    doc.setFontSize(9);
+    doc.setTextColor('#888');
+    doc.text(new Date(msg.created_at).toLocaleString(), rightMargin, y, { align: 'right' });
+    y += 20;
+
+    doc.setDrawColor(200);
+    doc.line(leftMargin, y, rightMargin, y);
+    y += 10;
+  });
+
+  doc.save(`${session?.name.replace(/[^a-z0-9]/gi, '_')}_${new Date().toISOString().split('T')[0]}.pdf`);
+  setShowExportMenu(false);
+};
 
   // ✅ NEW: Export as JSON
   const exportAsJSON = () => {
@@ -599,6 +718,18 @@ export default function HistoryPanel() {
                           <div>
                             <p className="text-sm font-medium text-slate-800">Export as Markdown</p>
                             <p className="text-xs text-slate-500">Formatted text</p>
+                          </div>
+                        </button>
+                        <div className="border-t border-slate-200" />
+                        {/* ✅ Add this button for PDF export */}
+                        <button
+                          onClick={exportAsPDF}
+                          className="w-full flex items-center gap-3 px-4 py-3 hover:bg-slate-50 transition-colors text-left rounded-b-lg"
+                        >
+                          <FileText size={18} className="text-red-600" />
+                          <div>
+                            <p className="text-sm font-medium text-slate-800">Export as PDF</p>
+                            <p className="text-xs text-slate-500">Printable file</p>
                           </div>
                         </button>
                       </div>

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Send, Loader2, Sparkles, BookOpen, FileText, Trash2, Plus, Settings, X } from 'lucide-react';
+import { Send, Loader2, Sparkles, BookOpen, FileText, Trash2, Plus, Settings, X, Copy } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -445,6 +445,19 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                   }`}
                 >
                   {message.role === 'assistant' ? (
+                    <div className="relative">
+                      <div className="flex justify-end">
+                        <button
+                          className="mb-1 mr-1 p-1 bg-slate-100 rounded hover:bg-slate-200 transition-colors text-xs"
+                          title="Copy response"
+                          onClick={() => {
+                            navigator.clipboard.writeText(message.content);
+                          }}
+                        >
+                          <Copy size={16} className="inline mr-1" />
+                          Copy
+                        </button>
+                      </div>
                     <div 
                       className="prose prose-sm max-w-none dark:prose-invert"
                       dir={message.content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
@@ -508,6 +521,7 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                         {message.content}
                       </ReactMarkdown>
                     </div>
+                  </div>
                   ) : (
                     <p className="whitespace-pre-wrap leading-relaxed">
                       {message.content}

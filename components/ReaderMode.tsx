@@ -1370,6 +1370,19 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                       : 'bg-slate-50 border border-slate-200'
                   }`}>
                     {msg.role === 'assistant' ? (
+                      <div className = "relative">
+                      <div className="flex justify-end">
+                        <button
+                          className="mb-1 mr-1 p-1 bg-slate-100 rounded hover:bg-slate-200 transition-colors text-xs"
+                          title="Copy response"
+                          onClick={() => {
+                            navigator.clipboard.writeText(msg.content);
+                          }}
+                        >
+                          <Copy size={16} className="inline mr-1" />
+                          Copy
+                        </button>
+                      </div>
                       <div 
                         className="prose prose-sm max-w-none p-3"
                         dir={msg.content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
@@ -1403,6 +1416,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                           {msg.content}
                         </ReactMarkdown>
                       </div>
+                    </div>
                     ) : (
                       <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                     )}
