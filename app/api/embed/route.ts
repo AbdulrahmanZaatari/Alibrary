@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { join } from 'path';
 import { readFile } from 'fs/promises';
-import { processAndEmbedDocument } from '@/lib/vectorStore';
-import { getDb } from '@/lib/db';
+import { getDb, updateDocument } from '@/lib/db'; 
 import { extractTextWithGeminiVision } from '@/lib/ocrExtractor';
 import mupdf from 'mupdf';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { chunkText } from '@/lib/chunking';
+import { addChunksToVectorStore, VectorChunk } from '@/lib/vectorStore'; 
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 export async function POST(request: NextRequest) {
   let documentId: string = '';
@@ -22,132 +25,149 @@ export async function POST(request: NextRequest) {
     
     console.log('📄 Embedding document:', { documentId, filename });
     
-    // Update SQLite status
     const db = getDb();
-    db.prepare(`
-      UPDATE documents 
-      SET embedding_status = ?, updated_at = datetime('now')
-      WHERE id = ?
-    `).run('processing', documentId);
+    // <-- MODIFIED: Use the imported function
+    updateDocument(documentId, { embedding_status: 'processing' });
     
-    // Read PDF file
     const filepath = join(process.cwd(), 'public', 'books', filename);
     console.log('📂 Reading PDF from:', filepath);
     
     const dataBuffer = await readFile(filepath);
     console.log('✅ PDF file loaded, size:', dataBuffer.length, 'bytes');
     
-    console.log('🔍 Opening PDF with MuPDF (same as PyMuPDF/fitz)...');
+    console.log('🔍 Opening PDF with MuPDF...');
     
-    // Open PDF document (same as fitz.open() in Python)
     const doc = mupdf.Document.openDocument(dataBuffer, 'application/pdf');
     const numPages = doc.countPages();
     console.log(`📄 PDF has ${numPages} pages`);
     
-    const pageTexts: Array<{ pageNumber: number; text: string }> = [];
+    // <-- NEW: Update total pages in DB
+    updateDocument(documentId, { total_pages: numPages });
     
+    // <-- NEW: Init embedding model and chunk counter
+    const model = genAI.getGenerativeModel({ model: 'text-embedding-004' });
+    let totalChunks = 0;
+
     console.log('🔍 Extracting text with hybrid approach (Direct + Gemini Vision)...');
     
-    // Process each page (same as your Streamlit logic)
+    // Process each page
     for (let pageNum = 0; pageNum < numPages; pageNum++) {
+      console.log(`   Processing page ${pageNum + 1}/${numPages}...`);
+      let pageText = '';
+      const page = doc.loadPage(pageNum);
+
       try {
-        const page = doc.loadPage(pageNum);
-        
-        // Try direct text extraction first (same as page.get_text("text"))
-        let pageText = '';
+        // 1. Try direct text extraction
         try {
           pageText = page.toStructuredText().asText().trim();
         } catch (textError) {
           console.log(`   ⚠️ Direct text extraction failed for page ${pageNum + 1}`);
         }
         
-        // If no text found, use Gemini Vision OCR (same as your extract_text_with_gemini_vision)
+        // 2. Fallback to Gemini Vision OCR
         if (!pageText || pageText.length < 100) {
           console.log(`   🔍 Using Gemini Vision for page ${pageNum + 1}...`);
           
-          // Render page to pixmap (same as page.get_pixmap(alpha=False))
           const pixmap = page.toPixmap(
-            mupdf.Matrix.scale(2, 2), // 2x scale for quality
+            mupdf.Matrix.scale(2, 2),
             mupdf.ColorSpace.DeviceRGB,
-            false // alpha=False
+            false
           );
           
-          // Convert to PNG buffer (Uint8Array -> Buffer)
-          const imageUint8Array = pixmap.asPNG();
-          const imageBuffer = Buffer.from(imageUint8Array);
+          const imageBuffer = Buffer.from(pixmap.asPNG());
           
-          // Extract text with Gemini Vision
-          pageText = await extractTextWithGeminiVision(imageBuffer);
-          
-          if (pageText && pageText.length > 10) {
-            console.log(`   ✅ OCR Page ${pageNum + 1}: ${pageText.length} characters (Gemini Vision)`);
-          } else {
-            console.log(`   ⚠️ Page ${pageNum + 1}: No text extracted`);
+          try {
+            pageText = await extractTextWithGeminiVision(imageBuffer);
+            console.log(`   ✅ OCR Page ${pageNum + 1}: ${pageText.length} characters`);
+          } catch (ocrError: any) {
+            console.error(`   ❌ OCR failed for page ${pageNum + 1}: ${ocrError.message}`);
+            pageText = ''; // Ensure text is empty on failure
           }
         } else {
           console.log(`   ✅ Page ${pageNum + 1}: ${pageText.length} characters (Direct PDF)`);
         }
-        
-        // Add to results if we have text
-        if (pageText && pageText.length > 10) {
-          pageTexts.push({
-            pageNumber: pageNum + 1,
-            text: pageText
-          });
+
+        // 3. Skip if no text
+        if (!pageText || pageText.length < 10) {
+          console.log(`   ⚠️ Page ${pageNum + 1} is image-heavy or has no usable text. Skipping.`);
+          continue;
         }
         
-        // Log progress every 10 pages
-        if ((pageNum + 1) % 10 === 0) {
-          console.log(`   📊 Progress: ${pageNum + 1}/${numPages} pages processed`);
+        // 4. Semantic Chunking (NEW)
+        const pageChunks = chunkText(pageText, 1000, 200); // Use your new chunker
+        const vectorChunks: VectorChunk[] = [];
+        
+        // 5. Embed Chunks for this page
+        for (let i = 0; i < pageChunks.length; i++) {
+          const chunkText = pageChunks[i];
+          try {
+            const res = await model.embedContent(chunkText);
+            const embedding = res.embedding.values;
+            
+            vectorChunks.push({
+              documentId,
+              chunkText,
+              pageNumber: pageNum + 1,
+              embedding,
+              metadata: {
+                // Add any metadata you want here
+                chunk_index_in_page: i,
+                length: chunkText.length,
+                timestamp: new Date().toISOString()
+              }
+            });
+          } catch (embedError: any) {
+            console.warn(`   ❌ Embedding failed for chunk ${i} on page ${pageNum + 1}: ${embedError.message}`);
+            // Add a small delay if we hit a rate limit
+            if (embedError.message.includes('quota')) {
+              await new Promise(r => setTimeout(r, 5000));
+            }
+          }
         }
         
+        // 6. Store chunks for this page
+        if (vectorChunks.length > 0) {
+          try {
+            await addChunksToVectorStore(vectorChunks); // Assuming this is your Supabase insert fn
+            totalChunks += vectorChunks.length;
+            console.log(`   ✅ Stored ${vectorChunks.length} chunks for page ${pageNum + 1}`);
+          } catch (storeError: any) {
+            console.error(`   ❌ Failed to store chunks for page ${pageNum + 1}: ${storeError.message}`);
+          }
+        }
+        
+        // Add a rate limit delay to avoid spamming embedding API
+        await new Promise(resolve => setTimeout(resolve, 1000)); // 1s delay per page
+      
       } catch (pageError) {
         console.error(`   ❌ Error processing page ${pageNum + 1}:`, pageError);
+      } finally {
+        page.destroy(); // <-- IMPORTANT: Free page memory
       }
     }
     
-    // Close document
-    doc.destroy();
+    doc.destroy(); // <-- IMPORTANT: Free document memory
     
-    const totalChars = pageTexts.reduce((sum, p) => sum + p.text.length, 0);
-    const successfulPages = pageTexts.length;
-    
-    console.log(`📊 Final extraction: ${totalChars.toLocaleString()} characters from ${successfulPages}/${numPages} pages`);
-
-    if (successfulPages === 0) {
-      throw new Error('No text could be extracted from any page.');
-    }
-
-    // Process and embed
-    console.log('🚀 Starting embedding process...');
-    const chunkCount = await processAndEmbedDocument(documentId, pageTexts);
-    console.log(`✅ Created ${chunkCount} embeddings`);
+    console.log(`✅ Embedding complete. Total chunks: ${totalChunks}`);
 
     // Update metadata
-    db.prepare(`
-      UPDATE documents 
-      SET embedding_status = ?, chunks_count = ?, updated_at = datetime('now')
-      WHERE id = ?
-    `).run('completed', chunkCount, documentId);
+    updateDocument(documentId, {
+      embedding_status: 'completed',
+      chunks_count: totalChunks
+    });
 
     return NextResponse.json({ 
       success: true,
-      chunkCount,
-      pagesProcessed: successfulPages,
+      chunkCount: totalChunks,
       totalPages: numPages,
-      message: `Successfully embedded ${chunkCount} chunks from ${successfulPages}/${numPages} pages`
+      message: `Successfully embedded ${totalChunks} chunks from ${numPages} pages`
     });
   } catch (error) {
     console.error('❌ Embedding error:', error);
     
     if (documentId) {
       try {
-        const db = getDb();
-        db.prepare(`
-          UPDATE documents 
-          SET embedding_status = ?, updated_at = datetime('now')
-          WHERE id = ?
-        `).run('failed', documentId);
+        updateDocument(documentId, { embedding_status: 'failed' });
       } catch (dbError) {
         console.error('Failed to update error status:', dbError);
       }

@@ -228,9 +228,52 @@ export default function HistoryPanel() {
 
   doc.setFont('Amiri');
   const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
   const leftMargin = 60;
   const rightMargin = pageWidth - 60;
+  const maxWidth = pageWidth - 120; // Total width for text
   let y = 40;
+
+  // Helper to check if text is Arabic
+  const isArabicText = (text: string) => /[\u0600-\u06FF]/.test(text);
+
+  // Helper to split text into lines that fit within maxWidth
+  const splitTextToLines = (text: string, fontSize: number, isArabic: boolean) => {
+    doc.setFontSize(fontSize);
+    const words = text.split(' ');
+    const lines: string[] = [];
+    let currentLine = '';
+
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      const testLine = currentLine ? currentLine + ' ' + word : word;
+      const width = doc.getTextWidth(testLine);
+
+      if (width > maxWidth && currentLine) {
+        lines.push(currentLine);
+        currentLine = word;
+      } else {
+        currentLine = testLine;
+      }
+    }
+
+    if (currentLine) {
+      lines.push(currentLine);
+    }
+
+    return lines;
+  };
+
+  // Helper to add new page if needed
+  const checkPageBreak = (requiredSpace: number) => {
+    if (y + requiredSpace > pageHeight - 40) {
+      doc.addPage();
+      doc.setFont('Amiri');
+      y = 40;
+      return true;
+    }
+    return false;
+  };
 
   // Header
   doc.setFontSize(18);
@@ -240,10 +283,12 @@ export default function HistoryPanel() {
   doc.setFontSize(12);
   doc.text(`Mode: ${session?.mode || ''}`, rightMargin, y, { align: 'right' });
   y += 20;
+  
   if (session?.book_title) {
     doc.text(`Book: ${session.book_title}`, rightMargin, y, { align: 'right' });
     y += 20;
   }
+  
   doc.text(`Created: ${new Date(session?.created_at || '').toLocaleString()}`, rightMargin, y, { align: 'right' });
   y += 20;
   doc.text(`Last Updated: ${new Date(session?.updated_at || '').toLocaleString()}`, rightMargin, y, { align: 'right' });
@@ -251,74 +296,99 @@ export default function HistoryPanel() {
   doc.text(`Messages: ${messages.length}`, rightMargin, y, { align: 'right' });
   y += 30;
 
-  // Helper to render markdown-like text with direction support
-  const renderMarkdownWithDirection = (text: string, y: number) => {
-    const lines = text.split('\n');
-    lines.forEach(line => {
-      let cleanLine = line.replace(/\*\*(.*?)\*\*/g, '$1').replace(/\*(.*?)\*/g, '$1');
-      if (/^\s*[-*]\s+/.test(cleanLine)) {
-        cleanLine = '• ' + cleanLine.replace(/^\s*[-*]\s+/, '');
-      }
-      const isArabic = cleanLine.match(/[\u0600-\u06FF]/);
-      const align = isArabic ? 'right' : 'left';
-      const x = isArabic ? rightMargin : leftMargin;
-      // Split long lines manually to avoid wrapping issues
-      const chunkSize = isArabic ? 60 : 80;
-      for (let i = 0; i < cleanLine.length; i += chunkSize) {
-        const chunk = cleanLine.slice(i, i + chunkSize);
-        doc.text(chunk, x, y, { align });
-        y += 14;
-      }
-    });
-    return y;
-  };
-
+  // Process each message
   messages.forEach((msg, idx) => {
-    if (y > 780) {
-      doc.addPage();
-      doc.setFont('Amiri');
-      y = 40;
-    }
+    checkPageBreak(60);
+
+    // Role label
     doc.setFontSize(13);
-    doc.setTextColor(msg.role === 'user' ? '#1976d2' : '#009688');
-    // Always show label on its own line
+    if (msg.role === 'user') {
+      doc.setTextColor(30, 136, 229);
+    } else {
+      doc.setTextColor(0, 150, 136);
+    }
     const label = msg.role === 'user' ? '👤 User:' : '🤖 Assistant:';
-    const isLabelArabic = label.match(/[\u0600-\u06FF]/);
-    const labelAlign = isLabelArabic ? 'right' : 'left';
-    const labelX = isLabelArabic ? rightMargin : leftMargin;
-    doc.text(label, labelX, y, { align: labelAlign });
+    doc.text(label, leftMargin, y);
     y += 18;
 
+    // Message content
     doc.setFontSize(11);
-    doc.setTextColor('#222');
-    // Render each line with correct direction
-    y = renderMarkdownWithDirection(msg.content, y);
+    doc.setTextColor(34, 34, 34);
 
+    // Split content into paragraphs
+    const paragraphs = msg.content.split('\n');
+
+    paragraphs.forEach((paragraph) => {
+      if (!paragraph.trim()) {
+        y += 10;
+        return;
+      }
+
+      // Remove markdown formatting
+      let cleanText = paragraph
+        .replace(/\*\*(.*?)\*\*/g, '$1')
+        .replace(/\*(.*?)\*/g, '$1')
+        .replace(/`(.*?)`/g, '$1');
+
+      // Handle bullet points
+      const isBullet = /^\s*[-*•]\s+/.test(cleanText);
+      if (isBullet) {
+        cleanText = '• ' + cleanText.replace(/^\s*[-*•]\s+/, '');
+      }
+
+      // Detect if paragraph is primarily Arabic
+      const isArabic = isArabicText(cleanText);
+      const align = isArabic ? 'right' : 'left';
+      const x = isArabic ? rightMargin : leftMargin;
+
+      // Split into lines that fit
+      const lines = splitTextToLines(cleanText, 11, isArabic);
+
+      lines.forEach((line) => {
+        checkPageBreak(16);
+        doc.text(line, x, y, { align, maxWidth });
+        y += 14;
+      });
+
+      y += 4; // Extra space between paragraphs
+    });
+
+    // Page number (if from reader mode)
     if (msg.book_page) {
+      checkPageBreak(16);
       doc.setFontSize(10);
-      doc.setTextColor('#6d28d9');
+      doc.setTextColor(109, 40, 217);
       doc.text(`Page: ${msg.book_page}`, rightMargin, y, { align: 'right' });
       y += 14;
     }
 
+    // Documents used
     if (msg.document_names) {
       try {
         const docNames = JSON.parse(msg.document_names);
         if (docNames.length > 0) {
+          checkPageBreak(16);
           doc.setFontSize(10);
-          doc.setTextColor('#e11d48');
-          doc.text(`Documents Used: ${docNames.join(', ')}`, rightMargin, y, { align: 'right' });
+          doc.setTextColor(225, 29, 72);
+          doc.text(`Documents Used: ${docNames.join(', ')}`, rightMargin, y, { 
+            align: 'right',
+            maxWidth: maxWidth 
+          });
           y += 14;
         }
       } catch {}
     }
 
+    // Timestamp
+    checkPageBreak(16);
     doc.setFontSize(9);
-    doc.setTextColor('#888');
+    doc.setTextColor(136, 136, 136);
     doc.text(new Date(msg.created_at).toLocaleString(), rightMargin, y, { align: 'right' });
     y += 20;
 
-    doc.setDrawColor(200);
+    // Separator line
+    checkPageBreak(12);
+    doc.setDrawColor(200, 200, 200);
     doc.line(leftMargin, y, rightMargin, y);
     y += 10;
   });

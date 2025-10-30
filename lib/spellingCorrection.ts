@@ -2,9 +2,6 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-/**
- * Correct spelling in Arabic/English text
- */
 export async function correctSpelling(
   text: string,
   language: 'ar' | 'en',
@@ -30,9 +27,6 @@ Corrected text (no explanations, just the text):`;
   return result.response.text().trim();
 }
 
-/**
- * Correct chunks in batches
- */
 /**
  * Correct chunks in batches with rate limiting
  */
@@ -88,7 +82,7 @@ export async function correctChunksBatch(
       console.log(`   ✅ Corrected batch ${batchNum}/${totalBatches}`);
     } catch (error) {
       console.error(`   ❌ Batch ${batchNum} failed:`, error);
-      correctedChunks.push(...batch); // Return originals on batch failure
+      correctedChunks.push(...batch); 
     }
   }
   

@@ -6,14 +6,15 @@ import { addChunksToVectorStore, VectorChunk } from './vectorStore';
 import { extractTextWithGeminiVision } from './ocrExtractor';
 import fs from 'fs';
 import path from 'path';
+import { correctSpelling } from './spellingCorrection';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-// ✅ Optimized batch settings to avoid rate limits
-const BATCH_SIZE = 3; // Process 3 pages at a time (was 10)
+
+const BATCH_SIZE = 2; 
 const MAX_RETRIES = 3;
 const EMBEDDING_TIMEOUT = 30000;
-const RATE_LIMIT_DELAY = 8000; // Wait 8 seconds between batches
+const RATE_LIMIT_DELAY = 12000; 
 
 async function fetchWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   const timeout = new Promise<never>((_, reject) =>
@@ -30,7 +31,6 @@ export async function embedDocumentInBatches(
   try {
     console.log(`📄 Starting embedding for document: ${documentId}`);
 
-    // ✅ Read file from filesystem
     if (!fs.existsSync(pdfPath)) {
       throw new Error(`File not found: ${pdfPath}`);
     }
@@ -40,21 +40,17 @@ export async function embedDocumentInBatches(
     const totalPages = pdfDoc.getPageCount();
 
     console.log(`📊 Total pages: ${totalPages}`);
-
-    // Update total pages in DB
     updateDocument(documentId, { total_pages: totalPages });
 
     let processedPages = 0;
     let totalChunks = 0;
 
-    // Process in batches
     for (let i = 0; i < totalPages; i += BATCH_SIZE) {
       const batchEnd = Math.min(i + BATCH_SIZE, totalPages);
       const batchPromises = [];
 
       console.log(`📦 Processing batch: pages ${i + 1}-${batchEnd} of ${totalPages}`);
 
-      // Process pages in parallel (3 at a time to avoid rate limits)
       for (let pageNum = i; pageNum < batchEnd; pageNum++) {
         batchPromises.push(
           processPage(pdfBytes, pageNum, documentId).catch(error => {
@@ -64,10 +60,7 @@ export async function embedDocumentInBatches(
         );
       }
 
-      // Wait for batch to complete
       const batchResults = await Promise.all(batchPromises);
-      
-      // Flatten and store all chunks from this batch
       const batchChunks = batchResults.flat();
       
       if (batchChunks.length > 0) {
@@ -83,7 +76,6 @@ export async function embedDocumentInBatches(
       processedPages = batchEnd;
       onProgress?.(processedPages, totalPages);
 
-      // ✅ Rate limiting: Wait 8 seconds between batches to avoid 429 errors
       if (batchEnd < totalPages) {
         console.log(`⏳ Waiting ${RATE_LIMIT_DELAY/1000}s before next batch (rate limit protection)...`);
         await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
@@ -91,8 +83,6 @@ export async function embedDocumentInBatches(
     }
 
     console.log(`✅ Embedding complete: ${totalChunks} chunks from ${totalPages} pages`);
-
-    // Update DB with final counts
     updateDocument(documentId, { chunks_count: totalChunks });
 
     return { success: true, totalPages, chunksCount: totalChunks };
@@ -102,85 +92,135 @@ export async function embedDocumentInBatches(
   }
 }
 
+/**
+ * Detect language from text
+ */
+function detectLanguage(text: string): 'ar' | 'en' {
+  const arabicChars = (text.match(/[\u0600-\u06FF]/g) || []).length;
+  const totalChars = text.replace(/\s/g, '').length || 1;
+  const arabicRatio = arabicChars / totalChars;
+  return arabicRatio > 0.3 ? 'ar' : 'en';
+}
+
 async function processPage(
   pdfBytes: Buffer,
   pageNum: number,
   documentId: string
 ): Promise<VectorChunk[]> {
   const chunks: VectorChunk[] = [];
-  
   const doc = mupdf.Document.openDocument(pdfBytes, 'application/pdf');
   const page = doc.loadPage(pageNum);
 
-  // Extract text from PDF
-  let text = '';
+  let rawText = '';
   try {
-    text = page.toStructuredText().asText().trim();
-  } catch (error) {
-    console.warn(`⚠️ Text extraction failed for page ${pageNum + 1}, will try OCR`);
+    rawText = page.toStructuredText().asText().trim();
+  } catch (err) {
+    rawText = '';
   }
 
-  // ✅ Use OCR if text is too short or missing
-  if (!text || text.length < 50) {
-    const pixmap = page.toPixmap(
-      mupdf.Matrix.scale(2, 2),
-      mupdf.ColorSpace.DeviceRGB,
-      false
-    );
-    const imageBuffer = Buffer.from(pixmap.asPNG());
-    
-    // Use OCR function with retry logic and model fallbacks
+  const scale = 2.5;
+  let imageBuffer: Buffer | null = null;
+  let ocrText = '';
+  let usedRotation = false;
+
+  try {
+    const pixmap = page.toPixmap(mupdf.Matrix.scale(scale, scale), mupdf.ColorSpace.DeviceRGB, false);
+    imageBuffer = Buffer.from(pixmap.asPNG());
+    ocrText = await extractTextWithGeminiVision(imageBuffer);
+  } catch (err) {
+    console.warn(`⚠️ OCR failed for page ${pageNum + 1}: ${(err as Error).message}`);
+    ocrText = '';
+  }
+
+  if (!ocrText || ocrText.length < 40) {
     try {
-      text = await extractTextWithGeminiVision(imageBuffer);
-      console.log(`📷 OCR extracted ${text.length} characters from page ${pageNum + 1}`);
-    } catch (error: any) {
-      console.error(`❌ OCR failed for page ${pageNum + 1}:`, error.message);
-      text = ''; // Continue processing even if OCR fails
+      const combinedMatrix = mupdf.Matrix.concat(mupdf.Matrix.rotate(Math.PI / 2), mupdf.Matrix.scale(scale, scale));
+      const rotatedPixmap = page.toPixmap(combinedMatrix, mupdf.ColorSpace.DeviceRGB, false);
+      const rotatedBuffer = Buffer.from(rotatedPixmap.asPNG());
+      const rotatedOcr = await extractTextWithGeminiVision(rotatedBuffer);
+      if (rotatedOcr && rotatedOcr.length > ocrText.length) {
+        ocrText = rotatedOcr;
+        imageBuffer = rotatedBuffer;
+        usedRotation = true;
+      }
+    } catch (rotErr) {
+      console.warn(`⚠️ Rotated OCR failed for page ${pageNum + 1}: ${(rotErr as Error).message}`);
     }
   }
 
   doc.destroy();
 
-  // Skip pages with insufficient text
-  if (!text || text.length < 10) {
-    console.warn(`⚠️ Page ${pageNum + 1} has insufficient text (${text.length} chars), skipping`);
-    return [];
+  let finalText = ocrText;
+  if (rawText.length > ocrText.length && rawText.length > 40) {
+    finalText = rawText;
   }
 
-  // Split text into chunks
-  const textChunks = chunkText(text, 1000, 100);
+  const isImageHeavy = (!finalText || finalText.length < 30) && !!imageBuffer;
+
+  // ✅ FIX 2 (Database Error): Return an empty array if there is no text.
+  // This prevents creating a chunk with an empty `embedding: []`.
+  if (!finalText || finalText.length < 10) {
+    console.log(`⚠️ Page ${pageNum + 1} is image-heavy or has no usable text. Skipping chunk creation.`);
+    return []; // Return empty array, no chunks will be created or saved.
+  }
+
+  const language = detectLanguage(finalText);
+
+  function extractDatesAndContext(t: string): { dates: string[], context: string[] } {
+    const datePatterns = [
+      /\b\d{4}\b/g,
+      /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g,
+      /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b/ig,
+      /\b\d{1,2}\s+(?:يناير|فبراير|MARS|أبريل|مايو|يونيو|يوليو|أغسطس|سبتمبر|أكتوبر|نوفمبر|ديسمبر)\s+\d{2,4}\b/ig
+    ];
+    const foundDates = new Set<string>();
+    for (const p of datePatterns) {
+      let m;
+      while ((m = p.exec(t))) foundDates.add(m[0]);
+    }
+    const context: string[] = [];
+    t.split('\n').forEach(line => {
+      if (datePatterns.some(p => p.test(line))) context.push(line.trim());
+    });
+    return { dates: Array.from(foundDates).slice(0, 8), context };
+  }
+  const { dates: extractedDates, context: extractedContext } = extractDatesAndContext(finalText);
+
+  let correctedText = finalText;
+  let correctionConfidence = 1;
+  if (language === 'ar') {
+    try {
+      correctedText = await correctSpelling(finalText, 'ar', false);
+      correctionConfidence = correctedText === finalText ? 1 : 0.7;
+    } catch (e) {
+      console.error(`❌ Spelling correction failed for page ${pageNum + 1}:`, (e as Error).message);
+      correctedText = finalText;
+      correctionConfidence = 0;
+    }
+  }
+
+  // ✅ FIX 3: Use the correct chunking function
+  const pageChunks = chunkText(correctedText, 1200, 200);
   const model = genAI.getGenerativeModel({ model: 'text-embedding-004' });
 
-  // Generate embeddings for all chunks
-  for (let i = 0; i < textChunks.length; i++) {
-    const chunkText = textChunks[i];
-    let embedding = null;
-
-    // Retry logic for embedding generation
-    for (let retry = 0; retry < MAX_RETRIES; retry++) {
+  for (let i = 0; i < pageChunks.length; i++) {
+    const chunkText = pageChunks[i];
+    let embedding: number[] | null = null;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
-        const result = await fetchWithTimeout(
-          model.embedContent(chunkText),
-          EMBEDDING_TIMEOUT
-        );
-        embedding = result.embedding.values;
+        const res = await fetchWithTimeout(model.embedContent(chunkText), EMBEDDING_TIMEOUT);
+        embedding = res.embedding.values;
         break;
-      } catch (error: any) {
-        console.warn(`⚠️ Embedding retry ${retry + 1}/${MAX_RETRIES} for page ${pageNum + 1}, chunk ${i + 1}`);
-        
-        // If it's the last retry, log error and skip this chunk
-        if (retry === MAX_RETRIES - 1) {
-          console.error(`❌ Failed to embed chunk after ${MAX_RETRIES} retries:`, error.message);
-          break;
-        }
-        
-        // Exponential backoff
-        await new Promise(resolve => setTimeout(resolve, 1000 * (retry + 1)));
+      } catch (err) {
+        console.warn(`⚠️ Embedding attempt ${attempt + 1} failed: ${(err as Error).message}`);
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
       }
     }
-
-    // Skip chunk if embedding failed
-    if (!embedding) continue;
+    
+    if (!embedding) {
+      console.error(`❌ Failed to embed chunk ${i} on page ${pageNum + 1} after ${MAX_RETRIES} attempts. Skipping chunk.`);
+      continue; 
+    }
 
     chunks.push({
       documentId,
@@ -188,35 +228,47 @@ async function processPage(
       pageNumber: pageNum + 1,
       embedding,
       metadata: {
+        original_text: finalText,
+        corrected_text: correctedText,
+        language,
+        correction_confidence: correctionConfidence,
+        is_image_heavy: isImageHeavy,
+        used_rotation: usedRotation,
+        extracted_dates: extractedDates,
+        extracted_context: extractedContext,
+        chunk_index_in_page: i,
         length: chunkText.length,
-        timestamp: new Date().toISOString(),
+        byteSize: new TextEncoder().encode(chunkText).length,
+        timestamp: new Date().toISOString()
       }
     });
   }
 
-  console.log(`✅ Page ${pageNum + 1}: Created ${chunks.length} chunks`);
   return chunks;
 }
 
 /**
- * Split text into chunks with overlap for better context preservation
+ * ✅ FIX 3: Split text into chunks with a sliding window and overlap
  */
 function chunkText(text: string, maxLength: number = 1000, overlap: number = 100): string[] {
   const chunks: string[] = [];
-  const paragraphs = text.split('\n\n');
+  
+  const step = maxLength - overlap;
+  if (step <= 0) {
+    console.warn(`Overlap (${overlap}) is greater than or equal to maxLength (${maxLength}). Defaulting to non-overlapping chunks.`);
+    for (let i = 0; i < text.length; i += maxLength) {
+      const chunk = text.substring(i, i + maxLength).trim();
+      if (chunk.length > 10) chunks.push(chunk);
+    }
+    return chunks;
+  }
 
-  let currentChunk = '';
-  for (const para of paragraphs) {
-    if ((currentChunk + para).length > maxLength) {
-      if (currentChunk) chunks.push(currentChunk.trim());
-      currentChunk = para;
-    } else {
-      currentChunk += (currentChunk ? '\n\n' : '') + para;
+  for (let i = 0; i < text.length; i += step) {
+    const chunk = text.substring(i, i + maxLength).trim();
+    if (chunk.length > 10) {
+      chunks.push(chunk);
     }
   }
 
-  if (currentChunk) chunks.push(currentChunk.trim());
-  
-  // Filter out very short chunks
-  return chunks.filter(c => c.length > 10);
+  return chunks;
 }
