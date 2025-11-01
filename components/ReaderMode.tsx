@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import React from 'react';
 import { 
   ChevronLeft, 
   ChevronRight, 
@@ -26,7 +27,9 @@ import {
   Clock,
   Pencil,
   Menu,
-  Settings
+  Settings,
+  RotateCw,
+  RotateCcw
 } from 'lucide-react';
 
 import 'react-pdf/dist/Page/AnnotationLayer.css';
@@ -73,10 +76,12 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [numPages, setNumPages] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [scale, setScale] = useState<number>(1.0);
+  const [rotation, setRotation] = useState<number>(0);
   const [containerWidth, setContainerWidth] = useState<number>(0);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [enableMultiHop, setEnableMultiHop] = useState(false);
+  
   // Text extraction
   const [extractedText, setExtractedText] = useState('');
   const [showTextPopup, setShowTextPopup] = useState(false);
@@ -86,11 +91,13 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   // Bookmarks
   const [bookmarks, setBookmarks] = useState<BookmarkType[]>([]);
   const [showBookmarks, setShowBookmarks] = useState(false);
+  const [pdfCache, setPdfCache] = useState<Map<string, string>>(new Map());
 
   // AI Chat
   const [showChat, setShowChat] = useState(false);
   const [chatMessages, setChatMessages] = useState<Array<{role: string; content: string}>>([]);
-  const [chatInput, setChatInput] = useState('');
+  const [streamingContent, setStreamingContent] = useState<string>(''); 
+  const [isStreaming, setIsStreaming] = useState(false); 
   const [chatLoading, setChatLoading] = useState(false);
   const [correctSpelling, setCorrectSpelling] = useState(false);
   const [bookSessions, setBookSessions] = useState<Array<{
@@ -122,10 +129,39 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   // UI State
   const [libraryCollapsed, setLibraryCollapsed] = useState(false);
   const [showChatSettings, setShowChatSettings] = useState(false);
+  const [chatPanelWidth, setChatPanelWidth] = useState(500);
+  const [isResizing, setIsResizing] = useState(false);
+
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [usedModel, setUsedModel] = useState<string | null>(null);
+
+  const AVAILABLE_MODELS = [
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Best Quality)', tier: 'premium' },
+    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Fast & Smart)', tier: 'premium' },
+    { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', tier: 'standard' },
+    { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', tier: 'standard' },
+    { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite (Fastest)', tier: 'basic' },
+  ];
 
   const hasRestoredRef = useRef(false);
   const isRestoringRef = useRef(false);
   const isMountingRef = useRef(true);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+
+
+  // Auto-scroll effect for chat messages
+  useEffect(() => {
+    if (messagesEndRef.current && chatContainerRef.current) {
+      const container = chatContainerRef.current;
+      const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+      
+      if (isNearBottom || isStreaming) {
+        messagesEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      }
+    }
+  }, [chatMessages, streamingContent, isStreaming]);
 
   useEffect(() => {
     fetchBooks();
@@ -140,24 +176,34 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
   useEffect(() => {
     return () => {
-      if (pdfUrl) {
+      if (pdfUrl && !selectedBook?.id) {
         console.log('🧹 Cleaning up PDF URL');
         URL.revokeObjectURL(pdfUrl);
       }
     };
-  }, [pdfUrl]);
+  }, [pdfUrl, selectedBook?.id]);
 
   useEffect(() => {
     if (selectedBook) {
       console.log('📖 Loading book:', selectedBook.title);
       setCurrentPage(selectedBook.current_page);
       setNumPages(0);
-      setPdfUrl(null);
-      loadBookPdf(selectedBook);
+      setRotation(0);
+      
+      const cachedUrl = pdfCache.get(selectedBook.id);
+      if (cachedUrl) {
+        console.log('⚡ Using cached PDF');
+        setPdfUrl(cachedUrl);
+        setLoading(false);
+      } else {
+        setPdfUrl(null);
+        loadBookPdf(selectedBook);
+      }
     } else {
       setPdfUrl(null);
       setNumPages(0);
       setCurrentPage(1);
+      setRotation(0);
     }
   }, [selectedBook?.id]);
 
@@ -216,15 +262,25 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     updateWidth();
     window.addEventListener('resize', updateWidth);
     return () => window.removeEventListener('resize', updateWidth);
-  }, [showChat, showBookmarks, showCorpus, libraryCollapsed]);
+  }, [showChat, showBookmarks, showCorpus, libraryCollapsed, chatPanelWidth]);
 
+  // Updated keyboard shortcuts - only active when not in input fields
   useEffect(() => {
     function handleKeyPress(e: KeyboardEvent) {
+      const target = e.target as HTMLElement;
+      const isInInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+      
+      // Text popup shortcuts (works even in textarea)
       if (showTextPopup) {
         if (e.ctrlKey && e.key === 'e') {
           e.preventDefault();
           setShowTextPopup(false);
         }
+        return;
+      }
+
+      // Don't trigger shortcuts when typing in input fields or chat
+      if (isInInput || showChat) {
         return;
       }
 
@@ -238,16 +294,57 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
         e.preventDefault();
         extractPageText();
       }
-      if (e.key === 'ArrowLeft') goToPrevPage();
-      if (e.key === 'ArrowRight') goToNextPage();
-      if (e.key === '+' || e.key === '=') zoomIn();
-      if (e.key === '-') zoomOut();
-      if (e.key === '0') resetZoom();
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        goToPrevPage();
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        goToNextPage();
+      }
+      if (e.key === '+' || e.key === '=') {
+        e.preventDefault();
+        zoomIn();
+      }
+      if (e.key === '-') {
+        e.preventDefault();
+        zoomOut();
+      }
+      if (e.key === '0') {
+        e.preventDefault();
+        resetZoom();
+      }
     }
 
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
-  }, [showTextPopup, selectedBook, scale]);
+  }, [showTextPopup, selectedBook, scale, showChat]);
+
+  // Resize handler for chat panel
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return;
+      
+      const newWidth = window.innerWidth - e.clientX;
+      if (newWidth >= 300 && newWidth <= 1200) { 
+        setChatPanelWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
 
   // ==================== API FUNCTIONS ====================
 
@@ -366,6 +463,11 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
       
       setChatMessages(formattedMessages);
       setCurrentSessionId(sessionId);
+      
+      // Scroll to bottom after loading messages
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      }, 100);
     } catch (error) {
       console.error('Error loading messages:', error);
     }
@@ -452,6 +554,12 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
       
       console.log('✅ PDF loaded:', url.substring(0, 50) + '...');
       setPdfUrl(url);
+      
+      setPdfCache(prev => {
+        const newCache = new Map(prev);
+        newCache.set(book.id, url);
+        return newCache;
+      });
     } catch (error) {
       console.error('❌ Error loading PDF:', error);
       alert(`Failed to load PDF: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -497,6 +605,16 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     try {
       const res = await fetch(`/api/books?id=${bookId}`, { method: 'DELETE' });
       if (res.ok) {
+        const cachedUrl = pdfCache.get(bookId);
+        if (cachedUrl) {
+          URL.revokeObjectURL(cachedUrl);
+          setPdfCache(prev => {
+            const newCache = new Map(prev);
+            newCache.delete(bookId);
+            return newCache;
+          });
+        }
+        
         await fetchBooks();
         if (selectedBook?.id === bookId) {
           setSelectedBook(null);
@@ -552,12 +670,12 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     }
   }
 
-  async function sendChatMessage() {
-    if (!chatInput.trim() || !selectedBook) return;
+  async function sendChatMessage(userMessage: string) {
+    if (!userMessage.trim() || !selectedBook) return;
 
-    const userMessage = chatInput.trim();
-    setChatInput('');
-    setChatMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+    const trimmedMessage = userMessage.trim();
+    
+    setChatMessages(prev => [...prev, { role: 'user', content: trimmedMessage }]);
     setChatLoading(true);
 
     try {
@@ -581,10 +699,10 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
         
         await new Promise(resolve => setTimeout(resolve, 100));
         
-        await sendMessageWithSession(sessionId, userMessage, true);
+        await sendMessageWithSession(sessionId, trimmedMessage, true);
         await loadBookSessions(selectedBook.id);
       } else {
-        await sendMessageWithSession(currentSessionId, userMessage, false);
+        await sendMessageWithSession(currentSessionId, trimmedMessage, false);
       }
       
     } catch (error) {
@@ -622,10 +740,14 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
       correctSpelling: correctSpelling,
       aggressiveCorrection: false,
       customPrompt: selectedPrompt || '',
-      enableMultiHop: enableMultiHop
+      enableMultiHop: enableMultiHop,
+      preferredModel: selectedModel,
     };
 
-    console.log('🔄 Sending to:', endpoint, 'Session:', sessionId, 'Has Corpus:', hasCorpus);
+    console.log('🔄 Sending to:', endpoint, 'Model:', selectedModel);
+
+    setModelError(null);
+    setUsedModel(null);
 
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -635,7 +757,19 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
     if (!res.ok) {
       const errorText = await res.text();
+      
+      if (errorText.includes('All models failed') || errorText.includes('quota') || errorText.includes('not available')) {
+        setModelError(errorText);
+        throw new Error(`Model Error: ${errorText}`);
+      }
+      
       throw new Error(`API error: ${res.status} - ${errorText}`);
+    }
+
+    const modelUsedHeader = res.headers.get('X-Model-Used');
+    if (modelUsedHeader) {
+      setUsedModel(modelUsedHeader);
+      console.log(`✅ Response generated using: ${modelUsedHeader}`);
     }
 
     const reader = res.body?.getReader();
@@ -643,10 +777,13 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
       throw new Error('No streaming reader available');
     }
 
-    setChatMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+    setIsStreaming(true);
+    setStreamingContent('');
 
     const decoder = new TextDecoder();
     let fullResponse = '';
+    let lastUpdate = Date.now();
+    const UPDATE_INTERVAL = 50;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -655,17 +792,18 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
       const chunk = decoder.decode(value, { stream: true });
       fullResponse += chunk;
 
-      setChatMessages(prev => {
-        const newMessages = [...prev];
-        if (newMessages.length > 0) {
-          newMessages[newMessages.length - 1] = {
-            role: 'assistant',
-            content: fullResponse
-          };
-        }
-        return newMessages;
-      });
+      const now = Date.now();
+      if (now - lastUpdate > UPDATE_INTERVAL) {
+        setStreamingContent(fullResponse);
+        lastUpdate = now;
+      }
     }
+
+    setStreamingContent(fullResponse);
+    
+    setIsStreaming(false);
+    setChatMessages(prev => [...prev, { role: 'assistant', content: fullResponse }]);
+    setStreamingContent('');
 
     console.log('✅ Chat response received');
     
@@ -770,7 +908,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     }
   }
 
-  // ==================== NAVIGATION ====================
+  // ==================== NAVIGATION & MANIPULATION ====================
 
   const goToPrevPage = () => {
     if (currentPage > 1) setCurrentPage(currentPage - 1);
@@ -792,13 +930,212 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     setScale(1.0);
   };
 
+  const rotateClockwise = () => {
+    setRotation((prev) => (prev + 90) % 360);
+  };
+
+  const rotateCounterClockwise = () => {
+    setRotation((prev) => (prev - 90 + 360) % 360);
+  };
+
   const copyToClipboard = () => {
     navigator.clipboard.writeText(extractedText);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // ==================== RENDER ====================
+  // ==================== COMPONENTS ====================
+
+  // ✅ OPTIMIZED ChatInput WITH CUSTOM COMPARISON
+  const ChatInput = ({ 
+    onSend, 
+    disabled
+  }: { 
+    onSend: (message: string) => void; 
+    disabled: boolean;
+  }) => {
+    const [localDraft, setLocalDraft] = useState('');
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      setLocalDraft(e.target.value);
+      
+      const target = e.target;
+      requestAnimationFrame(() => {
+        target.style.height = 'auto';
+        target.style.height = Math.min(target.scrollHeight, 200) + 'px';
+      });
+    };
+
+    const handleSubmit = (e: React.FormEvent) => {
+      e.preventDefault();
+      if (localDraft.trim() && !disabled) {
+        onSend(localDraft.trim());
+        setLocalDraft('');
+        
+        if (textareaRef.current) {
+          textareaRef.current.style.height = '40px';
+        }
+      }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleSubmit(e);
+      }
+    };
+
+    return (
+      <form onSubmit={handleSubmit} className="flex gap-2 items-end">
+        <textarea
+          ref={textareaRef}
+          value={localDraft}
+          onChange={handleChange}
+          onKeyDown={handleKeyDown}
+          placeholder="Ask a question... (Shift+Enter for new line)"
+          rows={1}
+          disabled={disabled}
+          className="flex-1 px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+          style={{ height: '40px', minHeight: '40px', maxHeight: '200px', overflow: 'auto' }}
+        />
+        <button
+          type="submit"
+          disabled={!localDraft.trim() || disabled}
+          className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors flex-shrink-0"
+        >
+          <Send size={20} />
+        </button>
+      </form>
+    );
+  };
+
+  const MessageBubble = React.memo(({ msg }: { msg: { role: string; content: string } }) => {
+    const [copied, setCopied] = React.useState(false);
+
+    const handleCopy = () => {
+      navigator.clipboard.writeText(msg.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    };
+
+    return (
+      <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+        <div className={`max-w-[85%] rounded-lg ${
+          msg.role === 'user' 
+            ? 'bg-blue-600 text-white p-3' 
+            : 'bg-slate-50 border border-slate-200'
+        }`}>
+          {msg.role === 'assistant' ? (
+            <div className="relative">
+              <div className="flex justify-end">
+                <button
+                  className="mb-1 mr-1 p-1 bg-slate-100 rounded hover:bg-slate-200 transition-colors text-xs"
+                  title="Copy response"
+                  onClick={handleCopy}
+                >
+                  {copied ? (
+                    <Check size={16} className="inline mr-1 text-green-600" />
+                  ) : (
+                    <Copy size={16} className="inline mr-1" />
+                  )}
+                  {copied ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+              <div 
+                className="prose prose-sm max-w-none p-3"
+                dir={msg.content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
+              >
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    h1: ({ node, ...props }) => <h1 className="text-lg font-bold mb-2 mt-3 text-slate-900" {...props} />,
+                    h2: ({ node, ...props }) => <h2 className="text-base font-bold mb-2 mt-2 text-slate-900" {...props} />,
+                    h3: ({ node, ...props }) => <h3 className="text-sm font-bold mb-1 mt-2 text-slate-800" {...props} />,
+                    strong: ({ node, ...props }) => <strong className="font-bold text-blue-700" {...props} />,
+                    ul: ({ node, ...props }) => <ul className="list-disc mr-5 ml-5 my-2 space-y-1" {...props} />,
+                    ol: ({ node, ...props }) => <ol className="list-decimal mr-5 ml-5 my-2 space-y-1" {...props} />,
+                    li: ({ node, ...props }) => <li className="leading-relaxed text-slate-700 text-sm" {...props} />,
+                    blockquote: ({ node, ...props }) => (
+                      <blockquote className="border-l-4 border-r-4 border-blue-300 pl-3 pr-3 italic my-2 text-slate-600 bg-blue-50 py-2 rounded-r text-sm" {...props} />
+                    ),
+                    code: (props: any) => {
+                      const { inline, ...rest } = props || {};
+                      return inline ? (
+                        <code className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-xs font-mono" {...rest} />
+                      ) : (
+                        <code className="block bg-slate-100 text-slate-800 p-2 rounded my-2 text-xs font-mono overflow-x-auto" {...rest} />
+                      );
+                    },
+                    a: ({ node, ...props }) => <a className="text-blue-600 hover:text-blue-800 underline" {...props} />,
+                    p: ({ node, ...props }) => <p className="mb-2 leading-relaxed text-slate-700 text-sm" {...props} />,
+                    em: ({ node, ...props }) => <em className="italic text-slate-600" {...props} />,
+                  }}
+                >
+                  {msg.content}
+                </ReactMarkdown>
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+          )}
+        </div>
+      </div>
+    );
+  });
+
+  MessageBubble.displayName = 'MessageBubble';
+
+  const StreamingMessage = React.memo(({ content }: { content: string }) => {
+    const [displayedContent, setDisplayedContent] = useState(content);
+
+    useEffect(() => {
+      setDisplayedContent(content);
+    }, [content]);
+
+    if (!displayedContent) return null;
+
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[85%] rounded-lg bg-slate-50 border border-slate-200 border-blue-400 shadow-sm">
+          <div className="relative">
+            <div 
+              className="prose prose-sm max-w-none p-3"
+              dir={displayedContent.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
+            >
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  h1: ({ node, ...props }) => <h1 className="text-lg font-bold mb-2 mt-3 text-slate-900" {...props} />,
+                  h2: ({ node, ...props }) => <h2 className="text-base font-bold mb-2 mt-2 text-slate-900" {...props} />,
+                  h3: ({ node, ...props }) => <h3 className="text-sm font-bold mb-1 mt-2 text-slate-800" {...props} />,
+                  strong: ({ node, ...props }) => <strong className="font-bold text-blue-700" {...props} />,
+                  p: ({ node, ...props }) => <p className="mb-2 leading-relaxed text-slate-700 text-sm" {...props} />,
+                  code: (props: any) => {
+                    const { inline, ...rest } = props || {};
+                    return inline ? (
+                      <code className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-xs font-mono" {...rest} />
+                    ) : (
+                      <code className="block bg-slate-100 text-slate-800 p-2 rounded my-2 text-xs font-mono overflow-x-auto" {...rest} />
+                    );
+                  },
+                }}
+              >
+                {displayedContent}
+              </ReactMarkdown>
+            </div>
+            <div className="absolute bottom-2 right-2">
+              <Loader2 className="animate-spin text-blue-600" size={14} />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  });
+
+  StreamingMessage.displayName = 'StreamingMessage';
+
+  // ...existing code...
 
   return (
     <div className="h-full flex bg-slate-50">
@@ -1012,6 +1349,24 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
               <div className="w-px h-6 bg-slate-300 mx-2"></div>
 
+              {/* Rotation Controls */}
+              <button
+                onClick={rotateCounterClockwise}
+                className="p-2 rounded-lg hover:bg-white transition-colors"
+                title="Rotate Left"
+              >
+                <RotateCcw size={18} />
+              </button>
+              <button
+                onClick={rotateClockwise}
+                className="p-2 rounded-lg hover:bg-white transition-colors"
+                title="Rotate Right"
+              >
+                <RotateCw size={18} />
+              </button>
+
+              <div className="w-px h-6 bg-slate-300 mx-2"></div>
+
               <button
                 onClick={addBookmark}
                 className="flex items-center gap-2 px-3 py-2 bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 transition-colors"
@@ -1076,6 +1431,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                 <Page
                   pageNumber={currentPage}
                   scale={scale}
+                  rotate={rotation}
                   renderTextLayer={true}
                   renderAnnotationLayer={true}
                   onLoadError={(error) => {
@@ -1159,312 +1515,294 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
         </div>
       )}
 
-      {/* AI Chat Sidebar - Enhanced */}
+      {/* AI Chat Sidebar - Resizable */}
       {showChat && selectedBook && (
-        <div className="w-[500px] bg-white border-l border-slate-200 flex flex-col">
-          <div className="p-4 border-b border-slate-200">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="font-semibold text-lg flex items-center gap-2">
-                <MessageSquare size={20} className="text-blue-600" />
-                AI Assistant
-              </h3>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setShowChatSettings(!showChatSettings)}
-                  className={`p-2 rounded-lg transition-colors ${showChatSettings ? 'bg-blue-100' : 'hover:bg-slate-100'}`}
-                  title="Chat Settings"
-                >
-                  <Settings size={20} />
-                </button>
-                <button
-                  onClick={() => setShowChat(false)}
-                  className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
-                >
-                  <X size={20} />
-                </button>
-              </div>
+        <>
+          {/* Resize Handle */}
+          <div
+            className="w-1 bg-slate-200 hover:bg-blue-400 cursor-col-resize transition-colors relative group"
+            onMouseDown={() => setIsResizing(true)}
+            style={{ userSelect: 'none' }}
+          >
+            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="w-1 h-12 bg-blue-500 rounded-full"></div>
             </div>
+          </div>
 
-            {/* Chat Settings Panel */}
-            {showChatSettings && (
-              <div className="mb-3 p-3 bg-slate-50 rounded-lg space-y-3">
-                {/* Prompt Selector */}
-                <div>
-                  <label className="text-xs font-medium text-slate-700 mb-2 block">Custom Prompt</label>
-                  <select
-                    value={selectedPromptId || ''}
-                    onChange={(e) => setSelectedPromptId(e.target.value || null)}
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+          <div 
+            className="bg-white border-l border-slate-200 flex flex-col"
+            style={{ width: `${chatPanelWidth}px`, minWidth: '300px', maxWidth: '1200px' }}
+          >
+            <div className="p-4 border-b border-slate-200">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-lg flex items-center gap-2">
+                  <MessageSquare size={20} className="text-blue-600" />
+                  AI Assistant
+                </h3>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowChatSettings(!showChatSettings)}
+                    className={`p-2 rounded-lg transition-colors ${showChatSettings ? 'bg-blue-100' : 'hover:bg-slate-100'}`}
+                    title="Chat Settings"
                   >
-                    <option value="">No custom prompt</option>
-                    {availablePrompts.map(prompt => (
-                      <option key={prompt.id} value={prompt.id}>
-                        {prompt.name} ({prompt.category})
-                      </option>
-                    ))}
-                  </select>
+                    <Settings size={20} />
+                  </button>
+                  <button
+                    onClick={() => setShowChat(false)}
+                    className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+                  >
+                    <X size={20} />
+                  </button>
                 </div>
+              </div>
 
-                {/* Corpus Selection */}
-                <div>
-                  <label className="text-xs font-medium text-slate-700 mb-2 block">Corpus Documents ({selectedCorpus.length} selected)</label>
-                  <div className="max-h-32 overflow-y-auto border border-slate-200 rounded-lg p-2 space-y-1">
-                    {corpusDocuments.length === 0 ? (
-                      <p className="text-xs text-slate-500 text-center py-2">No corpus documents available</p>
-                    ) : (
-                      corpusDocuments.map((doc) => (
-                        <label key={doc.id} className="flex items-center gap-2 p-1.5 hover:bg-slate-100 rounded cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={selectedCorpus.includes(doc.id)}
-                            onChange={() => toggleCorpusDocument(doc.id)}
-                            className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500"
-                          />
-                          <span className="text-xs text-slate-700">{doc.display_name}</span>
-                        </label>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                {/* ✅ NEW: Multi-Hop Reasoning Toggle */}
-                <div className="flex items-center justify-between">
+              {/* Chat Settings Panel */}
+              {showChatSettings && (
+                <div className="mb-3 p-3 bg-slate-50 rounded-lg space-y-3">
+                  {/* Prompt Selector */}
                   <div>
-                    <label className="text-xs font-medium text-slate-700">Multi-Hop Reasoning</label>
-                    <p className="text-[10px] text-slate-500 mt-0.5">For complex analysis questions</p>
+                    <label className="text-xs font-medium text-slate-700 mb-2 block">Custom Prompt</label>
+                    <select
+                      value={selectedPromptId || ''}
+                      onChange={(e) => setSelectedPromptId(e.target.value || null)}
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    >
+                      <option value="">No custom prompt</option>
+                      {availablePrompts.map(prompt => (
+                        <option key={prompt.id} value={prompt.id}>
+                          {prompt.name} ({prompt.category})
+                        </option>
+                      ))}
+                    </select>
                   </div>
+
+                  {/* Corpus Selection */}
+                  <div>
+                    <label className="text-xs font-medium text-slate-700 mb-2 block">Corpus Documents ({selectedCorpus.length} selected)</label>
+                    <div className="max-h-32 overflow-y-auto border border-slate-200 rounded-lg p-2 space-y-1">
+                      {corpusDocuments.length === 0 ? (
+                        <p className="text-xs text-slate-500 text-center py-2">No corpus documents available</p>
+                      ) : (
+                        corpusDocuments.map((doc) => (
+                          <label key={doc.id} className="flex items-center gap-2 p-1.5 hover:bg-slate-100 rounded cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={selectedCorpus.includes(doc.id)}
+                              onChange={() => toggleCorpusDocument(doc.id)}
+                              className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500"
+                            />
+                            <span className="text-xs text-slate-700">{doc.display_name}</span>
+                          </label>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Multi-Hop Reasoning Toggle */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="text-xs font-medium text-slate-700">Multi-Hop Reasoning</label>
+                      <p className="text-[10px] text-slate-500 mt-0.5">For complex analysis questions</p>
+                    </div>
+                    <button
+                      onClick={() => setEnableMultiHop(!enableMultiHop)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                        enableMultiHop 
+                          ? 'bg-blue-600 text-white' 
+                          : 'bg-slate-200 text-slate-700'
+                      }`}
+                    >
+                      {enableMultiHop ? 'ON' : 'OFF'}
+                    </button>
+                  </div>
+
+                  {/* Spelling Correction Toggle */}
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-slate-700">Spelling Correction</label>
+                    <button
+                      onClick={() => setCorrectSpelling(!correctSpelling)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                        correctSpelling 
+                          ? 'bg-orange-600 text-white' 
+                          : 'bg-slate-200 text-slate-700'
+                      }`}
+                    >
+                      {correctSpelling ? 'ON' : 'OFF'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Session Management */}
+              <div className="space-y-2">
+                <div className="flex gap-2">
                   <button
-                    onClick={() => setEnableMultiHop(!enableMultiHop)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                      enableMultiHop 
-                        ? 'bg-blue-600 text-white' 
-                        : 'bg-slate-200 text-slate-700'
-                    }`}
+                    onClick={() => setShowSessionList(!showSessionList)}
+                    className="flex-1 px-3 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors text-sm font-medium flex items-center justify-center gap-2"
                   >
-                    {enableMultiHop ? 'ON' : 'OFF'}
+                    <Clock size={16} />
+                    {bookSessions.length > 0 ? `${bookSessions.length} Sessions` : 'No Sessions'}
+                  </button>
+                  <button
+                    onClick={startNewSession}
+                    className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm font-medium"
+                  >
+                    New Chat
                   </button>
                 </div>
 
-                {/* Spelling Correction Toggle */}
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-medium text-slate-700">Spelling Correction</label>
-                  <button
-                    onClick={() => setCorrectSpelling(!correctSpelling)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                      correctSpelling 
-                        ? 'bg-orange-600 text-white' 
-                        : 'bg-slate-200 text-slate-700'
-                    }`}
-                  >
-                    {correctSpelling ? 'ON' : 'OFF'}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Session Management */}
-            <div className="space-y-2">
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setShowSessionList(!showSessionList)}
-                  className="flex-1 px-3 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors text-sm font-medium flex items-center justify-center gap-2"
-                >
-                  <Clock size={16} />
-                  {bookSessions.length > 0 ? `${bookSessions.length} Sessions` : 'No Sessions'}
-                </button>
-                <button
-                  onClick={startNewSession}
-                  className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm font-medium"
-                >
-                  New Chat
-                </button>
+                {currentSessionId && (
+                  <div className="px-3 py-2 bg-slate-50 rounded-lg text-xs text-slate-600">
+                    {bookSessions.find(s => s.id === currentSessionId)?.name || 'Current Session'}
+                  </div>
+                )}
               </div>
 
-              {currentSessionId && (
-                <div className="px-3 py-2 bg-slate-50 rounded-lg text-xs text-slate-600">
-                  {bookSessions.find(s => s.id === currentSessionId)?.name || 'Current Session'}
+              {/* Session List */}
+              {showSessionList && bookSessions.length > 0 && (
+                <div className="mt-3 max-h-48 overflow-y-auto border border-slate-200 rounded-lg">
+                  {bookSessions.map((session) => (
+                    <div
+                      key={session.id}
+                      className={`p-3 border-b last:border-b-0 group ${
+                        currentSessionId === session.id ? 'bg-blue-50' : ''
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div 
+                          className="flex-1 min-w-0 cursor-pointer"
+                          onClick={() => {
+                            loadSessionMessages(session.id);
+                            setShowSessionList(false);
+                          }}
+                        >
+                          <p className="text-sm font-medium text-slate-800 truncate">
+                            {session.name?.replace('Chat: ', '') || `Session ${new Date(session.created_at).toLocaleDateString()}`}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            {new Date(session.updated_at).toLocaleTimeString()}
+                          </p>
+                        </div>
+                        <div className="flex gap-1">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const newName = prompt('Enter new name:', session.name?.replace('Chat: ', ''));
+                              if (newName && newName.trim()) {
+                                renameSession(session.id, newName.trim());
+                              }
+                            }}
+                            className="p-1 hover:bg-blue-100 rounded transition-colors"
+                            title="Rename session"
+                          >
+                            <Pencil size={14} className="text-blue-600" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteSession(session.id);
+                            }}
+                            className="p-1 hover:bg-red-100 rounded transition-colors"
+                          >
+                            <Trash2 size={14} className="text-red-600" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
 
-            {/* Session List */}
-            {showSessionList && bookSessions.length > 0 && (
-              <div className="mt-3 max-h-48 overflow-y-auto border border-slate-200 rounded-lg">
-                {bookSessions.map((session) => (
-                  <div
-                    key={session.id}
-                    className={`p-3 border-b last:border-b-0 group ${
-                      currentSessionId === session.id ? 'bg-blue-50' : ''
-                    }`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div 
-                        className="flex-1 min-w-0 cursor-pointer"
-                        onClick={() => {
-                          loadSessionMessages(session.id);
-                          setShowSessionList(false);
-                        }}
-                      >
-                        <p className="text-sm font-medium text-slate-800 truncate">
-                          {session.name?.replace('Chat: ', '') || `Session ${new Date(session.created_at).toLocaleDateString()}`}
-                        </p>
-                        <p className="text-xs text-slate-500">
-                          {new Date(session.updated_at).toLocaleTimeString()}
-                        </p>
-                      </div>
-                      <div className="flex gap-1">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const newName = prompt('Enter new name:', session.name?.replace('Chat: ', ''));
-                            if (newName && newName.trim()) {
-                              renameSession(session.id, newName.trim());
-                            }
-                          }}
-                          className="p-1 hover:bg-blue-100 rounded transition-colors"
-                          title="Rename session"
-                        >
-                          <Pencil size={14} className="text-blue-600" />
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteSession(session.id);
-                          }}
-                          className="p-1 hover:bg-red-100 rounded transition-colors"
-                        >
-                          <Trash2 size={14} className="text-red-600" />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
-            {chatMessages.length === 0 ? (
-              <div className="text-center py-12">
-                <Sparkles size={48} className="mx-auto text-slate-300 mb-3" />
-                <p className="text-slate-500 text-sm">Ask me anything about this book</p>
-                <p className="text-slate-400 text-xs mt-1">
-                  {selectedCorpus.length > 0 
-                    ? `Using ${selectedCorpus.length} corpus document${selectedCorpus.length !== 1 ? 's' : ''}`
-                    : 'Configure settings above to enhance responses'}
-                </p>
-                 {/* ✅ NEW: Multi-hop indicator */}
-                {enableMultiHop && selectedCorpus.length > 0 && (
-                  <p className="text-blue-600 text-xs mt-2 font-medium">
-                    🧠 Multi-hop reasoning enabled
+            {/* Messages with auto-scroll */}
+            <div 
+              ref={chatContainerRef}
+              className="flex-1 overflow-y-auto p-4 space-y-4"
+            >
+              {chatMessages.length === 0 && !isStreaming ? (
+                <div className="text-center py-12">
+                  <Sparkles size={48} className="mx-auto text-slate-300 mb-3" />
+                  <p className="text-slate-500 text-sm">Ask me anything about this book</p>
+                  <p className="text-slate-400 text-xs mt-1">
+                    {selectedCorpus.length > 0 
+                      ? `Using ${selectedCorpus.length} corpus document${selectedCorpus.length !== 1 ? 's' : ''}`
+                      : 'Configure settings above to enhance responses'}
                   </p>
+                  {enableMultiHop && selectedCorpus.length > 0 && (
+                    <p className="text-blue-600 text-xs mt-2 font-medium">
+                      🧠 Multi-hop reasoning enabled
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <>
+                  {chatMessages.map((msg, idx) => (
+                    <MessageBubble 
+                      key={`${currentSessionId}-msg-${idx}`} 
+                      msg={msg} 
+                    />
+                  ))}
+                  {isStreaming && <StreamingMessage content={streamingContent} />}
+                  <div ref={messagesEndRef} />
+                </>
+              )}
+              {chatLoading && !isStreaming && (
+                <div className="flex justify-start">
+                  <div className="bg-slate-100 p-3 rounded-lg">
+                    <Loader2 className="animate-spin text-slate-600" size={20} />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Input - Using isolated ChatInput component */}
+            <div className="p-4 border-t border-slate-200">
+              {/* ✅ MODEL SELECTOR ABOVE INPUT */}
+              <div className="mb-3 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-medium text-slate-700">AI Model:</label>
+                  <select
+                    value={selectedModel}
+                    onChange={(e) => {
+                      setSelectedModel(e.target.value);
+                      setModelError(null);
+                    }}
+                    className="px-2 py-1 text-xs border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    {AVAILABLE_MODELS.map(model => (
+                      <option key={model.id} value={model.id}>
+                        {model.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                
+                {/* ✅ SHOW WHICH MODEL WAS USED */}
+                {usedModel && usedModel !== selectedModel && (
+                  <div className="text-[10px] text-amber-600 flex items-center gap-1">
+                    <span>⚠️ Fallback: {usedModel}</span>
+                  </div>
                 )}
               </div>
-            ) : (
-              chatMessages.map((msg, idx) => (
-                <div key={`${currentSessionId}-msg-${idx}`} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] rounded-lg ${
-                    msg.role === 'user' 
-                      ? 'bg-blue-600 text-white p-3' 
-                      : 'bg-slate-50 border border-slate-200'
-                  }`}>
-                    {msg.role === 'assistant' ? (
-                      <div className = "relative">
-                      <div className="flex justify-end">
-                        <button
-                          className="mb-1 mr-1 p-1 bg-slate-100 rounded hover:bg-slate-200 transition-colors text-xs"
-                          title="Copy response"
-                          onClick={() => {
-                            navigator.clipboard.writeText(msg.content);
-                          }}
-                        >
-                          <Copy size={16} className="inline mr-1" />
-                          Copy
-                        </button>
-                      </div>
-                      <div 
-                        className="prose prose-sm max-w-none p-3"
-                        dir={msg.content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
-                      >
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={{
-                            h1: ({ node, ...props }) => <h1 className="text-lg font-bold mb-2 mt-3 text-slate-900" {...props} />,
-                            h2: ({ node, ...props }) => <h2 className="text-base font-bold mb-2 mt-2 text-slate-900" {...props} />,
-                            h3: ({ node, ...props }) => <h3 className="text-sm font-bold mb-1 mt-2 text-slate-800" {...props} />,
-                            strong: ({ node, ...props }) => <strong className="font-bold text-blue-700" {...props} />,
-                            ul: ({ node, ...props }) => <ul className="list-disc mr-5 ml-5 my-2 space-y-1" {...props} />,
-                            ol: ({ node, ...props }) => <ol className="list-decimal mr-5 ml-5 my-2 space-y-1" {...props} />,
-                            li: ({ node, ...props }) => <li className="leading-relaxed text-slate-700 text-sm" {...props} />,
-                            blockquote: ({ node, ...props }) => (
-                              <blockquote className="border-l-4 border-r-4 border-blue-300 pl-3 pr-3 italic my-2 text-slate-600 bg-blue-50 py-2 rounded-r text-sm" {...props} />
-                            ),
-                            code: (props: any) => {
-                              const { inline, ...rest } = props || {};
-                              return inline ? (
-                                <code className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-xs font-mono" {...rest} />
-                              ) : (
-                                <code className="block bg-slate-100 text-slate-800 p-2 rounded my-2 text-xs font-mono overflow-x-auto" {...rest} />
-                              );
-                            },
-                            a: ({ node, ...props }) => <a className="text-blue-600 hover:text-blue-800 underline" {...props} />,
-                            p: ({ node, ...props }) => <p className="mb-2 leading-relaxed text-slate-700 text-sm" {...props} />,
-                            em: ({ node, ...props }) => <em className="italic text-slate-600" {...props} />,
-                          }}
-                        >
-                          {msg.content}
-                        </ReactMarkdown>
-                      </div>
-                    </div>
-                    ) : (
-                      <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-                    )}
-                  </div>
-                </div>
-              ))
-            )}
-            {chatLoading && (
-              <div className="flex justify-start">
-                <div className="bg-slate-100 p-3 rounded-lg">
-                  <Loader2 className="animate-spin text-slate-600" size={20} />
-                </div>
-              </div>
-            )}
-          </div>
 
-          {/* Input */}
-          <div className="p-4 border-t border-slate-200">
-            <div className="flex gap-2 items-end">
-              <textarea
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    sendChatMessage();
-                  }
-                }}
-                placeholder="Ask a question... (Shift+Enter for new line)"
-                rows={1}
-                className="flex-1 px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none min-h-[40px] max-h-[200px] overflow-y-auto"
-                style={{ height: 'auto', minHeight: '40px' }}
-                onInput={(e) => {
-                  const target = e.target as HTMLTextAreaElement;
-                  target.style.height = 'auto';
-                  target.style.height = Math.min(target.scrollHeight, 200) + 'px';
-                }}
+              {/* ✅ SHOW MODEL ERROR IF ANY */}
+              {modelError && (
+                <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded-lg">
+                  <p className="text-xs text-red-700 font-medium mb-1">⚠️ Model Error</p>
+                  <p className="text-[10px] text-red-600">{modelError}</p>
+                  <p className="text-[10px] text-red-500 mt-1">
+                    Try selecting a different model or wait a few minutes.
+                  </p>
+                </div>
+              )}
+
+              <ChatInput 
+                onSend={sendChatMessage} 
+                disabled={chatLoading}
               />
-              <button
-                onClick={sendChatMessage}
-                disabled={!chatInput.trim() || chatLoading}
-                className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors flex-shrink-0"
-              >
-                <Send size={20} />
-              </button>
             </div>
           </div>
-        </div>
+        </>
       )}
 
       {/* Text Extraction Popup */}
@@ -1485,17 +1823,16 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                 <button
                   onClick={() => {
                     if (extractedText && extractedText.trim()) {
-                      setChatInput(prev => prev ? `${prev}\n\n${extractedText}` : extractedText);
                       setShowTextPopup(false);
                       setShowChat(true);
                     }
                   }}
                   disabled={extracting || !extractedText}
                   className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                  title="Add to chat"
+                  title="Open in chat"
                 >
                   <MessageSquare size={18} />
-                  <span className="text-sm">Add to Chat</span>
+                  <span className="text-sm">Open in Chat</span>
                 </button>
                 <button 
                   onClick={() => setShowTextPopup(false)} 

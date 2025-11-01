@@ -30,8 +30,6 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// Replace the POST function (lines 33-124) with:
-
 export async function POST(request: NextRequest) {
   try {
     const { 
@@ -43,7 +41,7 @@ export async function POST(request: NextRequest) {
       bookPage,
       extractedText,
       documentsUsed,
-      customPromptName // ✅ ADD THIS
+      customPromptName
     } = await request.json();
 
     if (!sessionId || !userMessage || !assistantMessage) {
@@ -56,7 +54,6 @@ export async function POST(request: NextRequest) {
     const db = getDb();
     const now = new Date().toISOString();
     
-    // Get document names if corpus was used
     let documentNames: string[] = [];
     if (documentsUsed && Array.isArray(documentsUsed) && documentsUsed.length > 0) {
       const placeholders = documentsUsed.map(() => '?').join(',');
@@ -67,7 +64,18 @@ export async function POST(request: NextRequest) {
       documentNames = docs.map((doc: any) => doc.display_name);
     }
 
-    // ✅ Insert user message WITH custom_prompt_name
+    const existingMessages = db.prepare(`
+      SELECT id FROM chat_messages 
+      WHERE session_id = ? 
+        AND content IN (?, ?)
+        AND created_at > datetime('now', '-5 seconds')
+    `).all(sessionId, userMessage, assistantMessage);
+
+    if (existingMessages.length > 0) {
+      console.log('⚠️ Duplicate message detected, skipping save');
+      return NextResponse.json({ success: true, skipped: true });
+    }
+
     const userMsgId = randomUUID();
     db.prepare(`
       INSERT INTO chat_messages (
@@ -85,14 +93,15 @@ export async function POST(request: NextRequest) {
       bookTitle || null,
       bookPage || null,
       extractedText || null,
-      null,
-      null,
-      customPromptName || null, // ✅ ADD THIS
+      documentsUsed ? JSON.stringify(documentsUsed) : null, 
+      documentNames.length > 0 ? JSON.stringify(documentNames) : null,
+      customPromptName || null,
       now
     );
 
-    // Insert assistant message
     const assistantMsgId = randomUUID();
+    const assistantTime = new Date(Date.now() + 1000).toISOString(); 
+    
     db.prepare(`
       INSERT INTO chat_messages (
         id, session_id, role, content, mode, 
@@ -111,15 +120,16 @@ export async function POST(request: NextRequest) {
       extractedText || null,
       documentsUsed ? JSON.stringify(documentsUsed) : null,
       documentNames.length > 0 ? JSON.stringify(documentNames) : null,
-      now
+      assistantTime 
     );
 
-    // Update session timestamp
-    db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(now, sessionId);
+    db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(assistantTime, sessionId);
 
+    console.log(`✅ Saved user + assistant messages for session ${sessionId}`);
     return NextResponse.json({ success: true });
+    
   } catch (error) {
-    console.error('Error saving reader messages:', error);
+    console.error('❌ Error saving reader messages:', error);
     return NextResponse.json(
       { error: 'Failed to save messages' },
       { status: 500 }

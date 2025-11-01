@@ -11,7 +11,7 @@ export async function GET() {
       ORDER BY is_custom DESC, name ASC
     `).all();
 
-    return NextResponse.json({ prompts }); // ✅ Wrapped in object for consistency
+    return NextResponse.json({ prompts });
   } catch (error) {
     console.error('Error fetching prompts:', error);
     return NextResponse.json(
@@ -36,8 +36,8 @@ export async function POST(request: NextRequest) {
     const id = crypto.randomUUID();
     
     db.prepare(`
-      INSERT INTO prompts (id, name, template, category, is_custom, created_at)
-      VALUES (?, ?, ?, ?, 1, datetime('now'))
+      INSERT INTO prompts (id, name, template, category, is_custom, created_at, modified_at)
+      VALUES (?, ?, ?, ?, 1, datetime('now'), datetime('now'))
     `).run(id, name, template, category || 'general');
 
     return NextResponse.json({ id, success: true });
@@ -50,7 +50,6 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// ✅ NEW: Add PUT endpoint for updating prompts
 export async function PUT(request: NextRequest) {
   try {
     const { id, name, template, category } = await request.json();
@@ -64,16 +63,16 @@ export async function PUT(request: NextRequest) {
 
     const db = getDb();
     
-    // Only allow updating custom prompts
+    // ✅ Allow editing ANY prompt, mark as modified
     const result = db.prepare(`
       UPDATE prompts 
-      SET name = ?, template = ?, category = ?
-      WHERE id = ? AND is_custom = 1
+      SET name = ?, template = ?, category = ?, modified_at = datetime('now')
+      WHERE id = ?
     `).run(name, template, category || 'general', id);
 
     if (result.changes === 0) {
       return NextResponse.json(
-        { error: 'Prompt not found or cannot be edited' },
+        { error: 'Prompt not found' },
         { status: 404 }
       );
     }
@@ -91,7 +90,7 @@ export async function PUT(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const id = searchParams.get('id'); // ✅ Changed to use query params (more RESTful)
+    const id = searchParams.get('id');
     
     if (!id) {
       return NextResponse.json(
@@ -101,11 +100,13 @@ export async function DELETE(request: NextRequest) {
     }
 
     const db = getDb();
-    const result = db.prepare('DELETE FROM prompts WHERE id = ? AND is_custom = 1').run(id);
+    
+    // ✅ Allow deleting ANY prompt (system or custom)
+    const result = db.prepare('DELETE FROM prompts WHERE id = ?').run(id);
 
     if (result.changes === 0) {
       return NextResponse.json(
-        { error: 'Prompt not found or cannot be deleted' },
+        { error: 'Prompt not found' },
         { status: 404 }
       );
     }

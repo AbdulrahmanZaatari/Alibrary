@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Send, Loader2, Sparkles, BookOpen, FileText, Trash2, Plus, Settings, X, Copy } from 'lucide-react';
+import { Send, Loader2, Sparkles, BookOpen, FileText, Trash2, Plus, Settings, X, Copy, Pencil } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -121,6 +121,31 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
       console.error('Error deleting session:', error);
     }
   };
+
+const renameSession = async (sessionId: string) => {
+  const currentSession = sessions.find(s => s.id === sessionId);
+  if (!currentSession) return;
+
+  const newName = prompt('Enter new session name:', currentSession.name);
+  if (!newName || newName.trim() === '' || newName === currentSession.name) return;
+
+  try {
+    const res = await fetch('/api/chat/rename-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, name: newName.trim() })
+    });
+
+    if (res.ok) {
+      await fetchSessions();
+    } else {
+      alert('Failed to rename session');
+    }
+  } catch (error) {
+    console.error('Error renaming session:', error);
+    alert('Failed to rename session');
+  }
+};
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -279,17 +304,30 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
               <p className="text-xs text-slate-500">
                 {new Date(session.updated_at).toLocaleDateString()}
               </p>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  deleteSession(session.id);
-                }}
-                className="absolute top-2 right-2 p-1 opacity-0 group-hover:opacity-100 hover:bg-red-100 rounded transition-all"
-              >
-                <Trash2 size={14} className="text-red-600" />
-              </button>
-            </div>
-          ))}
+              <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      renameSession(session.id);
+                    }}
+                    className="p-1 hover:bg-blue-100 rounded transition-all"
+                    title="Rename session"
+                  >
+                    <Pencil size={14} className="text-blue-600" />
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteSession(session.id);
+                    }}
+                    className="p-1 hover:bg-red-100 rounded transition-all"
+                    title="Delete session"
+                  >
+                    <Trash2 size={14} className="text-red-600" />
+                  </button>
+                </div>
+              </div>
+            ))}
         </div>
       </div>
 

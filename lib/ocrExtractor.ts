@@ -12,7 +12,6 @@ if (!apiKey) {
 
 const genAI = new GoogleGenerativeAI(apiKey);
 
-// ✅ ADD: Safety settings to disable recitation and other blocks
 const safetySettings = [
   { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
   { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -26,7 +25,6 @@ async function sleep(ms: number): Promise<void> {
 
 export async function extractTextWithGeminiVision(imageBuffer: Buffer | Uint8Array): Promise<string> {
   const maxRetries = 3;
-  // Your requested model list
   const models = [
     'gemini-2.5-flash',
     'gemini-2.5-flash-lite',
@@ -36,11 +34,33 @@ export async function extractTextWithGeminiVision(imageBuffer: Buffer | Uint8Arr
   
   const buffer = Buffer.isBuffer(imageBuffer) ? imageBuffer : Buffer.from(imageBuffer);
   
-  const prompt = `Extract ALL text EXACTLY as it appears.
-- Preserve formatting
-- Keep original language (Arabic/English)
-- Maintain RTL for Arabic text
-- Return raw text only, no explanations
+  // ✅ IMPROVED PROMPT: More explicit instructions for better extraction
+  const prompt = `You are an expert OCR system. Extract ALL text from this image with MAXIMUM accuracy.
+
+CRITICAL RULES:
+1. Extract EVERY word visible in the image
+2. Preserve original formatting (paragraphs, line breaks)
+3. Maintain original language (Arabic/English/mixed)
+4. For Arabic: Use correct direction (RTL) and proper diacritics
+5. Keep numbers, dates, and references exactly as shown
+6. DO NOT add explanations, summaries, or descriptions
+7. DO NOT skip headers, footnotes, or page numbers
+8. If text is unclear, make your best guess rather than skip it
+9. Proper Nouns & Names: Extract with EXTREME precision (e.g., "جماعي" not "جمالي", "Jama'i" not "Jamali")
+10. Technical Terms: Preserve exact spelling of Islamic, historical, and academic terms
+11. Diacritics: Include ALL Arabic diacritics (َ ِ ُ ّ ْ) when visible
+12. Hamza & Letters: Distinguish ء، ؤ، ئ، أ، إ، آ precisely
+13. Double-check: Review proper nouns twice before finalizing
+14. Numbers & Dates: Keep exactly as shown (both Arabic ٠١٢٣ and English 0123)
+
+⚠️ COMMON ERRORS TO AVOID:
+- Confusing ي/ى (ya/alef maksura)
+- Mistakes with latinized Arabic terms (for example: Jama'i)
+- Mixing ة/ه (ta marbuta/ha)
+- Dropping hamza (ء)
+- Changing proper noun spellings
+- Skipping diacritics in technical terms
+Return ONLY the extracted text with MAXIMUM fidelity to the original.
 
 Text:`;
 
@@ -54,23 +74,34 @@ Text:`;
   for (const modelName of models) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        console.log(`🔄 Attempt ${attempt}/${maxRetries} with ${modelName}...`);
+        console.log(`🔄 OCR attempt ${attempt}/${maxRetries} with ${modelName}...`);
         
-        // ✅ ADD: Pass safetySettings to the model
-        const model = genAI.getGenerativeModel({ model: modelName, safetySettings });
+        const model = genAI.getGenerativeModel({ 
+          model: modelName, 
+          safetySettings,
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 8192,
+          }
+        });
+        
         const result = await model.generateContent([prompt, imagePart]);
         const response = await result.response;
         
-        // Handle cases where the response might be blocked *despite* settings
         if (!response.candidates || response.candidates.length === 0 || !response.candidates[0].content) {
           const blockReason = response.promptFeedback?.blockReason || 'Unknown block reason';
           console.warn(`⚠️ ${modelName} was blocked: ${blockReason}. Trying next model...`);
-          break; // Break from retry loop, try next model
+          break;
         }
 
         const text = response.text().trim();
         
-        console.log(`✅ Success with ${modelName}: ${text.length} characters`);
+        if (text.length < 20) {
+          console.warn(`⚠️ ${modelName} returned too little text (${text.length} chars), retrying...`);
+          if (attempt < maxRetries) continue;
+        }
+        
+        console.log(`✅ OCR success with ${modelName}: ${text.length} characters`);
         return text;
         
       } catch (error: any) {
@@ -82,36 +113,31 @@ Text:`;
         const isLastAttempt = attempt === maxRetries;
         const isLastModel = modelName === models[models.length - 1];
 
-        // Case 1: Overloaded. Wait and retry this model.
         if (isOverloaded && !isLastAttempt) {
-          const delay = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
+          const delay = Math.pow(2, attempt) * 1000;
           console.log(`⚠️ ${modelName} overloaded, retrying in ${delay/1000}s...`);
           await sleep(delay);
-          continue; // Retry this loop
+          continue;
         }
 
-        // Case 2: Recitation block. Don't retry this model, just try the next one.
         if (isRecitation) {
           console.warn(`⚠️ ${modelName} blocked for RECITATION. Trying next model...`);
-          break; // Break from retry loop, go to next model
+          break;
         }
 
-        // Case 3: Quota error. This shouldn't happen, but if it does, fail fast.
         if (isQuota) {
-           console.error(`❌ ${modelName} hit 429 Quota. This should be handled by the caller (embedder.ts). Aborting page.`);
-           throw error; // Re-throw to be caught by processPage
+          console.error(`❌ ${modelName} hit 429 Quota. Aborting page.`);
+          throw error;
         }
         
-        // Case 4: Any other error (or last attempt failed)
-        console.error(`❌ Gemini Vision OCR error (${modelName}, attempt ${attempt}/${maxRetries}):`, error.message);
+        console.error(`❌ OCR error (${modelName}, attempt ${attempt}/${maxRetries}):`, error.message);
 
         if (isLastAttempt) {
           if (isLastModel) {
-            // All models and retries failed
             throw new Error(`Failed to extract text. Last error: ${error.message}`);
           }
           console.warn(`⚠️ ${modelName} failed all attempts. Trying next model...`);
-          break; // Break from retry loop, go to next model
+          break;
         }
       }
     }

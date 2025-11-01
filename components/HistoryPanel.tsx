@@ -109,7 +109,7 @@ export default function HistoryPanel() {
     }
   };
 
-  const fetchMessages = async (sessionId: string) => {
+    const fetchMessages = async (sessionId: string) => {
     try {
       const session = sessions.find(s => s.id === sessionId);
       const endpoint = session?.mode === 'reader' 
@@ -118,7 +118,19 @@ export default function HistoryPanel() {
       
       const res = await fetch(endpoint);
       const data = await res.json();
-      setMessages(data);
+      
+      // ✅ SORT BY TIMESTAMP (oldest first) AND REMOVE EXACT DUPLICATES
+      const uniqueMessages = data.filter((msg: any, index: number, self: any[]) => 
+        index === self.findIndex((m) => 
+          m.content === msg.content && m.role === msg.role
+        )
+      );
+      
+      const sortedMessages = uniqueMessages.sort((a: any, b: any) => 
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      );
+      
+      setMessages(sortedMessages);
     } catch (error) {
       console.error('Error fetching messages:', error);
     }

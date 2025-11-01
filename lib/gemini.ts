@@ -6,6 +6,22 @@ if (!process.env.GEMINI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+// ✅ Model hierarchy for fallback (best to worst)
+const CHAT_MODELS = [
+  'gemini-2.5-pro',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+];
+
+
+const RERANK_MODELS = [
+  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+];
+
 // Embed text using Gemini
 export const embedText = async (text: string): Promise<number[]> => {
   const model = genAI.getGenerativeModel({ model: 'text-embedding-004' });
@@ -13,57 +29,103 @@ export const embedText = async (text: string): Promise<number[]> => {
   return result.embedding.values;
 };
 
-// Generate response with streaming
-export const generateResponse = async (prompt: string) => {
-  const model = genAI.getGenerativeModel({ 
-    model: 'gemini-2.5-flash-lite',
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 2048,
+// ✅ Generate response with streaming + model fallback
+export const generateResponse = async (
+  prompt: string,
+  preferredModel?: string
+): Promise<{ stream: AsyncIterable<any>; modelUsed: string }> => {
+  const modelsToTry = preferredModel 
+    ? [preferredModel, ...CHAT_MODELS.filter(m => m !== preferredModel)]
+    : CHAT_MODELS;
+
+  const errors: Array<{ model: string; error: string; reason: string }> = [];
+
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const modelName = modelsToTry[i];
+    try {
+      console.log(`🤖 Trying model: ${modelName}`);
+      
+      const model = genAI.getGenerativeModel({ 
+        model: modelName,
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 8192,
+        }
+      });
+      
+      const result = await model.generateContentStream(prompt);
+      console.log(`✅ Success with ${modelName}`);
+      
+      return { 
+        stream: result.stream, 
+        modelUsed: modelName 
+      };
+      
+    } catch (error: any) {
+      const isQuotaError = error?.status === 429 || 
+                          error?.message?.includes('quota') || 
+                          error?.message?.includes('RESOURCE_EXHAUSTED');
+      
+      const isUnsupported = error?.status === 400 || 
+                           error?.message?.includes('model not found') ||
+                           error?.message?.includes('Invalid model');
+      
+      const isLastModel = i === modelsToTry.length - 1;
+      
+      let errorReason = 'Unknown error';
+      if (isQuotaError) errorReason = 'Quota exceeded';
+      else if (isUnsupported) errorReason = 'Model not available';
+      else errorReason = error.message;
+
+      errors.push({ model: modelName, error: error.message, reason: errorReason });
+      
+      if ((isQuotaError || isUnsupported) && !isLastModel) {
+        console.warn(`⚠️ ${modelName} failed (${errorReason}), trying next model...`);
+        continue;
+      }
+      
+      console.error(`❌ ${modelName} failed:`, error.message);
+      if (isLastModel) {
+        const errorSummary = errors.map(e => `${e.model}: ${e.reason}`).join('\n');
+        throw new Error(`All models failed:\n${errorSummary}`);
+      }
     }
-  });
-  const result = await model.generateContentStream(prompt);
-  return result.stream;
+  }
+  
+  throw new Error('Failed to generate response with all available models');
 };
 
 // ✅ PRODUCTION-GRADE CHUNKING FUNCTION
 export const chunkText = (
   text: string, 
-  chunkSize: number = 1200,      // Optimal size for Arabic text
-  overlap: number = 200           // Good overlap for context
+  chunkSize: number = 1200,
+  overlap: number = 200
 ): string[] => {
   console.log('📦 Starting text chunking...');
   console.log(`   Original text length: ${text.length} characters`);
 
   // ✅ Step 1: Clean and normalize text
   const cleanText = text
-    // Remove excessive whitespace
     .replace(/\s+/g, ' ')
-    // Remove page numbers (Arabic and English)
     .replace(/[-_]+\s*\d+\s*[-_]+/g, '')
     .replace(/صفحة\s*\d+/g, '')
     .replace(/Page\s*\d+/gi, '')
-    // Remove repetitive dashes/underscores
     .replace(/[_-]{3,}/g, '')
-    // Normalize Arabic characters
     .replace(/[أإآ]/g, 'ا')
     .replace(/[ىئ]/g, 'ي')
     .replace(/ة/g, 'ه')
-    // Collapse multiple newlines
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
   console.log(`   Cleaned text length: ${cleanText.length} characters`);
 
-  // ✅ Step 2: Split into sentences (Arabic-aware)
   const arabicSentenceEndings = /[.!?؟۔।။।。]+/g;
   const sentences = cleanText.split(arabicSentenceEndings)
     .map(s => s.trim())
-    .filter(s => s.length > 20); // Ignore very short sentences
+    .filter(s => s.length > 20);
 
   console.log(`   Found ${sentences.length} sentences`);
 
-  // ✅ Step 3: Build chunks with semantic boundaries
   const chunks: string[] = [];
   let currentChunk = '';
 
@@ -72,7 +134,6 @@ export const chunkText = (
     const testChunk = currentChunk + (currentChunk ? '. ' : '') + sentence;
 
     if (testChunk.length > chunkSize && currentChunk.length > 0) {
-      // Only add chunk if it's substantial (not just headers)
       if (isSubstantialContent(currentChunk)) {
         chunks.push(currentChunk.trim() + '.');
         console.log(`   ✓ Created chunk ${chunks.length}: ${currentChunk.length} chars`);
@@ -80,16 +141,14 @@ export const chunkText = (
         console.log(`   ✗ Skipped header-only chunk: "${currentChunk.substring(0, 50)}..."`);
       }
 
-      // Create overlap by including last few sentences
       const sentencesInChunk = currentChunk.split(/[.!?؟]+/).filter(s => s.length > 10);
-      const overlapSentences = sentencesInChunk.slice(-3).join('. '); // Last 3 sentences
+      const overlapSentences = sentencesInChunk.slice(-3).join('. ');
       currentChunk = overlapSentences + (overlapSentences ? '. ' : '') + sentence;
     } else {
       currentChunk = testChunk;
     }
   }
 
-  // Add final chunk if substantial
   if (currentChunk.trim().length > 0 && isSubstantialContent(currentChunk)) {
     chunks.push(currentChunk.trim() + '.');
     console.log(`   ✓ Created final chunk ${chunks.length}: ${currentChunk.length} chars`);
@@ -97,7 +156,6 @@ export const chunkText = (
 
   console.log(`✅ Chunking complete: ${chunks.length} valid chunks created`);
   
-  // ✅ Step 4: Quality check
   const avgLength = chunks.reduce((sum, c) => sum + c.length, 0) / chunks.length;
   const tooShort = chunks.filter(c => c.length < 200).length;
   
@@ -121,7 +179,6 @@ export async function rerankChunks(
 
   console.log(`🤖 Starting Re-ranking: ${chunks.length} chunks for query: "${originalQuery}"`);
 
-  // Create a numbered list of chunks for the prompt
   const chunkList = chunks
     .map((chunk, index) => {
       const preview = chunk.chunk_text.substring(0, 400).replace(/\n/g, ' ');
@@ -129,14 +186,19 @@ export async function rerankChunks(
     })
     .join('\n');
 
-  const model = genAI.getGenerativeModel({ 
-    model: 'gemini-2.0-flash-lite',
-    generationConfig: {
-      temperature: 0.1,
-    }
-  });
+  // ✅ Use fallback models for reranking
+  for (const modelName of RERANK_MODELS) {
+    try {
+      console.log(`🔄 Reranking with ${modelName}...`);
+      
+      const model = genAI.getGenerativeModel({ 
+        model: modelName,
+        generationConfig: {
+          temperature: 0.1,
+        }
+      });
 
-  const prompt = `You are a search relevance expert. Rank these text chunks by relevance to the query.
+      const prompt = `You are a search relevance expert. Rank these text chunks by relevance to the query.
 
 QUERY: "${originalQuery}"
 
@@ -150,88 +212,77 @@ WRONG format: [[5], [2], [10]]
 
 Your response (numbers only):`;
 
-  try {
-    const result = await model.generateContent(prompt);
-    const text = result.response.text().trim();
-    
-    console.log(`📄 Reranker raw response: ${text.substring(0, 200)}`);
+      const result = await model.generateContent(prompt);
+      const text = result.response.text().trim();
+      
+      console.log(`📄 Reranker raw response: ${text.substring(0, 200)}`);
 
-    let indices: number[] = [];
-    
-    // Method 1: Direct JSON parse
-    try {
-      const parsed = JSON.parse(text);
-      // Handle nested arrays: [[1], [6]] -> [1, 6]
-      if (Array.isArray(parsed)) {
-        indices = parsed.flat().filter(i => typeof i === 'number');
-      }
-    } catch {
-      // Method 2: Extract array from markdown code block
-      const codeBlockMatch = text.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
-      if (codeBlockMatch) {
-        const parsed = JSON.parse(codeBlockMatch[1]);
-        indices = Array.isArray(parsed) ? parsed.flat().filter(i => typeof i === 'number') : [];
-      } else {
-        // Method 3: Find any array in the text
-        const arrayMatch = text.match(/\[[\d,\[\]\s]+\]/);
-        if (arrayMatch) {
-          const parsed = JSON.parse(arrayMatch[0]);
+      let indices: number[] = [];
+      
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) {
+          indices = parsed.flat().filter(i => typeof i === 'number');
+        }
+      } catch {
+        const codeBlockMatch = text.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
+        if (codeBlockMatch) {
+          const parsed = JSON.parse(codeBlockMatch[1]);
           indices = Array.isArray(parsed) ? parsed.flat().filter(i => typeof i === 'number') : [];
+        } else {
+          const arrayMatch = text.match(/\[[\d,\[\]\s]+\]/);
+          if (arrayMatch) {
+            const parsed = JSON.parse(arrayMatch[0]);
+            indices = Array.isArray(parsed) ? parsed.flat().filter(i => typeof i === 'number') : [];
+          }
         }
       }
-    }
 
-    if (!Array.isArray(indices) || indices.length === 0) {
-      console.warn('⚠️ Re-ranker did not return valid indices. Using original order.');
-      return chunks.slice(0, targetTopN);
-    }
+      if (!Array.isArray(indices) || indices.length === 0) {
+        console.warn(`⚠️ ${modelName} returned invalid indices, trying next model...`);
+        continue;
+      }
 
-    // Validate indices are within bounds
-    const validIndices = indices.filter(i => i >= 0 && i < chunks.length);
+      const validIndices = indices.filter(i => i >= 0 && i < chunks.length);
 
-    if (validIndices.length === 0) {
-      console.warn('⚠️ No valid indices found. Using original order.');
-      return chunks.slice(0, targetTopN);
-    }
+      if (validIndices.length === 0) {
+        console.warn(`⚠️ No valid indices from ${modelName}, trying next model...`);
+        continue;
+      }
 
-    // Remove duplicates while preserving order
-    const uniqueIndices = [...new Set(validIndices)];
-
-    // Map the indices back to the original chunks
-    const rerankedChunks = uniqueIndices
-      .map(index => chunks[index])
-      .filter(chunk => chunk);
+      const uniqueIndices = [...new Set(validIndices)];
+      const rerankedChunks = uniqueIndices
+        .map(index => chunks[index])
+        .filter(chunk => chunk);
+        
+      console.log(`✅ Re-ranking complete with ${modelName}. Top ${rerankedChunks.length} chunks selected`);
       
-    console.log(`✅ Re-ranking complete. Top ${rerankedChunks.length} chunks selected`);
-    console.log(`   Indices: [${uniqueIndices.slice(0, 10).join(', ')}${uniqueIndices.length > 10 ? '...' : ''}]`);
-    
-    return rerankedChunks.slice(0, targetTopN);
+      return rerankedChunks.slice(0, targetTopN);
 
-  } catch (error: any) {
-    console.error(`❌ Re-ranking failed: ${error.message}`);
-    console.error(`   Stack: ${error.stack}`);
-    return chunks.slice(0, targetTopN);
+    } catch (error: any) {
+      const isQuotaError = error?.status === 429 || error?.message?.includes('quota');
+      console.error(`❌ ${modelName} reranking failed: ${error.message}`);
+      
+      if (!isQuotaError) {
+        break; // Non-quota error, don't try other models
+      }
+    }
   }
+
+  console.warn('⚠️ All reranking models failed. Using original order.');
+  return chunks.slice(0, targetTopN);
 }
 
-// ✅ Helper: Detect if content is substantial (not just headers/page numbers)
 function isSubstantialContent(text: string): boolean {
   const trimmed = text.trim();
   
-  // Too short
   if (trimmed.length < 150) return false;
-  
-  // Just numbers and dashes
   if (/^[-_\d\s.]+$/.test(trimmed)) return false;
-  
-  // Just chapter titles (e.g., "الباب الثالث")
   if (/^(الباب|الفصل|Chapter|Section)\s+[\u0600-\u06FF\w\s]+$/i.test(trimmed)) return false;
   
-  // Must have at least 3 sentences
   const sentenceCount = (trimmed.match(/[.!?؟]+/g) || []).length;
   if (sentenceCount < 3) return false;
   
-  // Must have enough words (not just a title)
   const wordCount = trimmed.split(/\s+/).length;
   if (wordCount < 30) return false;
   

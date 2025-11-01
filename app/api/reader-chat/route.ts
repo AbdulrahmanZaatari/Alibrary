@@ -146,7 +146,8 @@ export async function POST(req: NextRequest) {
         correctSpelling = false,
         aggressiveCorrection = false,
         customPrompt,
-        enableMultiHop = false
+        enableMultiHop = false,
+        preferredModel
       } = await req.json();
 
       const userMessage = message || query;
@@ -158,7 +159,8 @@ export async function POST(req: NextRequest) {
         corpusCount: documentIds?.length || 0,
         correctSpelling,
         aggressiveCorrection,
-        enableMultiHop
+        enableMultiHop,
+        preferredModel
       });
 
       if (!userMessage) {
@@ -270,7 +272,8 @@ export async function POST(req: NextRequest) {
           sessionId,
           history,
           bookTitle,
-          bookPage
+          bookPage,
+          preferredModel
         );
       } 
       else if (sessionId) {
@@ -341,7 +344,8 @@ async function handleCorpusQuery(
   sessionId?: string,
   history?: Array<{ role: string; content: string }>,
   bookTitle?: string,
-  bookPage?: number
+  bookPage?: number,
+  preferredModel?: string
 ) {
   // ✅ Build conversation context string
   let conversationContextString = '';
@@ -685,7 +689,13 @@ ${customPrompt ? `\n**Additional Instructions:**\n${customPrompt}\n` : ''}`;
     : `${systemPrompt}${conversationContextString}\n\n**${isArabic ? 'سؤال المستخدم' : "User's Question"}:**\n${userQuery}\n\n**${isArabic ? 'إجابتك' : 'Your Answer'}:**`;
 
   console.log('🤖 Querying Gemini with conversation awareness...');
-  const geminiStream = await generateResponse(fullPrompt);
+  console.log(`🎯 Using model: ${preferredModel || 'default fallback'}`);
+
+  const geminiResult = await generateResponse(fullPrompt, preferredModel);
+  const geminiStream = geminiResult.stream;
+  const modelUsed = geminiResult.modelUsed;
+  
+  console.log(`✅ Response generated using: ${modelUsed}`);
   
   let assistantResponse = '';
   for await (const chunk of geminiStream) {
@@ -722,7 +732,8 @@ async function handleGeneralChat(
   sessionId: string,
   extractedText?: string,
   bookPage?: number,
-  history?: Array<{ role: string; content: string }>
+  history?: Array<{ role: string; content: string }>,
+  preferredModel?: string
 ) {
   // Build conversation context
   let conversationContext = '';
@@ -777,7 +788,8 @@ ${contextSection}
 **User:** ${message}
 **Assistant:**`;
 
-  const geminiStream = await generateResponse(prompt);
+  const geminiResult = await generateResponse(prompt, preferredModel); // ✅ ADD preferredModel
+  const geminiStream = geminiResult.stream;
   
   let assistantResponse = '';
   for await (const chunk of geminiStream) {
@@ -805,7 +817,8 @@ async function handleSimpleQuery(
   writer: WritableStreamDefaultWriter,
   encoder: TextEncoder,
   query: string,
-  extractedText?: string
+  extractedText?: string,
+  preferredModel?: string
 ) {
   const queryLang = detectQueryLanguage(query);
   const langInstruction = queryLang === 'ar' 
@@ -827,7 +840,9 @@ ${contextSection}
 **User:** ${query}
 **Assistant:**`;
 
-  const geminiStream = await generateResponse(prompt);
+  const geminiResult = await generateResponse(prompt, preferredModel); // ✅ ADD preferredModel
+  const geminiStream = geminiResult.stream;
+  
   for await (const chunk of geminiStream) {
     const text = chunk.text();
     if (text) {

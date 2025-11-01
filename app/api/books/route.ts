@@ -23,11 +23,18 @@ export async function DELETE(request: NextRequest) {
 
     const book: any = getBookById(bookId);
 
-    if (book?.supabase_path) {
-      await deleteBookFromSupabase(book.supabase_path);
+    if (!book) {
+      return NextResponse.json({ error: 'Book not found' }, { status: 404 });
     }
 
+    // ✅ FIX: Pass both bookId and path to deleteBookFromSupabase
+    if (book.supabase_path) {
+      await deleteBookFromSupabase(bookId, book.supabase_path);
+    }
+
+    // Delete from database
     deleteBookFromDb(bookId);
+    
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Error deleting book:', error);

@@ -4,12 +4,11 @@ import mupdf from 'mupdf';
 import { updateDocumentEmbeddingStatus, updateDocument } from './db';
 import { addChunksToVectorStore, VectorChunk } from './vectorStore';
 import { extractTextWithGeminiVision } from './ocrExtractor';
+import { chunkText } from './gemini';
 import fs from 'fs';
 import path from 'path';
-import { correctSpelling } from './spellingCorrection';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-
 
 const BATCH_SIZE = 2; 
 const MAX_RETRIES = 3;
@@ -102,6 +101,138 @@ function detectLanguage(text: string): 'ar' | 'en' {
   return arabicRatio > 0.3 ? 'ar' : 'en';
 }
 
+/**
+ * ✅ Verify and correct proper nouns using AI (quota-efficient)
+ */
+async function verifyProperNouns(text: string, language: 'ar' | 'en'): Promise<string> {
+  const hasCapitalizedWords = /\b[A-Z][a-z]+\b/.test(text);
+  const hasArabicProperNouns = /\b[\u0600-\u06FF]{3,}\b/.test(text);
+  
+  if (text.length < 100 || (!hasCapitalizedWords && !hasArabicProperNouns)) {
+    return text;
+  }
+
+  try {
+    console.log('🔍 Verifying proper nouns and technical terms...');
+    
+    const model = genAI.getGenerativeModel({ 
+      model: 'gemini-2.0-flash-lite',
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 2048,
+      }
+    });
+    
+    const prompt = language === 'ar'
+      ? `صحح الأخطاء في الأسماء والمصطلحات فقط. لا تعيد كتابة النص كاملاً.
+
+أخطاء شائعة للتصحيح:
+- "جمالي" → "جماعي" (Jama'i)
+- "داود" → "داوود" (Dāwūd)
+- حديث بدون همزة → "حديث" (Ḥadīth)
+- أسماء بحروف خاطئة (I, J, 1, l)
+
+النص:
+${text.substring(0, 1000)} ${text.length > 1000 ? '...' : ''}
+
+النص المصحح (بدون شرح):` 
+      : `Fix ONLY proper nouns and technical terms. Do NOT rewrite the entire text.
+
+Common errors to fix:
+- "Jamali" → "Jama'i" (جماعي)
+- "Ibn-IJazm" → "Ibn Ḥazm"
+- "1).adith" → "Ḥadīth"
+- "Da'ftd" → "Dāwūd"
+- "Proven<;al" → "Provençal"
+- "$ufi" → "Sufi"
+
+Text:
+${text.substring(0, 1000)} ${text.length > 1000 ? '...' : ''}
+
+Corrected text (no explanations):`;
+
+    const result = await model.generateContent(prompt);
+    const corrected = result.response.text().trim();
+    
+    const lengthDiff = Math.abs(corrected.length - text.length) / text.length;
+    if (lengthDiff < 0.3) {
+      console.log(`✅ Verification complete (${(lengthDiff * 100).toFixed(1)}% change)`);
+      return corrected;
+    } else {
+      console.warn(`⚠️ Verification changed text too much (${(lengthDiff * 100).toFixed(1)}%), keeping original`);
+      return text;
+    }
+    
+  } catch (error) {
+    console.error('❌ Proper noun verification failed:', error);
+    return text; 
+  }
+}
+
+/**
+ * ✅ Fix common OCR corruptions WITHOUT using AI (saves quota)
+ */
+function fixCommonCorruptions(text: string): string {
+  const fixes: Array<[RegExp, string | ((match: string) => string)]> = [
+    // Islamic names and terms
+    [/Ibn-?[IJ1l]{1,2}[aā]zm/gi, 'Ibn Ḥazm'],
+    [/Da['']?[fƒt]d/gi, 'Dāwūd'],
+    [/[1IJ][\).:]?adith/gi, 'Hadith'],
+    [/[1IJ][\).:]?adīth/gi, 'Ḥadīth'],
+    [/al-[ZẒ]ah[iī]r[iī]/gi, 'al-Ẓāhirī'],
+    [/M[aā]lik[iī]/g, 'Mālikī'],
+    [/Pahlavl/g, 'Pahlavi'],
+    [/Būyids/g, 'Būyids'],
+    [/Seljuk/g, 'Seljuk'],
+    
+    // Common corruptions
+    [/\$ufi/gi, 'Sufi'],
+    [/\$[a-z]/gi, (match: string) => match.charAt(1).toUpperCase()],
+    [/Proven[<>][;,]?al/gi, 'Provençal'],
+    [/<[;,]/g, 'ç'],
+    [/([a-z])[<>]+([a-z])/gi, '$1$2'],
+    
+    // Letter confusion
+    [/\bIl([a-z])/g, 'Il$1'],
+    [/([A-Z])II([a-z])/g, '$1li$2'],
+    [/\b([A-Z][a-z]+)[1l]([a-z]+)\b/g, '$1i$2'],
+  ];
+  
+  let fixed = text;
+  let changesMade = 0;
+  
+  for (const [pattern, replacement] of fixes) {
+    const before = fixed;
+    if (typeof replacement === 'string') {
+      fixed = fixed.replace(pattern, replacement);
+    } else {
+      fixed = fixed.replace(pattern, replacement);
+    }
+    if (fixed !== before) changesMade++;
+  }
+  
+  if (changesMade > 0) {
+    console.log(`  ✓ Fixed ${changesMade} common corruption patterns`);
+  }
+  
+  return fixed;
+}
+
+/**
+ * ✅ Detect if text has corruptions (to decide if AI correction is needed)
+ */
+function hasCorruptions(text: string): boolean {
+  const corruptionPatterns = [
+    /[<>]{2,}/,
+    /\$[a-z]/i,
+    /\b[IJ1l]{2,}[a-z]/i,
+    /\b[A-Z][a-z]*[IJ1l][a-z]*[IJ1l]/i,
+    /[^\x00-\x7F\u0600-\u06FF\s\p{P}]{5,}/u,
+  ];
+  
+  return corruptionPatterns.some(pattern => pattern.test(text));
+}
+
 async function processPage(
   pdfBytes: Buffer,
   pageNum: number,
@@ -157,11 +288,9 @@ async function processPage(
 
   const isImageHeavy = (!finalText || finalText.length < 30) && !!imageBuffer;
 
-  // ✅ FIX 2 (Database Error): Return an empty array if there is no text.
-  // This prevents creating a chunk with an empty `embedding: []`.
   if (!finalText || finalText.length < 10) {
     console.log(`⚠️ Page ${pageNum + 1} is image-heavy or has no usable text. Skipping chunk creation.`);
-    return []; // Return empty array, no chunks will be created or saved.
+    return [];
   }
 
   const language = detectLanguage(finalText);
@@ -186,21 +315,32 @@ async function processPage(
   }
   const { dates: extractedDates, context: extractedContext } = extractDatesAndContext(finalText);
 
-  let correctedText = finalText;
+  // ✅ STEP 1: Fix obvious corruptions (no AI needed)
+  let correctedText = fixCommonCorruptions(finalText);
   let correctionConfidence = 1;
-  if (language === 'ar') {
+
+  // ✅ STEP 2: Check if AI correction is needed
+  const needsAiCorrection = hasCorruptions(correctedText);
+
+  if (needsAiCorrection && correctedText.length > 100) {
+    console.log(`⚠️ Detected corruptions, using AI to correct (quota-efficient)`);
+    
     try {
-      correctedText = await correctSpelling(finalText, 'ar', false);
-      correctionConfidence = correctedText === finalText ? 1 : 0.7;
-    } catch (e) {
-      console.error(`❌ Spelling correction failed for page ${pageNum + 1}:`, (e as Error).message);
-      correctedText = finalText;
-      correctionConfidence = 0;
+      correctedText = await verifyProperNouns(correctedText, language);
+      correctionConfidence = 0.95;
+    } catch (error) {
+      console.warn(`⚠️ AI correction failed, using regex-fixed text: ${error}`);
+      correctionConfidence = 0.7;
     }
+  } else {
+    console.log(`✓ No major corruptions detected, skipping AI correction (quota saved)`);
+    correctionConfidence = 0.85;
   }
 
-  // ✅ FIX 3: Use the correct chunking function
-  const pageChunks = chunkText(correctedText, 1200, 200);
+  // ✅ STEP 3: Final verification pass (free)
+  const verifiedText = fixCommonCorruptions(correctedText);
+
+  const pageChunks = chunkText(verifiedText, 1200, 200);
   const model = genAI.getGenerativeModel({ model: 'text-embedding-004' });
 
   for (let i = 0; i < pageChunks.length; i++) {
@@ -228,8 +368,7 @@ async function processPage(
       pageNumber: pageNum + 1,
       embedding,
       metadata: {
-        original_text: finalText,
-        corrected_text: correctedText,
+        original_text: finalText.substring(0, 500),
         language,
         correction_confidence: correctionConfidence,
         is_image_heavy: isImageHeavy,
@@ -242,32 +381,6 @@ async function processPage(
         timestamp: new Date().toISOString()
       }
     });
-  }
-
-  return chunks;
-}
-
-/**
- * ✅ FIX 3: Split text into chunks with a sliding window and overlap
- */
-function chunkText(text: string, maxLength: number = 1000, overlap: number = 100): string[] {
-  const chunks: string[] = [];
-  
-  const step = maxLength - overlap;
-  if (step <= 0) {
-    console.warn(`Overlap (${overlap}) is greater than or equal to maxLength (${maxLength}). Defaulting to non-overlapping chunks.`);
-    for (let i = 0; i < text.length; i += maxLength) {
-      const chunk = text.substring(i, i + maxLength).trim();
-      if (chunk.length > 10) chunks.push(chunk);
-    }
-    return chunks;
-  }
-
-  for (let i = 0; i < text.length; i += step) {
-    const chunk = text.substring(i, i + maxLength).trim();
-    if (chunk.length > 10) {
-      chunks.push(chunk);
-    }
   }
 
   return chunks;

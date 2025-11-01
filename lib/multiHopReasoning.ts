@@ -202,7 +202,7 @@ Answer (2-3 sentences):`);
     
     const answerStream = await generateResponse(answerPrompt);
     let intermediateAnswer = '';
-    for await (const chunk of answerStream) {
+    for await (const chunk of answerStream.stream) {
       intermediateAnswer += chunk.text();
     }
     intermediateAnswer = intermediateAnswer.trim();
@@ -239,9 +239,9 @@ What is the next most important sub-question to complete the answer?
 
 Write ONE clear, specific question:`;
       
-      const nextQuestionStream = await generateResponse(nextQuestionPrompt);
+      const nextQuestionResponse = await generateResponse(nextQuestionPrompt);
       let nextQuestion = '';
-      for await (const chunk of nextQuestionStream) {
+      for await (const chunk of nextQuestionResponse.stream) {
         nextQuestion += chunk.text();
       }
       
@@ -345,9 +345,9 @@ ${reasoningChain}
 
 **Final Comprehensive Answer:**`;
   
-  const finalStream = await generateResponse(synthesisPrompt);
+  const finalResponse = await generateResponse(synthesisPrompt);
   let finalAnswer = '';
-  for await (const chunk of finalStream) {
+  for await (const chunk of finalResponse.stream) {
     finalAnswer += chunk.text();
   }
   

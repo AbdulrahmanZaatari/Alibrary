@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
-import { supabaseAdmin } from '@/lib/supabase';
+import { getBookBuffer } from '@/lib/supabaseStorage';
+
+// Server-side cache storing Buffer for NextResponse compatibility
+const pdfCache = new Map<string, { buffer: Buffer; timestamp: number }>();
+const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
 
 export async function GET(
   request: NextRequest,
@@ -10,7 +14,22 @@ export async function GET(
     const { id: bookId } = await params;
     
     console.log('📥 PDF request for book ID:', bookId);
-    
+
+    // Check server cache
+    const cached = pdfCache.get(bookId);
+    if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+      console.log('⚡ Serving from server cache');
+      // Convert Buffer to Uint8Array for Blob compatibility
+      const uint8Array = new Uint8Array(cached.buffer);
+      const blob = new Blob([uint8Array], { type: 'application/pdf' });
+      return new NextResponse(blob, {
+        headers: {
+          'Content-Type': 'application/pdf',
+          'Cache-Control': 'public, max-age=3600',
+        },
+      });
+    }
+
     const db = getDb();
     const book = db.prepare('SELECT * FROM books WHERE id = ?').get(bookId) as any;
 
@@ -19,22 +38,21 @@ export async function GET(
       return NextResponse.json({ error: 'Book not found' }, { status: 404 });
     }
 
-    console.log('📂 Downloading from Supabase:', book.supabase_path);
+    console.log('📂 Fetching from storage:', book.supabase_path);
 
-    // ✅ FIX: Use correct bucket name 'reader-books'
-    const { data, error } = await supabaseAdmin
-      .storage
-      .from('reader-books')  // ✅ CHANGED from 'books' to 'reader-books'
-      .download(book.supabase_path);
+    // getBookBuffer returns a Node Buffer
+    const buffer = await getBookBuffer(bookId, book.supabase_path);
 
-    if (error || !data) {
-      console.error('❌ Supabase download error:', error);
-      return NextResponse.json({ error: 'Failed to download book' }, { status: 500 });
-    }
+    // Cache in server memory as Buffer
+    pdfCache.set(bookId, { buffer, timestamp: Date.now() });
 
-    console.log('✅ PDF downloaded successfully, size:', data.size);
+    console.log('✅ PDF loaded successfully, size:', buffer.length);
 
-    return new NextResponse(data, {
+    // Convert Buffer to Uint8Array for Blob compatibility
+    const uint8Array = new Uint8Array(buffer);
+    const blob = new Blob([uint8Array], { type: 'application/pdf' });
+
+    return new NextResponse(blob, {
       headers: {
         'Content-Type': 'application/pdf',
         'Content-Disposition': `inline; filename="${book.filename}"`,
@@ -43,7 +61,7 @@ export async function GET(
     });
   } catch (error) {
     console.error('❌ Error in PDF route:', error);
-    return NextResponse.json({ 
+    return NextResponse.json({
       error: 'Internal server error',
       details: error instanceof Error ? error.message : 'Unknown error'
     }, { status: 500 });

@@ -46,7 +46,8 @@ export async function POST(request: NextRequest) {
         message, 
         sessionId, 
         documentIds,
-        enableMultiHop = false
+        enableMultiHop = false,
+        preferredModel // ✅ NEW: Accept preferred model from client
       } = await request.json();
 
       if (!message || !sessionId) {
@@ -60,7 +61,8 @@ export async function POST(request: NextRequest) {
         hasMessage: !!message,
         hasDocuments: documentIds?.length > 0,
         documentCount: documentIds?.length || 0,
-        enableMultiHop
+        enableMultiHop,
+        preferredModel // ✅ NEW: Log selected model
       });
 
       const db = getDb();
@@ -354,16 +356,37 @@ ${conversationContextString}
 **User:** ${message}
 **Assistant:**`;
 
-      // ✅ Stream response
-      const geminiStream = await generateResponse(prompt);
+      // ✅ NEW: Stream response with model selection + error handling
+      let modelUsed: string | undefined;
       let assistantResponse = '';
       
-      for await (const chunk of geminiStream) {
-        const text = chunk.text();
-        if (text) {
-          assistantResponse += text;
-          await writer.write(encoder.encode(text));
+      try {
+        console.log(`🎯 Attempting to use model: ${preferredModel || 'default'}`);
+        
+        const geminiResult = await generateResponse(prompt, preferredModel);
+        const geminiStream = geminiResult.stream;
+        modelUsed = geminiResult.modelUsed;
+        
+        console.log(`✅ Successfully using model: ${modelUsed}`);
+        
+        for await (const chunk of geminiStream) {
+          const text = chunk.text();
+          if (text) {
+            assistantResponse += text;
+            await writer.write(encoder.encode(text));
+          }
         }
+      } catch (error: any) {
+        console.error('❌ Model generation failed:', error);
+        
+        // ✅ NEW: User-friendly error message
+        const errorMessage = error.message.includes('All models failed')
+          ? `⚠️ **Model Error**\n\nAll available AI models are currently unavailable:\n${error.message}\n\nPlease try:\n- Selecting a different model\n- Waiting a few minutes\n- Checking your API quota`
+          : `⚠️ **Error:** ${error.message}`;
+        
+        await writer.write(encoder.encode(errorMessage));
+        await writer.close();
+        return;
       }
 
       // ✅ STEP 6: Save messages to database
@@ -395,7 +418,7 @@ ${conversationContextString}
       }
 
       await writer.close();
-      console.log('✅ Standard conversational response complete');
+      console.log(`✅ Standard conversational response complete (Model: ${modelUsed})`);
 
     } catch (error) {
       console.error('❌ General chat error:', error);
@@ -412,6 +435,7 @@ ${conversationContextString}
       'Content-Type': 'text/plain; charset=utf-8',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
+      'X-Model-Used': 'gemini', 
     },
   });
 }

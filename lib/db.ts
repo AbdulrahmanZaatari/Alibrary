@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import { DEFAULT_PROMPTS } from './defaultPrompts';
 
 const dbDir = path.join(process.cwd(), 'data');
 if (!fs.existsSync(dbDir)) {
@@ -90,7 +91,6 @@ db.exec(`
     FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE SET NULL
   );
 
-  -- ✅ NEW: Conversation context tracking
   CREATE TABLE IF NOT EXISTS conversation_contexts (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -104,7 +104,6 @@ db.exec(`
     FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
   );
 
-  -- ✅ NEW: Session summaries for long conversations
   CREATE TABLE IF NOT EXISTS session_summaries (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -116,7 +115,6 @@ db.exec(`
     FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
   );
 
-  -- ✅ NEW: Cross-session memory (topics discussed across all sessions)
   CREATE TABLE IF NOT EXISTS global_memory (
     id TEXT PRIMARY KEY,
     user_id TEXT DEFAULT 'default_user',
@@ -134,7 +132,8 @@ db.exec(`
     template TEXT NOT NULL,
     category TEXT DEFAULT 'general',
     is_custom INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    modified_at TEXT DEFAULT NULL
   );
 
   CREATE INDEX IF NOT EXISTS idx_embeddings_document ON embeddings(document_id);
@@ -149,60 +148,52 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_global_memory_topic ON global_memory(topic);
 `);
 
-// Insert default prompts if not exists
-const defaultPrompts = [
-  {
-    id: 'summarize',
-    name: 'Summarize Text',
-    template: 'Please provide a concise summary of the following text, highlighting the main points and key insights.',
-    category: 'analysis'
-  },
-  {
-    id: 'analyze',
-    name: 'Deep Analysis',
-    template: 'Provide a comprehensive literary and thematic analysis of the following text, including character development, symbolism, and narrative techniques.',
-    category: 'analysis'
-  },
-  {
-    id: 'translate-ar',
-    name: 'Translate to Arabic',
-    template: 'ترجم النص التالي إلى اللغة العربية مع الحفاظ على المعنى الأصلي والسياق الأدبي.',
-    category: 'translation'
-  },
-  {
-    id: 'translate-en',
-    name: 'Translate to English',
-    template: 'Translate the following Arabic text to English while preserving the original meaning and literary context.',
-    category: 'translation'
-  },
-  {
-    id: 'explain',
-    name: 'Explain Concepts',
-    template: 'Explain the key concepts, terms, and ideas in the following text in simple language suitable for students.',
-    category: 'education'
-  },
-  {
-    id: 'questions',
-    name: 'Generate Questions',
-    template: 'Generate 5 thoughtful discussion questions based on the following text to promote deeper understanding.',
-    category: 'education'
+// ✅ Add modified_at column if it doesn't exist (migration)
+try {
+  const columns = db.prepare("PRAGMA table_info(prompts)").all() as Array<{ name: string }>;
+  const hasModifiedAt = columns.some(col => col.name === 'modified_at');
+  
+  if (!hasModifiedAt) {
+    console.log('🔄 Adding modified_at column to prompts...');
+    db.exec('ALTER TABLE prompts ADD COLUMN modified_at TEXT DEFAULT NULL');
+    console.log('✅ Migration complete');
   }
-];
-
-const existingPrompts = db.prepare('SELECT COUNT(*) as count FROM prompts').get() as { count: number };
-
-if (existingPrompts.count === 0) {
-  const insertPrompt = db.prepare(`
-    INSERT INTO prompts (id, name, template, category, is_custom, created_at)
-    VALUES (?, ?, ?, ?, 0, datetime('now'))
-  `);
-
-  for (const prompt of defaultPrompts) {
-    insertPrompt.run(prompt.id, prompt.name, prompt.template, prompt.category);
-  }
-
-  console.log('✅ Inserted default prompts');
+} catch (error) {
+  console.error('Migration error:', error);
 }
+
+// ✅ SMART PROMPT SYNC: Only update prompts that user hasn't modified
+console.log('🔄 Syncing default prompts...');
+
+const upsertPrompt = db.prepare(`
+  INSERT INTO prompts (id, name, template, category, is_custom, created_at, modified_at)
+  VALUES (?, ?, ?, ?, 0, datetime('now'), NULL)
+  ON CONFLICT(id) DO UPDATE SET
+    name = CASE 
+      WHEN modified_at IS NULL THEN excluded.name 
+      ELSE name 
+    END,
+    template = CASE 
+      WHEN modified_at IS NULL THEN excluded.template 
+      ELSE template 
+    END,
+    category = CASE 
+      WHEN modified_at IS NULL THEN excluded.category 
+      ELSE category 
+    END
+  WHERE is_custom = 0 OR is_custom IS NULL
+`);
+
+const syncTransaction = db.transaction((prompts: typeof DEFAULT_PROMPTS) => {
+  for (const prompt of prompts) {
+    upsertPrompt.run(prompt.id, prompt.name, prompt.template, prompt.category);
+  }
+});
+
+syncTransaction(DEFAULT_PROMPTS);
+
+const promptCount = db.prepare('SELECT COUNT(*) as count FROM prompts').get() as { count: number };
+console.log(`✅ Prompt sync complete: ${promptCount.count} total prompts`);
 
 // ✅ Ensure custom_prompt_name column exists
 try {
@@ -363,8 +354,8 @@ export const addPrompt = (prompt: {
   isCustom: boolean;
 }) => {
   const stmt = db.prepare(`
-    INSERT INTO prompts (id, name, template, category, is_custom, created_at)
-    VALUES (?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO prompts (id, name, template, category, is_custom, created_at, modified_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
   `);
   return stmt.run(
     prompt.id,
@@ -398,13 +389,17 @@ export const updatePrompt = (id: string, updates: {
   
   if (fields.length === 0) return;
   
+  // ✅ Always set modified_at when user edits
+  fields.push("modified_at = datetime('now')");
+  
   values.push(id);
   const stmt = db.prepare(`UPDATE prompts SET ${fields.join(', ')} WHERE id = ?`);
   return stmt.run(...values);
 };
 
 export const deletePrompt = (id: string) => {
-  const stmt = db.prepare('DELETE FROM prompts WHERE id = ? AND is_custom = 1');
+  // ✅ Allow deleting ANY prompt (system or custom)
+  const stmt = db.prepare('DELETE FROM prompts WHERE id = ?');
   return stmt.run(id);
 };
 
@@ -492,7 +487,7 @@ export const deleteChatSession = (sessionId: string) => {
   return stmt.run(sessionId);
 };
 
-// ==================== ✅ NEW: CONVERSATION CONTEXT FUNCTIONS ====================
+// ==================== CONVERSATION CONTEXT FUNCTIONS ====================
 
 export const trackConversationContext = (context: {
   id: string;
@@ -502,14 +497,12 @@ export const trackConversationContext = (context: {
   entities?: string[];
   relevanceScore?: number;
 }) => {
-  // Check if topic already exists in this session
   const existing = db.prepare(`
     SELECT id, mention_count FROM conversation_contexts 
     WHERE session_id = ? AND topic = ?
   `).get(context.sessionId, context.topic) as { id: string; mention_count: number } | undefined;
 
   if (existing) {
-    // Update existing context
     const stmt = db.prepare(`
       UPDATE conversation_contexts 
       SET mention_count = ?,
@@ -527,7 +520,6 @@ export const trackConversationContext = (context: {
       existing.id
     );
   } else {
-    // Insert new context
     const stmt = db.prepare(`
       INSERT INTO conversation_contexts (
         id, session_id, topic, keywords, entities, relevance_score, 
