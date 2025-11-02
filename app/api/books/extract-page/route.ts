@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getBookById } from '@/lib/db';
-import { getBookDownloadUrl } from '@/lib/supabaseStorage';
-import { extractTextWithGeminiVision } from '@/lib/ocrExtractor';
+import { cleanArabicPdfText, hasArabicCorruption } from '@/lib/arabicTextCleaner';
 import { cleanPdfText } from '@/lib/transliterationMapper';
+import { extractTextWithGeminiVision } from '@/lib/ocrExtractor';
+import { getBookById } from '@/lib/db';
+import { getBookBuffer } from '@/lib/supabaseStorage';
 import mupdf from 'mupdf';
 
 export async function POST(request: NextRequest) {
@@ -10,58 +11,108 @@ export async function POST(request: NextRequest) {
     const { bookId, pageNumber, enableAiCorrection } = await request.json();
 
     if (!bookId || !pageNumber) {
-      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
+      return NextResponse.json({ error: 'Missing parameters' }, { status: 400 });
     }
 
-    const book: any = getBookById(bookId);
+    console.log(`📖 Extracting page ${pageNumber} from book ${bookId}`);
+
+    // ✅ STEP 1: Get book metadata from SQLite database
+    const book = getBookById(bookId) as any;
+    
     if (!book) {
+      console.error('Book not found in database');
       return NextResponse.json({ error: 'Book not found' }, { status: 404 });
     }
 
-    console.log(`📄 Extracting page ${pageNumber} from ${book.title}`);
+    // ✅ STEP 2: Download PDF from Supabase Storage (with local cache)
+    console.log('📂 Fetching from storage:', book.supabase_path);
+    const pdfBytes = await getBookBuffer(bookId, book.supabase_path);
+    
+    if (!pdfBytes || pdfBytes.length === 0) {
+      console.error('PDF buffer is empty');
+      return NextResponse.json({ error: 'PDF not found in storage' }, { status: 404 });
+    }
 
-    const downloadUrl = await getBookDownloadUrl(book.supabase_path);
-    const response = await fetch(downloadUrl);
-    const dataBuffer = Buffer.from(await response.arrayBuffer());
+    console.log(`   ✓ Downloaded PDF: ${pdfBytes.length} bytes`);
 
-    const doc = mupdf.Document.openDocument(dataBuffer, 'application/pdf');
-    const page = doc.loadPage(pageNumber - 1);
-
+    // ✅ STEP 3: Quick mupdf extraction to detect language
     let pageText = '';
+    let extractionMethod = 'mupdf';
+    
     try {
+      const doc = mupdf.Document.openDocument(pdfBytes, 'application/pdf');
+      const page = doc.loadPage(pageNumber - 1);
       pageText = page.toStructuredText().asText().trim();
-    } catch {}
+      doc.destroy();
+      console.log(`   ✓ mupdf extracted ${pageText.length} chars`);
+    } catch (mupdfError) {
+      console.error(`   ❌ mupdf failed: ${(mupdfError as Error).message}`);
+    }
 
+    // ✅ STEP 4: Detect language
     const arabicChars = (pageText.match(/[\u0600-\u06FF]/g) || []).length;
     const totalChars = pageText.replace(/\s/g, '').length || 1;
     const isArabic = (arabicChars / totalChars) > 0.3;
 
-    if (isArabic || !pageText || pageText.length < 100) {
-      console.log(`   🔍 Using Gemini Vision OCR (${isArabic ? 'Arabic detected' : 'no text found'})...`);
-      const pixmap = page.toPixmap(
-        mupdf.Matrix.scale(2.5, 2.5),
-        mupdf.ColorSpace.DeviceRGB,
-        false
-      );
-      const imageBuffer = Buffer.from(pixmap.asPNG());
-      pageText = await extractTextWithGeminiVision(imageBuffer);
+    console.log(`   🌐 Detected: ${isArabic ? 'Arabic' : 'English'}`);
+
+    // ✅ STEP 5: For Arabic - ALWAYS force OCR
+    if (isArabic) {
+      console.log(`   📸 Arabic detected - forcing OCR`);
+      
+      try {
+        const doc = mupdf.Document.openDocument(pdfBytes, 'application/pdf');
+        const page = doc.loadPage(pageNumber - 1);
+        const pixmap = page.toPixmap(
+          mupdf.Matrix.scale(2.5, 2.5),
+          mupdf.ColorSpace.DeviceRGB,
+          false
+        );
+        const imageBuffer = Buffer.from(pixmap.asPNG());
+        const ocrText = await extractTextWithGeminiVision(imageBuffer);
+        doc.destroy();
+        
+        if (ocrText && ocrText.length > 20) {
+          pageText = ocrText;
+          extractionMethod = 'ocr';
+          console.log(`   ✅ OCR extracted ${ocrText.length} chars`);
+        } else {
+          console.warn(`   ⚠️ OCR insufficient, using mupdf fallback`);
+        }
+      } catch (ocrError) {
+        console.error(`   ❌ OCR failed: ${(ocrError as Error).message}`);
+      }
     }
 
-    doc.destroy();
-
-    // ✅ Step 1: Regex corrections
-    // ✅ Step 2: AI validates and perfects
-    console.log('🔧 Applying corrections (Regex + AI validation)...');
-    const useAI = enableAiCorrection !== false; // Default to true
-    const cleanedText = await cleanPdfText(pageText, useAI);
+    // ✅ STEP 6: Apply corrections
+    let cleanedText = pageText;
+    let corrected = false;
+    
+    if (isArabic) {
+      console.log('   🔧 Applying Arabic cleaning...');
+      cleanedText = cleanArabicPdfText(pageText);
+      corrected = cleanedText !== pageText || hasArabicCorruption(pageText);
+      
+      console.log(`   📊 Corruption ${hasArabicCorruption(cleanedText) ? 'remains' : 'fixed'}`);
+    } else {
+      console.log('   🔧 Applying transliteration fixes...');
+      const useAI = enableAiCorrection !== false;
+      cleanedText = await cleanPdfText(pageText, useAI);
+      corrected = cleanedText !== pageText;
+    }
 
     return NextResponse.json({ 
       success: true, 
       text: cleanedText, 
       pageNumber,
       language: isArabic ? 'ar' : 'en',
-      corrected: cleanedText !== pageText,
-      aiUsed: useAI
+      corrected,
+      extractionMethod,
+      stats: {
+        originalLength: pageText.length,
+        cleanedLength: cleanedText.length,
+        arabicRatio: isArabic ? (arabicChars / totalChars * 100).toFixed(1) + '%' : '0%'
+      }
     });
   } catch (error) {
     console.error('❌ Page extraction error:', error);

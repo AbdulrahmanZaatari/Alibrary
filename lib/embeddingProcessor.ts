@@ -6,21 +6,23 @@ import { addChunksToVectorStore, VectorChunk } from './vectorStore';
 import { extractTextWithGeminiVision } from './ocrExtractor';
 import { chunkText } from './gemini';
 import { cleanPdfText, hasTransliterationIssues } from './transliterationMapper';
+import { correctArabicWithAI, hasArabicCorruption } from './arabicTextCleaner';
 import fs from 'fs';
-import path from 'path';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 const BATCH_SIZE = 2; 
 const MAX_RETRIES = 3;
 const EMBEDDING_TIMEOUT = 30000;
-const RATE_LIMIT_DELAY = 12000; 
+const RATE_LIMIT_DELAY = 12000;
 
 async function fetchWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  const timeout = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error('Request timeout')), timeoutMs)
-  );
-  return Promise.race([promise, timeout]);
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error('Timeout')), timeoutMs)
+    ),
+  ]);
 }
 
 export async function embedDocumentInBatches(
@@ -28,66 +30,62 @@ export async function embedDocumentInBatches(
   pdfPath: string,
   onProgress?: (current: number, total: number) => void
 ) {
+  console.log(`\n🚀 Starting embedding for document: ${documentId}`);
+  console.log(`📂 PDF path: ${pdfPath}`);
+
   try {
-    console.log(`📄 Starting embedding for document: ${documentId}`);
-
-    if (!fs.existsSync(pdfPath)) {
-      throw new Error(`File not found: ${pdfPath}`);
-    }
-
     const pdfBytes = fs.readFileSync(pdfPath);
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const totalPages = pdfDoc.getPageCount();
 
-    console.log(`📊 Total pages: ${totalPages}`);
+    console.log(`📄 Total pages: ${totalPages}`);
+
     updateDocument(documentId, { total_pages: totalPages });
 
+    const allChunks: VectorChunk[] = [];
     let processedPages = 0;
-    let totalChunks = 0;
 
     for (let i = 0; i < totalPages; i += BATCH_SIZE) {
       const batchEnd = Math.min(i + BATCH_SIZE, totalPages);
+      console.log(`\n📦 Processing batch: pages ${i + 1}-${batchEnd}`);
+
       const batchPromises = [];
-
-      console.log(`📦 Processing batch: pages ${i + 1}-${batchEnd} of ${totalPages}`);
-
       for (let pageNum = i; pageNum < batchEnd; pageNum++) {
-        batchPromises.push(
-          processPage(pdfBytes, pageNum, documentId).catch(error => {
-            console.error(`❌ Error on page ${pageNum + 1}:`, error.message);
-            return [];
-          })
-        );
+        batchPromises.push(processPage(pdfBytes, pageNum, documentId));
       }
 
       const batchResults = await Promise.all(batchPromises);
-      const batchChunks = batchResults.flat();
       
-      if (batchChunks.length > 0) {
-        try {
-          await addChunksToVectorStore(batchChunks);
-          totalChunks += batchChunks.length;
-          console.log(`✅ Stored ${batchChunks.length} chunks (batch ${Math.floor(i/BATCH_SIZE) + 1})`);
-        } catch (error) {
-          console.error('Error storing batch chunks:', error);
-        }
+      for (const pageChunks of batchResults) {
+        allChunks.push(...pageChunks);
       }
 
-      processedPages = batchEnd;
-      onProgress?.(processedPages, totalPages);
+      processedPages += batchResults.length;
+
+      if (onProgress) {
+        onProgress(processedPages, totalPages);
+      }
 
       if (batchEnd < totalPages) {
-        console.log(`⏳ Waiting ${RATE_LIMIT_DELAY/1000}s before next batch (rate limit protection)...`);
+        console.log(`⏳ Rate limit delay: ${RATE_LIMIT_DELAY}ms`);
         await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
       }
     }
 
-    console.log(`✅ Embedding complete: ${totalChunks} chunks from ${totalPages} pages`);
-    updateDocument(documentId, { chunks_count: totalChunks });
+    console.log(`\n✅ All pages processed. Total chunks: ${allChunks.length}`);
 
-    return { success: true, totalPages, chunksCount: totalChunks };
+    if (allChunks.length > 0) {
+      console.log(`💾 Storing ${allChunks.length} chunks in vector database...`);
+      await addChunksToVectorStore(allChunks);
+      console.log(`✅ Vector storage complete`);
+    }
+
+    updateDocumentEmbeddingStatus(documentId, 'completed', allChunks.length);
+    console.log(`\n🎉 Embedding completed for document: ${documentId}`);
+
   } catch (error) {
-    console.error('❌ Embedding process error:', error);
+    console.error(`❌ Embedding failed for ${documentId}:`, error);
+    updateDocumentEmbeddingStatus(documentId, 'failed', 0);
     throw error;
   }
 }
@@ -96,147 +94,187 @@ export async function embedDocumentInBatches(
  * Detect language from text
  */
 function detectLanguage(text: string): 'ar' | 'en' {
+  if (!text) return 'en';
+  
   const arabicChars = (text.match(/[\u0600-\u06FF]/g) || []).length;
-  const totalChars = text.replace(/\s/g, '').length || 1;
+  const totalChars = text.replace(/\s/g, '').length;
+  
+  if (totalChars === 0) return 'en';
+  
   const arabicRatio = arabicChars / totalChars;
   return arabicRatio > 0.3 ? 'ar' : 'en';
 }
 
+/**
+ * ✅ Process a single page: Extract → Correct → Chunk → Embed
+ */
 async function processPage(
   pdfBytes: Buffer,
   pageNum: number,
   documentId: string
 ): Promise<VectorChunk[]> {
   const chunks: VectorChunk[] = [];
-  const doc = mupdf.Document.openDocument(pdfBytes, 'application/pdf');
-  const page = doc.loadPage(pageNum);
-
+  
+  // ✅ STEP 1: Extract text with mupdf (fast initial extraction)
   let rawText = '';
+  let mupdfFailed = false;
+  
   try {
+    const doc = mupdf.Document.openDocument(pdfBytes, 'application/pdf');
+    const page = doc.loadPage(pageNum);
     rawText = page.toStructuredText().asText().trim();
+    doc.destroy();
+    
+    if (!rawText || rawText.length < 20) {
+      console.warn(`⚠️ mupdf extraction insufficient for page ${pageNum + 1} (${rawText.length} chars)`);
+      mupdfFailed = true;
+    }
   } catch (err) {
+    console.error(`❌ mupdf extraction failed: ${(err as Error).message}`);
+    mupdfFailed = true;
     rawText = '';
   }
 
-  const scale = 2.5;
-  let imageBuffer: Buffer | null = null;
-  let ocrText = '';
-  let usedRotation = false;
+  // ✅ STEP 2: Detect language (before OCR decision)
+  let language = detectLanguage(rawText);
+  console.log(`🌐 Page ${pageNum + 1}: Initial detection: ${language} (${rawText.length} chars)`);
 
-  try {
-    const pixmap = page.toPixmap(mupdf.Matrix.scale(scale, scale), mupdf.ColorSpace.DeviceRGB, false);
-    imageBuffer = Buffer.from(pixmap.asPNG());
-    ocrText = await extractTextWithGeminiVision(imageBuffer);
-  } catch (err) {
-    console.warn(`⚠️ OCR failed for page ${pageNum + 1}: ${(err as Error).message}`);
-    ocrText = '';
-  }
-
-  if (!ocrText || ocrText.length < 40) {
+  // ✅ STEP 3: Decide if OCR is needed
+  let finalText = rawText;
+  let extractionMethod: 'mupdf' | 'ocr' = 'mupdf';
+  let usedOcr = false;
+  
+  const needsOcr = language === 'ar' || mupdfFailed;
+  
+  if (needsOcr) {
+    console.log(`📸 OCR needed for page ${pageNum + 1} (${language === 'ar' ? 'Arabic detected' : 'mupdf failed'})`);
+    
     try {
-      const combinedMatrix = mupdf.Matrix.concat(mupdf.Matrix.rotate(Math.PI / 2), mupdf.Matrix.scale(scale, scale));
-      const rotatedPixmap = page.toPixmap(combinedMatrix, mupdf.ColorSpace.DeviceRGB, false);
-      const rotatedBuffer = Buffer.from(rotatedPixmap.asPNG());
-      const rotatedOcr = await extractTextWithGeminiVision(rotatedBuffer);
-      if (rotatedOcr && rotatedOcr.length > ocrText.length) {
-        ocrText = rotatedOcr;
-        imageBuffer = rotatedBuffer;
-        usedRotation = true;
+      const doc = mupdf.Document.openDocument(pdfBytes, 'application/pdf');
+      const page = doc.loadPage(pageNum);
+      
+      const scale = 2.5;
+      const pixmap = page.toPixmap(
+        mupdf.Matrix.scale(scale, scale), 
+        mupdf.ColorSpace.DeviceRGB, 
+        false
+      );
+      const imageBuffer = Buffer.from(pixmap.asPNG());
+      
+      const ocrText = await extractTextWithGeminiVision(imageBuffer);
+      doc.destroy();
+      
+      if (ocrText && ocrText.length > 20) {
+        finalText = ocrText;
+        extractionMethod = 'ocr';
+        usedOcr = true;
+        
+        // ✅ Re-detect language after OCR (in case mupdf was wrong)
+        language = detectLanguage(ocrText);
+        
+        console.log(`✅ OCR extracted ${ocrText.length} chars (re-detected: ${language})`);
+      } else {
+        console.warn(`⚠️ OCR returned insufficient text for page ${pageNum + 1}`);
+        
+        // ✅ If OCR fails and mupdf also failed, skip page
+        if (mupdfFailed) {
+          console.error(`❌ Both mupdf and OCR failed for page ${pageNum + 1}`);
+          return [];
+        }
       }
-    } catch (rotErr) {
-      console.warn(`⚠️ Rotated OCR failed for page ${pageNum + 1}: ${(rotErr as Error).message}`);
+    } catch (ocrErr) {
+      console.error(`❌ OCR failed for page ${pageNum + 1}: ${(ocrErr as Error).message}`);
+      
+      // ✅ Fallback to mupdf if available
+      if (!mupdfFailed && rawText) {
+        console.log(`   ↳ Using mupdf fallback text (${rawText.length} chars)`);
+        finalText = rawText;
+      } else {
+        console.error(`❌ No fallback available for page ${pageNum + 1}`);
+        return [];
+      }
     }
-  }
-
-  doc.destroy();
-
-  // ✅ HYBRID APPROACH: Choose best extraction method
-  let finalText = '';
-  let extractionMethod: 'pdf_text' | 'ocr' | 'hybrid' = 'pdf_text';
-  const language = detectLanguage(ocrText || rawText);
-
-  if (language === 'ar') {
-    // For Arabic: prefer OCR (better RTL support)
-    finalText = ocrText || rawText;
-    extractionMethod = ocrText ? 'ocr' : 'pdf_text';
-    console.log(`📝 Arabic detected: using ${extractionMethod}`);
   } else {
-    // For English: use hybrid approach
-    if (rawText.length > 40 && ocrText.length > 40) {
-      // Use PDF text but verify with OCR for special characters
-      finalText = rawText;
-      extractionMethod = 'hybrid';
-      console.log('📝 English detected: using hybrid (PDF + OCR verification)');
-    } else if (ocrText.length > rawText.length) {
-      finalText = ocrText;
-      extractionMethod = 'ocr';
-      console.log('📝 English detected: OCR has more content');
-    } else {
-      finalText = rawText;
-      extractionMethod = 'pdf_text';
-      console.log('📝 English detected: using PDF text');
+    console.log(`✓ English text detected - using mupdf extraction`);
+  }
+
+  // ✅ STEP 4: Apply AI corrections
+  let correctedText = finalText;
+  let correctionConfidence = 1.0;
+  
+  if (language === 'ar') {
+    console.log('🤖 Applying AI-powered Arabic correction...');
+    
+    try {
+      correctedText = await correctArabicWithAI(finalText);
+      
+      if (hasArabicCorruption(correctedText)) {
+        console.log('⚠️ Some Arabic corruption remains after AI correction');
+        correctionConfidence = 0.85;
+      } else {
+        console.log('✅ Arabic text corrected successfully with AI');
+        correctionConfidence = usedOcr ? 0.98 : 0.90;
+      }
+    } catch (aiError) {
+      console.error('❌ AI correction failed, using original text:', (aiError as Error).message);
+      correctedText = finalText;
+      correctionConfidence = 0.70;
+    }
+  } else {
+    // ✅ English: Check if transliteration fixes are needed
+    const hasTransliteration = hasTransliterationIssues(finalText);
+    
+    if (hasTransliteration) {
+      console.log('🔧 Applying transliteration fixes (English)...');
+      try {
+        correctedText = await cleanPdfText(finalText, false);
+        correctionConfidence = 0.90;
+      } catch (err) {
+        console.error('❌ Transliteration fix failed:', (err as Error).message);
+        correctedText = finalText;
+        correctionConfidence = 0.85;
+      }
     }
   }
 
-  const isImageHeavy = (!finalText || finalText.length < 30) && !!imageBuffer;
-
-  if (!finalText || finalText.length < 10) {
-    console.log(`⚠️ Page ${pageNum + 1} is image-heavy or has no usable text. Skipping chunk creation.`);
+  // ✅ Validate final text
+  if (!correctedText || correctedText.length < 10) {
+    console.log(`⚠️ Page ${pageNum + 1} has insufficient text after processing`);
     return [];
   }
 
+  // ✅ STEP 5: Extract metadata (dates, citations, etc.)
   function extractDatesAndContext(t: string): { dates: string[]; context: string[] } {
     const datePatterns = [
-      /\b\d{4}\b/g,
       /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g,
-      /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b/ig,
-      /\b\d{1,2}\s+(?:يناير|فبراير|مارس|أبريل|مايو|يونيو|يوليو|أغسطس|سبتمبر|أكتوبر|نوفمبر|ديسمبر)\s+\d{2,4}\b/ig
+      /\b\d{4}-\d{2}-\d{2}\b/g,
+      /\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b/gi,
     ];
-    const foundDates = new Set<string>();
-    for (const p of datePatterns) {
-      let m;
-      while ((m = p.exec(t))) foundDates.add(m[0]);
-    }
+
+    const dates: string[] = [];
     const context: string[] = [];
-    t.split('\n').forEach(line => {
-      if (datePatterns.some(p => p.test(line))) context.push(line.trim());
-    });
-    return { dates: Array.from(foundDates).slice(0, 8), context };
-  }
-  const { dates: extractedDates, context: extractedContext } = extractDatesAndContext(finalText);
 
-  // ✅ STEP 1: Detect if transliteration issues exist
-  const transliterationFixed = hasTransliterationIssues(finalText);
-  
-  // ✅ STEP 2: Apply Regex corrections (fast)
-  console.log('🔧 Applying regex corrections...');
-  let correctedText = await cleanPdfText(finalText, false); // Regex only for speed
-  
-  // ✅ STEP 3: Use AI validation for important/corrupted pages
-  let correctionConfidence = 0.85;
-  
-  if (transliterationFixed && correctedText.length > 500) {
-    console.log('✨ Transliteration issues detected');
-    console.log('🤖 Applying AI validation for quality...');
-    
-    try {
-      // Use AI to validate and perfect the regex corrections
-      correctedText = await cleanPdfText(finalText, true); // Enable AI
-      correctionConfidence = 0.98;
-      console.log('✅ AI validation complete');
-    } catch (error) {
-      console.warn(`⚠️ AI validation failed, using regex corrections: ${error}`);
-      correctionConfidence = 0.85;
+    for (const pattern of datePatterns) {
+      const matches = t.match(pattern);
+      if (matches) {
+        dates.push(...matches);
+        matches.forEach(match => {
+          const idx = t.indexOf(match);
+          if (idx !== -1) {
+            const start = Math.max(0, idx - 50);
+            const end = Math.min(t.length, idx + match.length + 50);
+            context.push(t.substring(start, end));
+          }
+        });
+      }
     }
-  } else if (transliterationFixed) {
-    console.log('✨ Minor transliteration issues fixed with regex');
-    correctionConfidence = 0.90;
-  } else {
-    console.log('✓ No transliteration issues detected');
-    correctionConfidence = 1.0;
-  }
 
-  // ✅ STEP 4: Chunk and embed
+    return { dates: [...new Set(dates)], context };
+  }
+  
+  const { dates: extractedDates, context: extractedContext } = extractDatesAndContext(correctedText);
+
+  // ✅ STEP 6: Chunk and embed
   const pageChunks = chunkText(correctedText, 1200, 200);
   const model = genAI.getGenerativeModel({ model: 'text-embedding-004' });
 
@@ -250,14 +288,16 @@ async function processPage(
         embedding = res.embedding.values;
         break;
       } catch (err) {
-        console.warn(`⚠️ Embedding attempt ${attempt + 1} failed: ${(err as Error).message}`);
-        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+        console.error(`⚠️ Embedding attempt ${attempt + 1} failed for page ${pageNum + 1}, chunk ${i + 1}`);
+        if (attempt < MAX_RETRIES - 1) {
+          await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+        }
       }
     }
-    
+
     if (!embedding) {
-      console.error(`❌ Failed to embed chunk ${i} on page ${pageNum + 1} after ${MAX_RETRIES} attempts. Skipping chunk.`);
-      continue; 
+      console.error(`❌ Failed to embed page ${pageNum + 1}, chunk ${i + 1} after ${MAX_RETRIES} attempts`);
+      continue;
     }
 
     chunks.push({
@@ -265,24 +305,21 @@ async function processPage(
       chunkText,
       pageNumber: pageNum + 1,
       embedding,
+      extractionMethod,
+      corrected: correctedText !== finalText,
+      language,
+      correctionConfidence,
+      dates: extractedDates,
+      hasDateContext: extractedDates.length > 0,
       metadata: {
-        original_text: finalText.substring(0, 500),
-        language,
-        correction_confidence: correctionConfidence,
-        transliteration_fixed: transliterationFixed,
-        extraction_method: extractionMethod,
-        is_image_heavy: isImageHeavy,
-        used_rotation: usedRotation,
-        extracted_dates: extractedDates,
-        extracted_context: extractedContext,
-        chunk_index_in_page: i,
-        length: chunkText.length,
-        byteSize: new TextEncoder().encode(chunkText).length,
-        timestamp: new Date().toISOString()
+        dateContext: extractedContext,
+        chunkIndex: i,
+        totalChunks: pageChunks.length,
       }
     });
   }
 
-  console.log(`✅ Created ${chunks.length} chunks (${language}, ${extractionMethod}, confidence: ${(correctionConfidence * 100).toFixed(0)}%)`);
+  console.log(`✅ Page ${pageNum + 1}: Generated ${chunks.length} chunks (${language}, ${extractionMethod}, confidence: ${(correctionConfidence * 100).toFixed(0)}%)`);
+
   return chunks;
 }

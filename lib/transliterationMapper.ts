@@ -5,7 +5,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 /**
  * ✅ Comprehensive corruption patterns
  */
-const CORRUPTION_PATTERNS: Array<[RegExp, string]> = [
+const CORRUPTION_PATTERNS: Array<[RegExp, string | ((...args: any[]) => string)]> = [
   // ========== PRIORITY: Shīʿī variations ==========
   [/\bSh[tT]{1,3}[iī]s?\b/gi, "Shīʿī"],
   [/\bSh[tT]{1,3}ism\b/gi, "Shīʿīsm"],

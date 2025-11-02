@@ -6,7 +6,18 @@ export interface VectorChunk {
   chunkText: string;
   pageNumber: number;
   embedding: number[];
-  metadata?: any;
+  extractionMethod?: 'mupdf' | 'ocr';
+  corrected?: boolean;
+  language?: 'ar' | 'en';
+  correctionConfidence?: number;
+  dates?: string[];
+  hasDateContext?: boolean;
+  metadata?: {
+    dateContext?: string[];
+    chunkIndex?: number;
+    totalChunks?: number;
+    [key: string]: any;
+  };
 }
 
 /**
@@ -74,7 +85,7 @@ export const searchSimilarChunks = async (
       query_embedding: queryEmbedding,
       match_threshold: threshold,
       match_count: limit,
-      filter_document_ids: documentIds, // ✅ Correct parameter name
+      filter_document_ids: documentIds,
     });
 
     if (error) {
@@ -236,28 +247,48 @@ export const getDocumentEmbeddingStats = async (documentId: string) => {
 };
 
 /**
- * Add chunks to vector store
+ * ✅ Add chunks to vector store (UPDATED with new fields)
  */
 export const addChunksToVectorStore = async (chunks: VectorChunk[]) => {
+  if (chunks.length === 0) {
+    console.log('⚠️ No chunks to store');
+    return;
+  }
+
   console.log(`💾 Storing ${chunks.length} chunks to Supabase...`);
   
-  const { data, error } = await supabaseAdmin
-    .from('embeddings')
-    .insert(chunks.map(chunk => ({
-      document_id: chunk.documentId,
-      chunk_text: chunk.chunkText,
-      page_number: chunk.pageNumber,
-      embedding: chunk.embedding,
-      metadata: chunk.metadata || {}
-    })));
+  const formattedChunks = chunks.map(chunk => ({
+    document_id: chunk.documentId,
+    chunk_text: chunk.chunkText,
+    page_number: chunk.pageNumber,
+    embedding: chunk.embedding,
+    extraction_method: chunk.extractionMethod || 'mupdf',
+    corrected: chunk.corrected || false,
+    language: chunk.language || 'en',
+    correction_confidence: chunk.correctionConfidence || 1.0,
+    dates: chunk.dates || [],
+    has_date_context: chunk.hasDateContext || false,
+    metadata: chunk.metadata || {}
+  }));
 
-  if (error) {
-    console.error('❌ Error storing chunks:', error);
-    throw error;
+  // Insert in batches to avoid payload size limits
+  const batchSize = 100;
+  for (let i = 0; i < formattedChunks.length; i += batchSize) {
+    const batch = formattedChunks.slice(i, Math.min(i + batchSize, formattedChunks.length));
+    
+    const { error } = await supabaseAdmin
+      .from('embeddings')
+      .insert(batch);
+
+    if (error) {
+      console.error(`❌ Error storing batch ${Math.floor(i / batchSize) + 1}:`, error);
+      throw error;
+    }
+    
+    console.log(`   ✓ Stored batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(formattedChunks.length / batchSize)}`);
   }
   
   console.log(`✅ Successfully stored ${chunks.length} chunks`);
-  return data;
 };
 
 /**
@@ -308,12 +339,7 @@ export const processAndEmbedDocument = async (
   }
 
   if (allChunks.length > 0) {
-    const batchSize = 100;
-    for (let i = 0; i < allChunks.length; i += batchSize) {
-      const batch = allChunks.slice(i, Math.min(i + batchSize, allChunks.length));
-      await addChunksToVectorStore(batch);
-      console.log(`  - Stored batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(allChunks.length / batchSize)}`);
-    }
+    await addChunksToVectorStore(allChunks);
   }
 
   console.log(`✅ Embedding complete: ${allChunks.length} chunks stored`);

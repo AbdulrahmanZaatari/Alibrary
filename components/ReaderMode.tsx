@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { hasTransliterationIssues } from '@/lib/transliterationMapper';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import React from 'react';
@@ -23,7 +22,6 @@ import {
   BookOpen,
   Check,
   MessageSquare,
-  Database,
   Send,
   Clock,
   Pencil,
@@ -71,6 +69,7 @@ interface ReaderModeProps {
 }
 
 export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderModeProps = {}) {
+  // Book & PDF State
   const [books, setBooks] = useState<Book[]>([]);
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
@@ -78,26 +77,22 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [scale, setScale] = useState<number>(1.0);
   const [rotation, setRotation] = useState<number>(0);
-  const [containerWidth, setContainerWidth] = useState<number>(0);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [enableMultiHop, setEnableMultiHop] = useState(false);
+  const [pdfCache, setPdfCache] = useState<Map<string, string>>(new Map());
   
-  // Text extraction
+  // Text Extraction State
   const [extractedText, setExtractedText] = useState('');
   const [showTextPopup, setShowTextPopup] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [expandedCommentId, setExpandedCommentId] = useState<string | null>(null);
-  const [isFixingSpelling, setIsFixingSpelling] = useState(false);
   const [extractionCorrected, setExtractionCorrected] = useState(false);
   
-  // Bookmarks
+  // Bookmarks State
   const [bookmarks, setBookmarks] = useState<BookmarkType[]>([]);
   const [showBookmarks, setShowBookmarks] = useState(false);
-  const [pdfCache, setPdfCache] = useState<Map<string, string>>(new Map());
 
-    // Comments
+  // Comments State
   const [comments, setComments] = useState<Array<{
     id: string;
     page_number: number;
@@ -109,26 +104,28 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [showCommentDialog, setShowCommentDialog] = useState(false);
   const [commentDraft, setCommentDraft] = useState('');
   const [selectedTextForComment, setSelectedTextForComment] = useState('');
+  const [expandedCommentId, setExpandedCommentId] = useState<string | null>(null);
 
-  // Citation
+  // Citation State
   const [showCitationMenu, setShowCitationMenu] = useState(false);
   const [citationPosition, setCitationPosition] = useState<{ 
-  x: number; 
-  y: number; 
-  placement?: 'above' | 'below' | 'fixed-top' 
+    x: number; 
+    y: number; 
+    placement?: 'above' | 'below' | 'fixed-top' 
   }>({ x: 0, y: 0 });
   const [selectedTextForCitation, setSelectedTextForCitation] = useState('');
   const [generatedCitation, setGeneratedCitation] = useState('');
   const [loadingCitation, setLoadingCitation] = useState(false);
   const [showCitationDialog, setShowCitationDialog] = useState(false);
+  const [isFixingSpelling, setIsFixingSpelling] = useState(false);
 
-  // AI Chat
+  // AI Chat State
   const [showChat, setShowChat] = useState(false);
   const [chatMessages, setChatMessages] = useState<Array<{role: string; content: string}>>([]);
   const [streamingContent, setStreamingContent] = useState<string>(''); 
   const [isStreaming, setIsStreaming] = useState(false); 
   const [chatLoading, setChatLoading] = useState(false);
-  const [correctSpelling, setCorrectSpelling] = useState(false);
+  const [enableMultiHop, setEnableMultiHop] = useState(false);
   const [bookSessions, setBookSessions] = useState<Array<{
     id: string;
     name: string;
@@ -136,16 +133,15 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     updated_at: string;
   }>>([]);
   const [showSessionList, setShowSessionList] = useState(false);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   
-  // Corpus Selector
-  const [showCorpus, setShowCorpus] = useState(false);
+  // Corpus State
   const [corpusDocuments, setCorpusDocuments] = useState<CorpusDocument[]>([]);
   const [selectedCorpus, setSelectedCorpus] = useState<string[]>([]);
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [isLoadingBooks, setIsLoadingBooks] = useState(false);
   const [isLoadingCorpus, setIsLoadingCorpus] = useState(false);
 
-  // Prompts
+  // Prompts State
   const [availablePrompts, setAvailablePrompts] = useState<Array<{
     id: string;
     name: string;
@@ -153,7 +149,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     category: string;
   }>>([]);
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
-  const [showPromptSelector, setShowPromptSelector] = useState(false);
 
   // UI State
   const [libraryCollapsed, setLibraryCollapsed] = useState(false);
@@ -161,6 +156,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [chatPanelWidth, setChatPanelWidth] = useState(500);
   const [isResizing, setIsResizing] = useState(false);
 
+  // Model Selection State
   const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
   const [modelError, setModelError] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
@@ -173,12 +169,14 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite (Fastest)', tier: 'basic' },
   ];
 
+  // Refs
   const hasRestoredRef = useRef(false);
   const isRestoringRef = useRef(false);
   const isMountingRef = useRef(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
 
+  // ==================== EFFECTS ====================
 
   // Auto-scroll effect for chat messages
   useEffect(() => {
@@ -192,6 +190,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     }
   }, [chatMessages, streamingContent, isStreaming]);
 
+  // Initial load
   useEffect(() => {
     fetchBooks();
     fetchCorpusDocuments();
@@ -203,6 +202,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     return () => clearTimeout(timer);
   }, []);
 
+  // Cleanup PDF URLs
   useEffect(() => {
     return () => {
       if (pdfUrl && !selectedBook?.id) {
@@ -212,6 +212,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     };
   }, [pdfUrl, selectedBook?.id]);
 
+  // Load selected book
   useEffect(() => {
     if (selectedBook) {
       console.log('📖 Loading book:', selectedBook.title);
@@ -236,18 +237,21 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     }
   }, [selectedBook?.id]);
 
+  // Load comments when page changes
   useEffect(() => {
-  if (selectedBook) {
-    loadComments();
-  }
-}, [selectedBook?.id, currentPage]);
+    if (selectedBook) {
+      loadComments();
+    }
+  }, [selectedBook?.id, currentPage]);
 
+  // Load sessions when book changes
   useEffect(() => {
     if (selectedBook) {
       loadBookSessions(selectedBook.id);
     }
   }, [selectedBook?.id]);
 
+  // Notify parent of book selection
   useEffect(() => {
     if (isMountingRef.current || isRestoringRef.current) {
       return;
@@ -259,114 +263,108 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     }
   }, [selectedBook?.id, onBookSelect]);
 
-useEffect(() => {
-  if (!selectedBook) return;
+  // Text selection handler
+  useEffect(() => {
+    if (!selectedBook) return;
 
-  const container = document.getElementById('pdf-container');
-  if (!container) return;
+    const container = document.getElementById('pdf-container');
+    if (!container) return;
 
-  const handleTextSelection = () => {
-    const selection = window.getSelection();
-    const selectedText = selection?.toString().trim();
+    const handleTextSelection = () => {
+      const selection = window.getSelection();
+      const selectedText = selection?.toString().trim();
 
-    if (selectedText && selectedText.length > 0) {
-      const range = selection?.getRangeAt(0);
-      const pdfContainer = document.getElementById('pdf-container');
-      
-      if (!pdfContainer || !range) return;
-      
-      // ✅ Check if selection is inside PDF container
-      const isInPdfContainer = pdfContainer.contains(range.commonAncestorContainer);
-      
-      if (!isInPdfContainer) {
-        setShowCitationMenu(false);
-        return;
-      }
-
-      // ✅ Exclude selections within UI elements
-      const ancestor = range.commonAncestorContainer;
-      const parentElement = ancestor.nodeType === Node.TEXT_NODE 
-        ? ancestor.parentElement 
-        : ancestor as HTMLElement;
-
-      const isInExcludedElement = parentElement?.closest('button, .bg-purple-600, .bg-emerald-600, [data-citation-menu]');
-      
-      if (isInExcludedElement) {
-        setShowCitationMenu(false);
-        return;
-      }
-
-      const rect = range.getBoundingClientRect();
-      const containerRect = pdfContainer.getBoundingClientRect();
-
-      if (rect) {
-        setSelectedTextForCitation(selectedText);
-        setSelectedTextForComment(selectedText);
+      if (selectedText && selectedText.length > 0) {
+        const range = selection?.getRangeAt(0);
+        const pdfContainer = document.getElementById('pdf-container');
         
-        // ✅ SMART POSITIONING WITH BOUNDARY DETECTION
-        const menuHeight = 280; // Approximate menu height (adjust if needed)
-        const menuWidth = 400;
-        const padding = 16; // Safety padding from edges
+        if (!pdfContainer || !range) return;
         
-        let x = rect.left + rect.width / 2;
-        let y = rect.top - 10;
+        const isInPdfContainer = pdfContainer.contains(range.commonAncestorContainer);
         
-        // ✅ Horizontal boundary check (keep menu within viewport)
-        const minX = padding + menuWidth / 2;
-        const maxX = window.innerWidth - menuWidth / 2 - padding;
-        x = Math.max(minX, Math.min(x, maxX));
-        
-        // ✅ Vertical boundary check (flip menu below text if too close to top)
-        const spaceAbove = rect.top - containerRect.top;
-        const spaceBelow = containerRect.bottom - rect.bottom;
-        
-        if (spaceAbove < menuHeight && spaceBelow > menuHeight) {
-          // Not enough space above, show below
-          y = rect.bottom + 10;
-          setCitationPosition({ x, y, placement: 'below' });
-        } else if (spaceAbove < menuHeight && spaceBelow < menuHeight) {
-          // Not enough space either way, show at top of container
-          y = containerRect.top + padding;
-          setCitationPosition({ x, y, placement: 'fixed-top' });
-        } else {
-          // Enough space above (default)
-          setCitationPosition({ x, y, placement: 'above' });
+        if (!isInPdfContainer) {
+          setShowCitationMenu(false);
+          return;
         }
+
+        const ancestor = range.commonAncestorContainer;
+        const parentElement = ancestor.nodeType === Node.TEXT_NODE 
+          ? ancestor.parentElement 
+          : ancestor as HTMLElement;
+
+        const isInExcludedElement = parentElement?.closest('button, .bg-purple-600, .bg-emerald-600, [data-citation-menu]');
         
-        setShowCitationMenu(true);
+        if (isInExcludedElement) {
+          setShowCitationMenu(false);
+          return;
+        }
+
+        const rect = range.getBoundingClientRect();
+        const containerRect = pdfContainer.getBoundingClientRect();
+
+        if (rect) {
+          setSelectedTextForCitation(selectedText);
+          setSelectedTextForComment(selectedText);
+          
+          const menuHeight = 280;
+          const menuWidth = 400;
+          const padding = 16;
+          
+          let x = rect.left + rect.width / 2;
+          let y = rect.top - 10;
+          
+          const minX = padding + menuWidth / 2;
+          const maxX = window.innerWidth - menuWidth / 2 - padding;
+          x = Math.max(minX, Math.min(x, maxX));
+          
+          const spaceAbove = rect.top - containerRect.top;
+          const spaceBelow = containerRect.bottom - rect.bottom;
+          
+          if (spaceAbove < menuHeight && spaceBelow > menuHeight) {
+            y = rect.bottom + 10;
+            setCitationPosition({ x, y, placement: 'below' });
+          } else if (spaceAbove < menuHeight && spaceBelow < menuHeight) {
+            y = containerRect.top + padding;
+            setCitationPosition({ x, y, placement: 'fixed-top' });
+          } else {
+            setCitationPosition({ x, y, placement: 'above' });
+          }
+          
+          setShowCitationMenu(true);
+        }
+      } else {
+        setShowCitationMenu(false);
       }
-    } else {
-      setShowCitationMenu(false);
-    }
-  };
+    };
 
-  container.addEventListener('mouseup', handleTextSelection);
-  
-  const handleClickOutside = (e: MouseEvent) => {
-    const target = e.target as HTMLElement;
-    const pdfContainer = document.getElementById('pdf-container');
-    const citationMenu = document.querySelector('[data-citation-menu]');
+    container.addEventListener('mouseup', handleTextSelection);
     
-    if (pdfContainer && !pdfContainer.contains(target) && 
-        citationMenu && !citationMenu.contains(target)) {
-      setShowCitationMenu(false);
-    }
-  };
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const pdfContainer = document.getElementById('pdf-container');
+      const citationMenu = document.querySelector('[data-citation-menu]');
+      
+      if (pdfContainer && !pdfContainer.contains(target) && 
+          citationMenu && !citationMenu.contains(target)) {
+        setShowCitationMenu(false);
+      }
+    };
 
-  document.addEventListener('click', handleClickOutside);
-  document.addEventListener('selectionchange', () => {
-    const selection = window.getSelection();
-    if (!selection || selection.toString().trim().length === 0) {
-      setShowCitationMenu(false);
-    }
-  });
+    document.addEventListener('click', handleClickOutside);
+    document.addEventListener('selectionchange', () => {
+      const selection = window.getSelection();
+      if (!selection || selection.toString().trim().length === 0) {
+        setShowCitationMenu(false);
+      }
+    });
 
-  return () => {
-    container.removeEventListener('mouseup', handleTextSelection);
-    document.removeEventListener('click', handleClickOutside);
-  };
-}, [selectedBook]);
+    return () => {
+      container.removeEventListener('mouseup', handleTextSelection);
+      document.removeEventListener('click', handleClickOutside);
+    };
+  }, [selectedBook]);
 
+  // Restore persisted book
   useEffect(() => {
     if (persistedBookId && books.length > 0 && !hasRestoredRef.current) {
       const book = books.find(b => b.id === persistedBookId);
@@ -382,6 +380,7 @@ useEffect(() => {
     }
   }, [persistedBookId, books]);
 
+  // Save reading position
   useEffect(() => {
     if (!selectedBook?.id || currentPage <= 0 || currentPage === selectedBook.current_page) {
       return;
@@ -394,38 +393,12 @@ useEffect(() => {
     return () => clearTimeout(timeoutId);
   }, [currentPage, selectedBook?.id, selectedBook?.current_page]);
 
-  useEffect(() => {
-  const updateWidth = () => {
-    const container = document.getElementById('pdf-container');
-    if (container) {
-      setContainerWidth(container.clientWidth);
-    }
-  };
-
-  updateWidth();
-  
-  // ✅ Add more triggers
-  const resizeObserver = new ResizeObserver(updateWidth);
-  const container = document.getElementById('pdf-container');
-  if (container) {
-    resizeObserver.observe(container);
-  }
-
-  window.addEventListener('resize', updateWidth);
-  
-  return () => {
-    window.removeEventListener('resize', updateWidth);
-    resizeObserver.disconnect();
-  };
-}, [showChat, showBookmarks, showComments, libraryCollapsed, chatPanelWidth]);
-
-  // Updated keyboard shortcuts - only active when not in input fields
+  // Keyboard shortcuts
   useEffect(() => {
     function handleKeyPress(e: KeyboardEvent) {
       const target = e.target as HTMLElement;
       const isInInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
       
-      // Text popup shortcuts (works even in textarea)
       if (showTextPopup) {
         if (e.ctrlKey && e.key === 'e') {
           e.preventDefault();
@@ -434,7 +407,6 @@ useEffect(() => {
         return;
       }
 
-      // Don't trigger shortcuts when typing in input fields or chat
       if (isInInput || showChat) {
         return;
       }
@@ -481,7 +453,7 @@ useEffect(() => {
       if (!isResizing) return;
       
       const newWidth = window.innerWidth - e.clientX;
-      if (newWidth >= 300 && newWidth <= 2400) { 
+      if (newWidth >= 300 && newWidth <= 1200) {
         setChatPanelWidth(newWidth);
       }
     };
@@ -566,57 +538,50 @@ useEffect(() => {
   }
 
   const fixSelectedTextSpelling = async () => {
-  if (!selectedTextForCitation) return;
-  
-  setIsFixingSpelling(true);
-  try {
-    // ✅ Call server endpoint instead of client-side function
-    const response = await fetch('/api/fix-spelling', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        text: selectedTextForCitation, 
-        useAI: true 
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error('Failed to fix spelling');
-    }
-
-    const data = await response.json();
+    if (!selectedTextForCitation) return;
     
-    if (data.success) {
-      const hasChanges = data.changed;
-      
-      setSelectedTextForCitation(data.fixed);
-      setSelectedTextForComment(data.fixed);
-      
-      if (hasChanges) {
-        await navigator.clipboard.writeText(data.fixed);
-        console.log('📝 Original:', selectedTextForCitation.substring(0, 100));
-        console.log('✨ Fixed:', data.fixed.substring(0, 100));
+    setIsFixingSpelling(true);
+    try {
+      const response = await fetch('/api/fix-spelling', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          text: selectedTextForCitation, 
+          useAI: true
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to fix spelling');
       }
+
+      const data = await response.json();
       
+      if (data.success) {
+        const hasChanges = data.changed;
+        
+        setSelectedTextForCitation(data.fixed);
+        setSelectedTextForComment(data.fixed);
+        
+        await navigator.clipboard.writeText(data.fixed);
+        
+        const tempDiv = document.createElement('div');
+        tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg';
+        tempDiv.textContent = hasChanges ? '✅ Fixed & Copied!' : '✅ Copied (No changes needed)';
+        document.body.appendChild(tempDiv);
+        setTimeout(() => document.body.removeChild(tempDiv), 2000);
+      }
+    } catch (error) {
+      console.error('Fix spelling error:', error);
       const tempDiv = document.createElement('div');
-      tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg';
-      tempDiv.innerHTML = hasChanges 
-        ? '✅ Fixed & copied to clipboard!' 
-        : '✓ Text is already clean';
+      tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-red-600 text-white px-4 py-2 rounded-lg shadow-lg';
+      tempDiv.textContent = '❌ Failed to fix spelling';
       document.body.appendChild(tempDiv);
-      setTimeout(() => document.body.removeChild(tempDiv), 3000);
+      setTimeout(() => document.body.removeChild(tempDiv), 2000);
+    } finally {
+      setIsFixingSpelling(false);
     }
-  } catch (error) {
-    console.error('Error:', error);
-    const tempDiv = document.createElement('div');
-    tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-red-600 text-white px-4 py-2 rounded-lg shadow-lg';
-    tempDiv.textContent = '❌ Failed to fix spelling';
-    document.body.appendChild(tempDiv);
-    setTimeout(() => document.body.removeChild(tempDiv), 2000);
-  } finally {
-    setIsFixingSpelling(false);
-  }
-};
+  };
 
   async function toggleCorpusDocument(docId: string) {
     try {
@@ -672,7 +637,6 @@ useEffect(() => {
       setChatMessages(formattedMessages);
       setCurrentSessionId(sessionId);
       
-      // Scroll to bottom after loading messages
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
       }, 100);
@@ -848,42 +812,42 @@ useEffect(() => {
   }
 
   async function extractPageText() {
-  if (!selectedBook) return;
+    if (!selectedBook) return;
 
-  setExtracting(true);
-  setShowTextPopup(true);
-  setExtractedText('🔄 Extracting text from page...\n\nApplying AI corrections for best accuracy.');
-  setExtractionCorrected(false);
+    setExtracting(true);
+    setShowTextPopup(true);
+    setExtractedText('🔄 Extracting text from page...\n\nApplying AI corrections for best accuracy.');
+    setExtractionCorrected(false);
 
-  try {
-    const res = await fetch('/api/books/extract-page', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        bookId: selectedBook.id,
-        pageNumber: currentPage,
-        enableAiCorrection: true, // ✅ Enable AI validation
-      }),
-    });
+    try {
+      const res = await fetch('/api/books/extract-page', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookId: selectedBook.id,
+          pageNumber: currentPage,
+          enableAiCorrection: true,
+        }),
+      });
 
-    const data = await res.json();
-    if (data.success) {
-      setExtractedText(data.text);
-      setExtractionCorrected(data.corrected || false);
-      
-      if (data.corrected) {
-        console.log('✨ Corrections applied (Regex + AI)');
+      const data = await res.json();
+      if (data.success) {
+        setExtractedText(data.text);
+        setExtractionCorrected(data.corrected || false);
+        
+        if (data.corrected) {
+          console.log('✨ Corrections applied (AI)');
+        }
+      } else {
+        setExtractedText('❌ Failed to extract text from this page.');
       }
-    } else {
-      setExtractedText('❌ Failed to extract text from this page.');
+    } catch (error) {
+      console.error('Extraction error:', error);
+      setExtractedText('❌ Error extracting text. Please try again.');
+    } finally {
+      setExtracting(false);
     }
-  } catch (error) {
-    console.error('Extraction error:', error);
-    setExtractedText('❌ Error extracting text. Please try again.');
-  } finally {
-    setExtracting(false);
   }
-}
 
   async function sendChatMessage(userMessage: string) {
     if (!userMessage.trim() || !selectedBook) return;
@@ -952,8 +916,7 @@ useEffect(() => {
       bookTitle: selectedBook?.title,
       bookPage: currentPage,
       extractedText: extractedText || undefined,
-      correctSpelling: correctSpelling,
-      aggressiveCorrection: false,
+      correctSpelling: true, // ✅ Always use AI correction
       customPrompt: selectedPrompt || '',
       enableMultiHop: enableMultiHop,
       preferredModel: selectedModel,
@@ -1123,7 +1086,7 @@ useEffect(() => {
     }
   }
 
-    // ==================== COMMENTS ====================
+  // ==================== COMMENTS ====================
 
   async function loadComments() {
     if (!selectedBook) return;
@@ -1218,28 +1181,6 @@ useEffect(() => {
     }
   }
 
-  function handleTextSelection() {
-    const selection = window.getSelection();
-    const selectedText = selection?.toString().trim();
-
-    if (selectedText && selectedText.length > 0) {
-      const range = selection?.getRangeAt(0);
-      const rect = range?.getBoundingClientRect();
-
-      if (rect) {
-        setSelectedTextForCitation(selectedText);
-        setSelectedTextForComment(selectedText);
-        setCitationPosition({
-          x: rect.left + rect.width / 2,
-          y: rect.top - 10,
-        });
-        setShowCitationMenu(true);
-      }
-    } else {
-      setShowCitationMenu(false);
-    }
-  }
-
   // ==================== NAVIGATION & MANIPULATION ====================
 
   const goToPrevPage = () => {
@@ -1278,7 +1219,6 @@ useEffect(() => {
 
   // ==================== COMPONENTS ====================
 
-  // ✅ OPTIMIZED ChatInput WITH CUSTOM COMPARISON
   const ChatInput = ({ 
     onSend, 
     disabled
@@ -1466,111 +1406,100 @@ useEffect(() => {
   });
 
   StreamingMessage.displayName = 'StreamingMessage';
-    return (
-    <div className="h-full flex bg-slate-50">
-      {/* Book Library Sidebar - Collapsible */}
-      <div className={`bg-white border-r border-slate-200 transition-all duration-300 ${libraryCollapsed ? 'w-14' : 'w-80'} flex flex-col`}>
-        {libraryCollapsed ? (
-          <div className="p-3 border-b border-slate-200">
+
+  // ==================== RENDER ====================
+  // ...existing code...
+
+  return (
+    <div className="h-screen flex overflow-hidden bg-slate-50">
+      {/* 📚 LEFT SIDEBAR - LIBRARY */}
+      <div 
+        className={`bg-white border-r border-slate-200 flex flex-col transition-all duration-300 ${
+          libraryCollapsed ? 'w-12' : 'w-80'
+        }`}
+      >
+        {/* Header */}
+        <div className="p-3 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+          {!libraryCollapsed && (
+            <>
+              <h2 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+                <BookOpen size={20} className="text-blue-600" />
+                Library
+              </h2>
+              <button
+                onClick={() => setLibraryCollapsed(true)}
+                className="p-1 hover:bg-slate-200 rounded transition-colors"
+                title="Collapse library"
+              >
+                <ChevronLeft size={18} />
+              </button>
+            </>
+          )}
+          {libraryCollapsed && (
             <button
               onClick={() => setLibraryCollapsed(false)}
-              className="w-full p-2 hover:bg-slate-100 rounded-lg transition-colors"
-              title="Expand Library"
+              className="p-1 hover:bg-slate-200 rounded transition-colors mx-auto"
+              title="Expand library"
             >
-              <Menu size={20} className="mx-auto" />
+              <ChevronRight size={18} />
             </button>
-          </div>
-        ) : (
-          <>
-            <div className="p-4 border-b border-slate-200">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-xl font-bold flex items-center gap-2">
-                  <BookOpen className="text-emerald-600" />
-                  My Library
-                </h2>
-                <button
-                  onClick={() => setLibraryCollapsed(true)}
-                  className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
-                  title="Collapse Library"
-                >
-                  <X size={18} />
-                </button>
-              </div>
+          )}
+        </div>
 
-              <label className="block mb-3">
+        {!libraryCollapsed && (
+          <>
+            {/* Upload Button */}
+            <div className="p-3 border-b border-slate-200">
+              <label className="flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors cursor-pointer text-sm font-medium">
+                <Upload size={16} />
+                {uploading ? 'Uploading...' : 'Upload PDF'}
                 <input
                   type="file"
                   accept=".pdf"
                   onChange={handleUpload}
-                  className="hidden"
                   disabled={uploading}
+                  className="hidden"
                 />
-                <div
-                  className={`w-full px-4 py-3 rounded-lg cursor-pointer text-center font-medium flex items-center justify-center gap-2 transition-colors ${
-                    uploading
-                      ? 'bg-slate-300 cursor-not-allowed'
-                      : 'bg-emerald-600 text-white hover:bg-emerald-700'
-                  }`}
-                >
-                  {uploading ? (
-                    <>
-                      <Loader2 size={18} className="animate-spin" />
-                      Uploading...
-                    </>
-                  ) : (
-                    <>
-                      <Upload size={18} />
-                      Upload Book
-                    </>
-                  )}
-                </div>
               </label>
-
-              {books.length > 0 && (
-                <select
-                  value={selectedBook?.id || ''}
-                  onChange={(e) => {
-                    const book = books.find(b => b.id === e.target.value);
-                    if (book) setSelectedBook(book);
-                  }}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                >
-                  <option value="">Select a book...</option>
-                  {books.map(book => (
-                    <option key={book.id} value={book.id}>
-                      {book.title} (Page {book.current_page}/{book.page_count})
-                    </option>
-                  ))}
-                </select>
-              )}
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4">
-              {books.length === 0 ? (
-                <div className="text-center py-12">
-                  <BookOpen size={48} className="mx-auto text-slate-300 mb-3" />
-                  <p className="text-slate-500 text-sm">No books yet</p>
-                  <p className="text-slate-400 text-xs mt-1">Upload your first book to start reading</p>
+            {/* Books List */}
+            <div className="flex-1 overflow-y-auto p-3">
+              {isLoadingBooks ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="animate-spin text-blue-600" size={24} />
+                </div>
+              ) : books.length === 0 ? (
+                <div className="text-center py-8 text-slate-500 text-sm">
+                  <FileText className="mx-auto mb-2 text-slate-400" size={32} />
+                  <p>No books uploaded yet</p>
                 </div>
               ) : (
                 <div className="space-y-2">
                   {books.map((book) => (
                     <div
                       key={book.id}
-                      className={`p-3 rounded-lg border cursor-pointer transition-colors ${
+                      className={`p-3 rounded-lg border transition-all cursor-pointer group ${
                         selectedBook?.id === book.id
-                          ? 'bg-emerald-50 border-emerald-300'
-                          : 'hover:bg-slate-50 border-slate-200'
+                          ? 'bg-blue-50 border-blue-300 shadow-sm'
+                          : 'bg-white border-slate-200 hover:border-blue-200 hover:shadow-sm'
                       }`}
-                      onClick={() => setSelectedBook(book)}
+                      onClick={() => {
+                        setSelectedBook(book);
+                        if (onBookSelect) {
+                          onBookSelect(book.id);
+                        }
+                      }}
                     >
-                      <div className="flex justify-between items-start">
+                      <div className="flex items-start justify-between gap-2">
                         <div className="flex-1 min-w-0">
-                          <p className="font-medium text-sm truncate">{book.title}</p>
-                          <p className="text-xs text-slate-500">
+                          <h3 className="font-medium text-sm text-slate-800 truncate">
+                            {book.title}
+                          </h3>
+                          <p className="text-xs text-slate-500 mt-1">
                             Page {book.current_page} of {book.page_count}
                           </p>
-                          <p className="text-xs text-slate-400">
+                          <p className="text-xs text-slate-400 mt-1">
                             {new Date(book.last_read).toLocaleDateString()}
                           </p>
                         </div>
@@ -1579,9 +1508,10 @@ useEffect(() => {
                             e.stopPropagation();
                             deleteBook(book.id);
                           }}
-                          className="p-1 hover:bg-red-100 rounded transition-colors"
+                          className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors opacity-0 group-hover:opacity-100"
+                          title="Delete book"
                         >
-                          <Trash2 size={16} className="text-red-600" />
+                          <Trash2 size={14} />
                         </button>
                       </div>
                     </div>
@@ -1593,700 +1523,448 @@ useEffect(() => {
         )}
       </div>
 
-      {/* PDF Viewer Section */}
-      <div className="flex-1 flex flex-col bg-white" style={{
-          width: showChat 
-            ? `calc(100% - ${libraryCollapsed ? '56px' : '320px'} - ${chatPanelWidth}px - 4px)` 
-            : showBookmarks || showComments
-              ? `calc(100% - ${libraryCollapsed ? '56px' : '320px'} - 384px)`
-              : `calc(100% - ${libraryCollapsed ? '56px' : '320px'})`,
-          transition: 'width 0.3s ease'
-        }}>
-        <div className="p-4 border-b border-slate-200 flex items-center justify-between">
-          <h3 className="font-semibold text-lg truncate">
-            {selectedBook?.title || 'Select a book to read'}
-          </h3>
-          <div className="flex gap-2">
-            {selectedBook && (
-              <>
+      {/* 📖 CENTER - PDF VIEWER */}
+      <div 
+        className="flex-1 flex flex-col overflow-hidden"
+        style={{ 
+          marginRight: showChat ? `${chatPanelWidth}px` : '0',
+          transition: 'margin-right 0.3s ease'
+        }}
+      >
+        {selectedBook ? (
+          <>
+            {/* Top Toolbar */}
+            <div className="bg-white border-b border-slate-200 p-3 flex items-center justify-between gap-4 flex-wrap">
+              <div className="flex items-center gap-2">
+                <h3 className="font-semibold text-slate-800 text-sm truncate max-w-xs">
+                  {selectedBook.title}
+                </h3>
+                <span className="text-xs text-slate-500 bg-slate-100 px-2 py-1 rounded">
+                  Page {currentPage} / {numPages}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                {/* Rotation Controls */}
+                <button
+                  onClick={rotateCounterClockwise}
+                  className="p-2 hover:bg-slate-100 rounded transition-colors"
+                  title="Rotate Left"
+                >
+                  <RotateCcw size={18} />
+                </button>
+                <button
+                  onClick={rotateClockwise}
+                  className="p-2 hover:bg-slate-100 rounded transition-colors"
+                  title="Rotate Right"
+                >
+                  <RotateCw size={18} />
+                </button>
+
+                {/* Zoom Controls */}
+                <button
+                  onClick={zoomOut}
+                  className="p-2 hover:bg-slate-100 rounded transition-colors"
+                  title="Zoom Out (-)"
+                >
+                  <ZoomOut size={18} />
+                </button>
+                <span className="text-xs text-slate-600 min-w-[3rem] text-center">
+                  {Math.round(scale * 100)}%
+                </span>
+                <button
+                  onClick={zoomIn}
+                  className="p-2 hover:bg-slate-100 rounded transition-colors"
+                  title="Zoom In (+)"
+                >
+                  <ZoomIn size={18} />
+                </button>
+
+                {/* Extract Text */}
                 <button
                   onClick={extractPageText}
                   disabled={extracting}
-                  className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+                  className="p-2 hover:bg-slate-100 rounded transition-colors disabled:opacity-50"
+                  title="Extract Text (Ctrl+E)"
                 >
-                  <FileText size={18} />
-                  {extracting ? 'Extracting...' : 'Extract Text'}
+                  {extracting ? <Loader2 size={18} className="animate-spin" /> : <FileText size={18} />}
                 </button>
 
+                {/* Add Bookmark */}
+                <button
+                  onClick={addBookmark}
+                  className="p-2 hover:bg-slate-100 rounded transition-colors"
+                  title="Add Bookmark (Ctrl+B)"
+                >
+                  <BookmarkPlus size={18} />
+                </button>
+
+                {/* View Bookmarks */}
+                <button
+                  onClick={() => {
+                    loadBookmarks();
+                    setShowBookmarks(true);
+                    setShowComments(false);
+                  }}
+                  className="p-2 hover:bg-slate-100 rounded transition-colors"
+                  title="View Bookmarks"
+                >
+                  <Bookmark size={18} />
+                </button>
+
+                {/* Comments */}
                 <button
                   onClick={() => {
                     setShowComments(!showComments);
+                    setShowBookmarks(false);
                     if (!showComments) loadComments();
                   }}
-                  className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors relative"
+                  className={`p-2 rounded transition-colors ${
+                    showComments ? 'bg-blue-100 text-blue-600' : 'hover:bg-slate-100'
+                  }`}
+                  title="Comments"
                 >
                   <MessageSquare size={18} />
-                  Comments
-                  {comments.length > 0 && (
-                    <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-xs rounded-full flex items-center justify-center">
-                      {comments.length}
-                    </span>
-                  )}
                 </button>
-                
+
+                {/* AI Chat Toggle */}
                 <button
                   onClick={() => setShowChat(!showChat)}
-                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                  className={`px-3 py-2 rounded-lg transition-colors flex items-center gap-2 font-medium text-sm ${
+                    showChat
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                  title="AI Assistant"
                 >
-                  <MessageSquare size={18} />
+                  <Sparkles size={16} />
                   AI Chat
                 </button>
-              </>
-            )}
-          </div>
-        </div>
+              </div>
+            </div>
 
-        {selectedBook && (
-          <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 bg-slate-50">
-            <div className="flex items-center gap-3">
+            {/* PDF Viewer Container */}
+            <div className="flex-1 overflow-auto bg-slate-100 p-4 relative" id="pdf-container">
+              {loading ? (
+                <div className="flex items-center justify-center h-full">
+                  <div className="text-center">
+                    <Loader2 className="animate-spin text-blue-600 mx-auto mb-2" size={32} />
+                    <p className="text-slate-600">Loading PDF...</p>
+                  </div>
+                </div>
+              ) : pdfUrl ? (
+                <div className="flex justify-center">
+                  <Document
+                    file={pdfUrl}
+                    onLoadSuccess={({ numPages }) => {
+                      setNumPages(numPages);
+                      console.log(`📄 PDF loaded: ${numPages} pages`);
+                    }}
+                    loading={
+                      <div className="flex items-center justify-center py-8">
+                        <Loader2 className="animate-spin text-blue-600" size={32} />
+                      </div>
+                    }
+                    error={
+                      <div className="text-center py-8 text-red-600">
+                        <p>❌ Failed to load PDF</p>
+                      </div>
+                    }
+                  >
+                    <Page
+                      pageNumber={currentPage}
+                      scale={scale}
+                      rotate={rotation}
+                      renderTextLayer={true}
+                      renderAnnotationLayer={true}
+                    />
+                  </Document>
+                </div>
+              ) : (
+                <div className="flex items-center justify-center h-full text-slate-500">
+                  <p>Select a book to start reading</p>
+                </div>
+              )}
+            </div>
+
+            {/* Bottom Navigation */}
+            <div className="bg-white border-t border-slate-200 p-3 flex items-center justify-between">
               <button
                 onClick={goToPrevPage}
                 disabled={currentPage <= 1}
-                className="p-2 rounded-lg hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="px-4 py-2 bg-slate-100 rounded-lg hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
               >
-                <ChevronLeft size={20} />
+                <ChevronLeft size={18} />
+                Previous
               </button>
 
-              <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  value={currentPage}
-                  onChange={(e) => {
-                    const page = parseInt(e.target.value);
-                    if (page >= 1 && page <= numPages) {
-                      setCurrentPage(page);
-                    }
-                  }}
-                  className="w-16 px-2 py-1 text-center border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                />
-                <span className="text-sm text-slate-600">/ {numPages}</span>
-              </div>
+              <input
+                type="number"
+                min={1}
+                max={numPages}
+                value={currentPage}
+                onChange={(e) => {
+                  const page = parseInt(e.target.value);
+                  if (page >= 1 && page <= numPages) {
+                    setCurrentPage(page);
+                  }
+                }}
+                className="w-20 px-3 py-2 border border-slate-300 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
 
               <button
                 onClick={goToNextPage}
                 disabled={currentPage >= numPages}
-                className="p-2 rounded-lg hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="px-4 py-2 bg-slate-100 rounded-lg hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
               >
-                <ChevronRight size={20} />
+                Next
+                <ChevronRight size={18} />
               </button>
             </div>
-
-            <div className="flex items-center gap-2">
-              <button onClick={zoomOut} className="p-2 rounded-lg hover:bg-white transition-colors" title="Zoom Out (-)">
-                <ZoomOut size={20} />
-              </button>
-              <span className="text-sm font-medium text-slate-700 w-20 text-center">
-                {Math.round(scale * 100)}%
-              </span>
-              <button onClick={zoomIn} className="p-2 rounded-lg hover:bg-white transition-colors" title="Zoom In (+)">
-                <ZoomIn size={20} />
-              </button>
-              <button 
-                onClick={resetZoom}
-                className="px-3 py-1.5 text-sm rounded-lg hover:bg-white transition-colors"
-                title="Reset to 100% (0)"
-              >
-                Reset
-              </button>
-
-              <div className="w-px h-6 bg-slate-300 mx-2"></div>
-
-              <button
-                onClick={rotateCounterClockwise}
-                className="p-2 rounded-lg hover:bg-white transition-colors"
-                title="Rotate Left"
-              >
-                <RotateCcw size={18} />
-              </button>
-              <button
-                onClick={rotateClockwise}
-                className="p-2 rounded-lg hover:bg-white transition-colors"
-                title="Rotate Right"
-              >
-                <RotateCw size={18} />
-              </button>
-
-              <div className="w-px h-6 bg-slate-300 mx-2"></div>
-
-              <button
-                onClick={addBookmark}
-                className="flex items-center gap-2 px-3 py-2 bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 transition-colors"
-              >
-                <BookmarkPlus size={18} />
-                <span className="text-sm font-medium">Bookmark</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  setShowBookmarks(!showBookmarks);
-                  if (!showBookmarks) loadBookmarks();
-                }}
-                className="relative p-2 rounded-lg hover:bg-white transition-colors"
-              >
-                <Bookmark size={20} />
-                {bookmarks.length > 0 && (
-                  <span className="absolute -top-1 -right-1 w-5 h-5 bg-emerald-500 text-white text-xs rounded-full flex items-center justify-center">
-                    {bookmarks.length}
-                  </span>
-                )}
-              </button>
+          </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-slate-500">
+            <div className="text-center">
+              <BookOpen className="mx-auto mb-4 text-slate-400" size={48} />
+              <p className="text-lg">No book selected</p>
+              <p className="text-sm mt-2">Choose a book from the library to start reading</p>
             </div>
-          </div>
-        )}
-
-        <div 
-          id="pdf-container"
-          className="flex-1 overflow-auto bg-slate-100 relative"
-          style={{ 
-            display: 'flex', 
-            justifyContent: 'center',
-            padding: '2rem'
-          }}
-        >
-          {selectedBook && comments.filter(c => c.page_number === currentPage).length > 0 && (
-          <div className="absolute top-4 right-4 z-10 bg-purple-600 text-white px-3 py-2 rounded-lg shadow-lg flex items-center gap-2 select-none pointer-events-none">
-            <MessageSquare size={16} />
-            <span className="text-sm font-medium">
-              {comments.filter(c => c.page_number === currentPage).length} comment(s) on this page
-            </span>
-          </div>
-        )}
-
-          {loading ? (
-            <div className="flex items-center justify-center h-full">
-              <Loader2 className="animate-spin text-emerald-600" size={48} />
-            </div>
-          ) : pdfUrl ? (
-            <div style={{ width: '100%', display: 'flex', justifyContent: 'center' }}>
-              <Document
-                file={pdfUrl}
-                onLoadSuccess={({ numPages }) => {
-                  console.log('✅ PDF loaded successfully:', numPages, 'pages');
-                  setNumPages(numPages);
-                  loadBookmarks();
-                }}
-                onLoadError={(error) => {
-                  console.error('❌ PDF load error:', error);
-                  alert('Failed to load PDF. Please try uploading again.');
-                  setPdfUrl(null);
-                  setNumPages(0);
-                }}
-                loading={
-                  <div className="flex items-center justify-center h-96">
-                    <Loader2 className="animate-spin text-emerald-600" size={48} />
-                  </div>
-                }
-                className="shadow-2xl"
-              >
-                <Page
-                  pageNumber={currentPage}
-                  scale={scale}
-                  rotate={rotation}
-                  renderTextLayer={true}
-                  renderAnnotationLayer={true}
-                  onLoadError={(error) => {
-                    console.error('❌ Page load error:', error);
-                  }}
-                  className="shadow-lg"
-                />
-              </Document>
-            </div>
-          ) : (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center">
-                <BookOpen size={64} className="mx-auto text-slate-300 mb-4" />
-                <p className="text-slate-500">Upload a book to start reading</p>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {selectedBook && (
-          <div className="px-4 py-2 border-t border-slate-200 bg-slate-50">
-            <p className="text-xs text-slate-600 text-center">
-              <span className="font-medium">Shortcuts:</span> ← → (Navigate) | +/- (Zoom) | 0 (Reset) | Ctrl+B (Bookmark) | Ctrl+E (Extract Text)
-            </p>
           </div>
         )}
       </div>
 
-      {/* Bookmarks Sidebar */}
-      {showBookmarks && selectedBook && (
-        <div className="w-96 bg-white border-l border-slate-200 flex flex-col">
-          <div className="flex items-center justify-between p-4 border-b border-slate-200">
-            <h3 className="font-semibold text-lg flex items-center gap-2">
-              <Bookmark size={20} className="text-emerald-600" />
-              Bookmarks
-            </h3>
-            <button
-              onClick={() => setShowBookmarks(false)}
-              className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
-            >
-              <X size={20} />
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-4">
-            {bookmarks.length === 0 ? (
-              <div className="text-center py-12">
-                <Bookmark size={48} className="mx-auto text-slate-300 mb-3" />
-                <p className="text-slate-500 text-sm">No bookmarks yet</p>
-                <p className="text-slate-400 text-xs mt-1">Press Ctrl+B to bookmark a page</p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {bookmarks.map((bookmark) => (
-                  <div
-                    key={bookmark.id}
-                    className="p-3 border border-slate-200 rounded-lg hover:border-emerald-300 hover:bg-emerald-50 transition-colors cursor-pointer group"
-                    onClick={() => setCurrentPage(bookmark.page_number)}
-                  >
-                    <div className="flex items-start justify-between mb-2">
-                      <span className="font-medium text-emerald-700">Page {bookmark.page_number}</span>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteBookmark(bookmark.id);
-                        }}
-                        className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 rounded transition-all"
-                      >
-                        <Trash2 size={14} className="text-red-600" />
-                      </button>
-                    </div>
-                    {bookmark.note && <p className="text-sm text-slate-600">{bookmark.note}</p>}
-                    <p className="text-xs text-slate-400 mt-2">
-                      {new Date(bookmark.created_at).toLocaleDateString()}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-            {/* Comments Sidebar */}
-      {showComments && selectedBook && (
-        <div className="w-96 bg-white border-l border-slate-200 flex flex-col">
-          <div className="flex items-center justify-between p-4 border-b border-slate-200">
-            <h3 className="font-semibold text-lg flex items-center gap-2">
-              <MessageSquare size={20} className="text-purple-600" />
-              Comments
-            </h3>
-            <button
-              onClick={() => setShowComments(false)}
-              className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
-            >
-              <X size={20} />
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-4">
-            {comments.length === 0 ? (
-              <div className="text-center py-12">
-                <MessageSquare size={48} className="mx-auto text-slate-300 mb-3" />
-                <p className="text-slate-500 text-sm">No comments yet</p>
-                <p className="text-slate-400 text-xs mt-1">Select text and click Comment</p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {/* Current Page Comments */}
-                {comments
-                  .filter(c => c.page_number === currentPage)
-                  .map((comment) => {
-                    const isExpanded = expandedCommentId === comment.id;
-                    const needsExpansion = comment.selected_text && comment.selected_text.length > 150;
-                    
-                    return (
-                      <div
-                        key={comment.id}
-                        className="p-3 border border-purple-200 rounded-lg bg-purple-50/50 hover:bg-purple-50 transition-colors group"
-                      >
-                        {comment.selected_text && (
-                          <div className="text-xs text-slate-600 italic mb-2 bg-white p-2 rounded">
-                            <div className={needsExpansion && !isExpanded ? 'line-clamp-3' : ''}>
-                              &quot;{comment.selected_text}&quot;
-                            </div>
-                            {needsExpansion && (
-                              <button
-                                onClick={() => setExpandedCommentId(isExpanded ? null : comment.id)}
-                                className="text-purple-600 hover:text-purple-700 mt-1 text-xs font-medium"
-                              >
-                                {isExpanded ? 'Show Less' : 'Read More'}
-                              </button>
-                            )}
-                          </div>
-                        )}
-                        <p className="text-sm text-slate-800">{comment.comment}</p>
-                        <div className="flex items-center justify-between mt-2">
-                          <p className="text-xs text-slate-400">
-                            {new Date(comment.created_at).toLocaleString()}
-                          </p>
-                          <button
-                            onClick={() => deleteComment(comment.id)}
-                            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 rounded transition-all"
-                          >
-                            <Trash2 size={14} className="text-red-600" />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                
-                {/* Other Pages Comments */}
-                {comments.filter(c => c.page_number !== currentPage).length > 0 && (
-                  <div className="mt-6">
-                    <p className="text-xs font-medium text-slate-500 mb-2">Other Pages</p>
-                    {comments
-                      .filter(c => c.page_number !== currentPage)
-                      .map((comment) => {
-                        const isExpanded = expandedCommentId === comment.id;
-                        const needsExpansion = comment.selected_text && comment.selected_text.length > 150;
-                        
-                        return (
-                          <div
-                            key={comment.id}
-                            className="p-3 border border-slate-200 rounded-lg mb-2 cursor-pointer hover:border-purple-300 transition-colors group"
-                            onClick={() => setCurrentPage(comment.page_number)}
-                          >
-                            <div className="flex items-start justify-between mb-1">
-                              <span className="text-xs font-medium text-purple-600">
-                                Page {comment.page_number}
-                              </span>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  deleteComment(comment.id);
-                                }}
-                                className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 rounded transition-all"
-                              >
-                                <Trash2 size={12} className="text-red-600" />
-                              </button>
-                            </div>
-                            {comment.selected_text && (
-                              <div className="text-xs text-slate-600 italic mb-1 bg-slate-50 p-2 rounded">
-                                <div className={needsExpansion && !isExpanded ? 'line-clamp-2' : ''}>
-                                  &quot;{comment.selected_text}&quot;
-                                </div>
-                                {needsExpansion && (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setExpandedCommentId(isExpanded ? null : comment.id);
-                                    }}
-                                    className="text-purple-600 hover:text-purple-700 mt-1 text-xs font-medium"
-                                  >
-                                    {isExpanded ? 'Show Less' : 'Read More'}
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                            <p className="text-xs text-slate-700 line-clamp-2">{comment.comment}</p>
-                            <p className="text-xs text-slate-400 mt-1">
-                              {new Date(comment.created_at).toLocaleDateString()}
-                            </p>
-                          </div>
-                        );
-                      })}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* AI Chat Sidebar - Resizable */}
+      {/* 💬 RIGHT SIDEBAR - AI CHAT PANEL */}
       {showChat && selectedBook && (
         <>
+          {/* Resize Handle */}
           <div
-            className="w-1 bg-slate-200 hover:bg-blue-400 cursor-col-resize transition-colors relative group"
+            className="fixed top-0 bottom-0 w-1 bg-slate-300 hover:bg-blue-500 cursor-col-resize z-50 transition-colors"
+            style={{ left: `calc(100% - ${chatPanelWidth}px)` }}
             onMouseDown={() => setIsResizing(true)}
-            style={{ userSelect: 'none', zIndex: 40 }}
-            title="Drag to resize chat panel"
+          />
+
+          {/* Chat Panel */}
+          <div
+            className="fixed top-0 right-0 bottom-0 bg-white border-l border-slate-200 flex flex-col shadow-xl z-40"
+            style={{ width: `${chatPanelWidth}px` }}
           >
-            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-              <div className="w-1 h-16 bg-blue-600 rounded-full shadow-lg"></div>
-            </div>
-
-          {/* Drag hint */}
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-            <div className="bg-blue-600 text-white text-xs px-2 py-1 rounded whitespace-nowrap">
-              ↔️ Drag to resize
-            </div>
-          </div>
-        </div>
-
-          <div 
-            className="bg-white border-l border-slate-200 flex flex-col"
-            style={{ 
-              width: `${chatPanelWidth}px`, 
-              minWidth: '300px', 
-              maxWidth: '2400px',
-              flexShrink: 0 
-            }}
-          >
-            <div className="p-4 border-b border-slate-200">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold text-lg flex items-center gap-2">
-                  <MessageSquare size={20} className="text-blue-600" />
-                  AI Assistant
-                </h3>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setShowChatSettings(!showChatSettings)}
-                    className={`p-2 rounded-lg transition-colors ${showChatSettings ? 'bg-blue-100' : 'hover:bg-slate-100'}`}
-                    title="Chat Settings"
-                  >
-                    <Settings size={20} />
-                  </button>
-                  <button
-                    onClick={() => setShowChat(false)}
-                    className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
-                  >
-                    <X size={20} />
-                  </button>
-                </div>
+            {/* Chat Header */}
+            <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-gradient-to-r from-blue-50 to-purple-50">
+              <div className="flex items-center gap-2">
+                <Sparkles className="text-blue-600" size={20} />
+                <h3 className="font-semibold text-slate-800">AI Research Assistant</h3>
               </div>
-
-              {showChatSettings && (
-                <div className="mb-3 p-3 bg-slate-50 rounded-lg space-y-3">
-                  <div>
-                    <label className="text-xs font-medium text-slate-700 mb-2 block">Custom Prompt</label>
-                    <select
-                      value={selectedPromptId || ''}
-                      onChange={(e) => setSelectedPromptId(e.target.value || null)}
-                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-                    >
-                      <option value="">No custom prompt</option>
-                      {availablePrompts.map(prompt => (
-                        <option key={prompt.id} value={prompt.id}>
-                          {prompt.name} ({prompt.category})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="text-xs font-medium text-slate-700 mb-2 block">Corpus Documents ({selectedCorpus.length} selected)</label>
-                    <div className="max-h-32 overflow-y-auto border border-slate-200 rounded-lg p-2 space-y-1">
-                      {corpusDocuments.length === 0 ? (
-                        <p className="text-xs text-slate-500 text-center py-2">No corpus documents available</p>
-                      ) : (
-                        corpusDocuments.map((doc) => (
-                          <label key={doc.id} className="flex items-center gap-2 p-1.5 hover:bg-slate-100 rounded cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={selectedCorpus.includes(doc.id)}
-                              onChange={() => toggleCorpusDocument(doc.id)}
-                              className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500"
-                            />
-                            <span className="text-xs text-slate-700">{doc.display_name}</span>
-                          </label>
-                        ))
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <label className="text-xs font-medium text-slate-700">Multi-Hop Reasoning</label>
-                      <p className="text-[10px] text-slate-500 mt-0.5">For complex analysis questions</p>
-                    </div>
-                    <button
-                      onClick={() => setEnableMultiHop(!enableMultiHop)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                        enableMultiHop 
-                          ? 'bg-blue-600 text-white' 
-                          : 'bg-slate-200 text-slate-700'
-                      }`}
-                    >
-                      {enableMultiHop ? 'ON' : 'OFF'}
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-medium text-slate-700">Spelling Correction</label>
-                    <button
-                      onClick={() => setCorrectSpelling(!correctSpelling)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                        correctSpelling 
-                          ? 'bg-orange-600 text-white' 
-                          : 'bg-slate-200 text-slate-700'
-                      }`}
-                    >
-                      {correctSpelling ? 'ON' : 'OFF'}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              <div className="space-y-2">
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setShowSessionList(!showSessionList)}
-                    className="flex-1 px-3 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors text-sm font-medium flex items-center justify-center gap-2"
-                  >
-                    <Clock size={16} />
-                    {bookSessions.length > 0 ? `${bookSessions.length} Sessions` : 'No Sessions'}
-                  </button>
-                  <button
-                    onClick={startNewSession}
-                    className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm font-medium"
-                  >
-                    New Chat
-                  </button>
-                </div>
-
-                {currentSessionId && (
-                  <div className="px-3 py-2 bg-slate-50 rounded-lg text-xs text-slate-600">
-                    {bookSessions.find(s => s.id === currentSessionId)?.name || 'Current Session'}
-                  </div>
-                )}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowChatSettings(!showChatSettings)}
+                  className="p-2 hover:bg-white rounded-lg transition-colors"
+                  title="Settings"
+                >
+                  <Settings size={18} />
+                </button>
+                <button
+                  onClick={() => setShowSessionList(!showSessionList)}
+                  className="p-2 hover:bg-white rounded-lg transition-colors"
+                  title="Chat History"
+                >
+                  <Clock size={18} />
+                </button>
+                <button
+                  onClick={() => setShowChat(false)}
+                  className="p-2 hover:bg-white rounded-lg transition-colors"
+                  title="Close"
+                >
+                  <X size={18} />
+                </button>
               </div>
-
-              {showSessionList && bookSessions.length > 0 && (
-                <div className="mt-3 max-h-48 overflow-y-auto border border-slate-200 rounded-lg">
-                  {bookSessions.map((session) => (
-                    <div
-                      key={session.id}
-                      className={`p-3 border-b last:border-b-0 group ${
-                        currentSessionId === session.id ? 'bg-blue-50' : ''
-                      }`}
-                    >
-                      <div className="flex items-start justify-between">
-                        <div 
-                          className="flex-1 min-w-0 cursor-pointer"
-                          onClick={() => {
-                            loadSessionMessages(session.id);
-                            setShowSessionList(false);
-                          }}
-                        >
-                          <p className="text-sm font-medium text-slate-800 truncate">
-                            {session.name?.replace('Chat: ', '') || `Session ${new Date(session.created_at).toLocaleDateString()}`}
-                          </p>
-                          <p className="text-xs text-slate-500">
-                            {new Date(session.updated_at).toLocaleTimeString()}
-                          </p>
-                        </div>
-                        <div className="flex gap-1">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const newName = prompt('Enter new name:', session.name?.replace('Chat: ', ''));
-                              if (newName && newName.trim()) {
-                                renameSession(session.id, newName.trim());
-                              }
-                            }}
-                            className="p-1 hover:bg-blue-100 rounded transition-colors"
-                            title="Rename session"
-                          >
-                            <Pencil size={14} className="text-blue-600" />
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              deleteSession(session.id);
-                            }}
-                            className="p-1 hover:bg-red-100 rounded transition-colors"
-                          >
-                            <Trash2 size={14} className="text-red-600" />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
 
-            <div 
-              ref={chatContainerRef}
-              className="flex-1 overflow-y-auto p-4 space-y-4"
-            >
-              {chatMessages.length === 0 && !isStreaming ? (
-                <div className="text-center py-12">
-                  <Sparkles size={48} className="mx-auto text-slate-300 mb-3" />
-                  <p className="text-slate-500 text-sm">Ask me anything about this book</p>
-                  <p className="text-slate-400 text-xs mt-1">
-                    {selectedCorpus.length > 0 
-                      ? `Using ${selectedCorpus.length} corpus document${selectedCorpus.length !== 1 ? 's' : ''}`
-                      : 'Configure settings above to enhance responses'}
-                  </p>
-                  {enableMultiHop && selectedCorpus.length > 0 && (
-                    <p className="text-blue-600 text-xs mt-2 font-medium">
-                      🧠 Multi-hop reasoning enabled
-                    </p>
-                  )}
-                </div>
-              ) : (
-                <>
-                  {chatMessages.map((msg, idx) => (
-                    <MessageBubble 
-                      key={`${currentSessionId}-msg-${idx}`} 
-                      msg={msg} 
-                    />
-                  ))}
-                  {isStreaming && <StreamingMessage content={streamingContent} />}
-                  <div ref={messagesEndRef} />
-                </>
-              )}
-              {chatLoading && !isStreaming && (
-                <div className="flex justify-start">
-                  <div className="bg-slate-100 p-3 rounded-lg">
-                    <Loader2 className="animate-spin text-slate-600" size={20} />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="p-4 border-t border-slate-200">
-              <div className="mb-3 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <label className="text-xs font-medium text-slate-700">AI Model:</label>
+            {/* Settings Panel */}
+            {showChatSettings && (
+              <div className="p-4 border-b border-slate-200 bg-slate-50 space-y-4">
+                {/* Model Selection */}
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    AI Model
+                  </label>
                   <select
                     value={selectedModel}
                     onChange={(e) => {
                       setSelectedModel(e.target.value);
                       setModelError(null);
                     }}
-                    className="px-2 py-1 text-xs border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                   >
-                    {AVAILABLE_MODELS.map(model => (
+                    {AVAILABLE_MODELS.map((model) => (
                       <option key={model.id} value={model.id}>
                         {model.name}
                       </option>
                     ))}
                   </select>
+                  {usedModel && (
+                    <p className="text-xs text-green-600 mt-1">
+                      ✓ Last used: {usedModel}
+                    </p>
+                  )}
+                  {modelError && (
+                    <p className="text-xs text-red-600 mt-1">
+                      ⚠ {modelError}
+                    </p>
+                  )}
                 </div>
-                
-                {usedModel && usedModel !== selectedModel && (
-                  <div className="text-[10px] text-amber-600 flex items-center gap-1">
-                    <span>⚠️ Fallback: {usedModel}</span>
+
+                {/* Corpus Selection */}
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    Reference Documents ({selectedCorpus.length} selected)
+                  </label>
+                  {isLoadingCorpus ? (
+                    <div className="flex items-center justify-center py-2">
+                      <Loader2 className="animate-spin text-blue-600" size={16} />
+                    </div>
+                  ) : (
+                    <div className="max-h-32 overflow-y-auto space-y-1 border border-slate-200 rounded-lg p-2 bg-white">
+                      {corpusDocuments.length === 0 ? (
+                        <p className="text-xs text-slate-500 text-center py-2">
+                          No documents available
+                        </p>
+                      ) : (
+                        corpusDocuments.map((doc) => (
+                          <label key={doc.id} className="flex items-center gap-2 p-1 hover:bg-slate-50 rounded cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={selectedCorpus.includes(doc.id)}
+                              onChange={() => toggleCorpusDocument(doc.id)}
+                              className="rounded text-blue-600 focus:ring-blue-500"
+                            />
+                            <span className="text-xs text-slate-700">{doc.display_name}</span>
+                          </label>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Custom Prompt */}
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    Custom Prompt Template
+                  </label>
+                  <select
+                    value={selectedPromptId || ''}
+                    onChange={(e) => setSelectedPromptId(e.target.value || null)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                  >
+                    <option value="">None (Default)</option>
+                    {availablePrompts.map((prompt) => (
+                      <option key={prompt.id} value={prompt.id}>
+                        {prompt.name} ({prompt.category})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Multi-Hop Reasoning */}
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={enableMultiHop}
+                    onChange={(e) => setEnableMultiHop(e.target.checked)}
+                    className="rounded text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-sm text-slate-700">Enable Multi-Hop Reasoning</span>
+                </label>
+              </div>
+            )}
+
+            {/* Session List */}
+            {showSessionList && (
+              <div className="p-4 border-b border-slate-200 bg-slate-50 max-h-64 overflow-y-auto">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-sm font-medium text-slate-700">Chat History</h4>
+                  <button
+                    onClick={startNewSession}
+                    className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
+                  >
+                    New Chat
+                  </button>
+                </div>
+                {bookSessions.length === 0 ? (
+                  <p className="text-xs text-slate-500 text-center py-4">No sessions yet</p>
+                ) : (
+                  <div className="space-y-2">
+                    {bookSessions.map((session) => (
+                      <div
+                        key={session.id}
+                        className={`p-2 rounded border cursor-pointer group ${
+                          currentSessionId === session.id
+                            ? 'bg-blue-50 border-blue-300'
+                            : 'bg-white border-slate-200 hover:border-blue-200'
+                        }`}
+                        onClick={() => loadSessionMessages(session.id)}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-medium text-slate-800 truncate">
+                              {session.name}
+                            </p>
+                            <p className="text-xs text-slate-500 mt-1">
+                              {new Date(session.updated_at).toLocaleString()}
+                            </p>
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteSession(session.id);
+                            }}
+                            className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded opacity-0 group-hover:opacity-100"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
+            )}
 
-              {modelError && (
-                <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded-lg">
-                  <p className="text-xs text-red-700 font-medium mb-1">⚠️ Model Error</p>
-                  <p className="text-[10px] text-red-600">{modelError}</p>
-                  <p className="text-[10px] text-red-500 mt-1">
-                    Try selecting a different model or wait a few minutes.
-                  </p>
+            {/* Messages Container */}
+            <div 
+              ref={chatContainerRef}
+              className="flex-1 overflow-y-auto p-4 space-y-4"
+            >
+              {chatMessages.length === 0 ? (
+                <div className="flex items-center justify-center h-full text-slate-500 text-center">
+                  <div>
+                    <Sparkles className="mx-auto mb-2 text-slate-400" size={32} />
+                    <p className="text-sm">Ask me anything about this book!</p>
+                    <p className="text-xs mt-2 text-slate-400">
+                      I can help with summaries, analysis, citations, and more.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {chatMessages.map((msg, idx) => (
+                    <MessageBubble key={idx} msg={msg} />
+                  ))}
+                  {isStreaming && streamingContent && (
+                    <StreamingMessage content={streamingContent} />
+                  )}
+                  <div ref={messagesEndRef} />
+                </>
+              )}
+            </div>
+
+            {/* Input Area */}
+            <div className="p-4 border-t border-slate-200 bg-white">
+              {chatLoading && !isStreaming && (
+                <div className="mb-2 flex items-center gap-2 text-sm text-blue-600">
+                  <Loader2 className="animate-spin" size={16} />
+                  Processing...
                 </div>
               )}
-
               <ChatInput 
                 onSend={sendChatMessage} 
                 disabled={chatLoading}
@@ -2296,296 +1974,201 @@ useEffect(() => {
         </>
       )}
 
-      {/* Text Extraction Popup */}
-            {showTextPopup && (
-            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-              <div className="bg-white rounded-lg shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col">
-                <div className="p-4 border-b flex items-center justify-between flex-shrink-0">
-                  <div className="flex items-center gap-3">
-                    <h3 className="font-bold text-lg">Extracted Text - Page {currentPage}</h3>
-                    {extractionCorrected && (
-                      <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded flex items-center gap-1">
-                        <Sparkles size={12} />
-                        Auto-Corrected
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={async () => {
-                        const beforeFix = extractedText;
-                        setExtracting(true);
-                        
-                        try {
-                          // ✅ Use server endpoint
-                          const response = await fetch('/api/fix-spelling', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ 
-                              text: extractedText, 
-                              useAI: true 
-                            }),
-                          });
-
-                          if (!response.ok) {
-                            throw new Error('Failed to fix spelling');
-                          }
-
-                          const data = await response.json();
-                          
-                          if (data.success) {
-                            const hasChanges = data.changed;
-                            
-                            setExtractedText(data.fixed);
-                            setExtractionCorrected(true);
-                            
-                            if (hasChanges) {
-                              console.log('📝 Corrections applied');
-                              
-                              const tempDiv = document.createElement('div');
-                              tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg';
-                              tempDiv.textContent = '✅ AI corrections applied!';
-                              document.body.appendChild(tempDiv);
-                              setTimeout(() => document.body.removeChild(tempDiv), 2000);
-                            } else {
-                              const tempDiv = document.createElement('div');
-                              tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-blue-600 text-white px-4 py-2 rounded-lg shadow-lg';
-                              tempDiv.textContent = '✓ Text is already clean';
-                              document.body.appendChild(tempDiv);
-                              setTimeout(() => document.body.removeChild(tempDiv), 2000);
-                            }
-                          }
-                        } catch (error) {
-                          console.error('Error:', error);
-                          const tempDiv = document.createElement('div');
-                          tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-red-600 text-white px-4 py-2 rounded-lg shadow-lg';
-                          tempDiv.textContent = '❌ Failed to fix spelling';
-                          document.body.appendChild(tempDiv);
-                          setTimeout(() => document.body.removeChild(tempDiv), 2000);
-                        } finally {
-                          setExtracting(false);
-                        }
-                      }}
-                      disabled={extracting}
-                      className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                      title="Apply AI-powered corrections"
-                    >
-                      <Sparkles size={18} />
-                      <span className="text-sm">Fix Spelling (AI)</span>
-                    </button>
-                    <button
-                      onClick={copyToClipboard}
-                      disabled={extracting || !extractedText}
-                      className="p-2 hover:bg-slate-100 rounded disabled:opacity-50 transition-colors"
-                      title="Copy to clipboard"
-                    >
-                      {copied ? <Check size={20} className="text-green-600" /> : <Copy size={20} />}
-                    </button>
-                    <button
-                      onClick={() => {
-                        if (extractedText && extractedText.trim()) {
-                          setShowTextPopup(false);
-                          setShowChat(true);
-                        }
-                      }}
-                      disabled={extracting || !extractedText}
-                      className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                      title="Open in chat"
-                    >
-                      <MessageSquare size={18} />
-                      <span className="text-sm">Open in Chat</span>
-                    </button>
-                    <button 
-                      onClick={() => setShowTextPopup(false)} 
-                      className="p-2 hover:bg-slate-100 rounded transition-colors"
-                    >
-                      <X size={20} />
-                    </button>
-                  </div>
-                </div>
-                
-                <div className="flex-1 overflow-y-auto p-4">
-                  <textarea
-                    value={extractedText}
-                    onChange={(e) => setExtractedText(e.target.value)}
-                    disabled={extracting}
-                    className="w-full h-full min-h-[400px] p-3 font-sans text-sm leading-relaxed border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-none"
-                    placeholder="Extracted text will appear here..."
-                    style={{ fontFamily: 'Georgia, serif' }}
-                  />
-                </div>
-                
-                <div className="p-4 border-t bg-slate-50">
-                  <p className="text-xs text-slate-600">
-                    💡 <strong>Tip:</strong> Click &quot;Fix Spelling&quot; to correct transliteration issues (Shīʿī, Sunnī, Ḥadīth, etc.)
-                  </p>
-                </div>
-              </div>
+      {/* 📝 TEXT EXTRACTION POPUP */}
+      {showTextPopup && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+            <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+                <FileText size={20} className="text-blue-600" />
+                Extracted Text
+                {extractionCorrected && (
+                  <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full">
+                    ✨ AI Corrected
+                  </span>
+                )}
+              </h3>
+              <button
+                onClick={() => setShowTextPopup(false)}
+                className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+              >
+                <X size={18} />
+              </button>
             </div>
-          )}
-
-          {showCitationMenu && selectedBook && (
-      <div
-        data-citation-menu
-        className="fixed z-50 bg-white border border-slate-300 rounded-lg shadow-2xl p-2 flex flex-col gap-2"
-        style={{
-          left: `${citationPosition.x}px`,
-          top: citationPosition.placement === 'below' 
-            ? `${citationPosition.y}px` 
-            : citationPosition.placement === 'fixed-top'
-              ? `${citationPosition.y}px`
-              : `${citationPosition.y}px`,
-          transform: citationPosition.placement === 'below'
-            ? 'translate(-50%, 0)' 
-            : citationPosition.placement === 'fixed-top'
-              ? 'translate(-50%, 0)'
-              : 'translate(-50%, -100%)',
-          maxWidth: '400px',
-          maxHeight: '90vh', // ✅ Prevent menu from exceeding viewport
-          overflowY: 'auto', // ✅ Allow scrolling if content is too tall
-        }}
-      >
-        {/* ✅ Add placement indicator for debugging (optional) */}
-        {citationPosition.placement === 'below' && (
-          <div className="absolute -top-2 left-1/2 transform -translate-x-1/2 w-4 h-4 bg-white border-t border-l border-slate-300 rotate-45"></div>
-        )}
-        {citationPosition.placement === 'above' && (
-          <div className="absolute -bottom-2 left-1/2 transform -translate-x-1/2 w-4 h-4 bg-white border-b border-r border-slate-300 rotate-45"></div>
-        )}
-
-        {/* Show selected text preview */}
-        <div className="px-3 py-2 bg-slate-50 rounded text-xs max-h-32 overflow-y-auto border border-slate-200">
-          <p className="font-medium text-slate-600 mb-1">Selected Text:</p>
-          <p className="text-slate-700 leading-relaxed">
-            {selectedTextForCitation.substring(0, 150)}
-            {selectedTextForCitation.length > 150 ? '...' : ''}
-          </p>
-        </div>
-
-        <div className="flex gap-2">
-          <button
-            onClick={fixSelectedTextSpelling}
-            disabled={isFixingSpelling}
-            className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm disabled:opacity-50 flex-1"
-            title="Fix transliteration & copy to clipboard"
-          >
-            {isFixingSpelling ? (
-              <>
-                <Loader2 size={16} className="animate-spin" />
-                Fixing...
-              </>
-            ) : (
-              <>
-                <Sparkles size={16} />
-                Fix & Copy
-              </>
-            )}
-          </button>
-          
-          <button
-            onClick={async () => {
-              await navigator.clipboard.writeText(selectedTextForCitation);
-              const tempDiv = document.createElement('div');
-              tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg';
-              tempDiv.textContent = '✅ Copied!';
-              document.body.appendChild(tempDiv);
-              setTimeout(() => document.body.removeChild(tempDiv), 2000);
-            }}
-            className="p-2 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"
-            title="Copy as-is"
-          >
-            <Copy size={16} />
-          </button>
-        </div>
-
-        <div className="flex gap-2">
-          <button
-            onClick={() => {
-              setShowCommentDialog(true);
-              setShowCitationMenu(false);
-            }}
-            className="flex items-center gap-2 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex-1"
-          >
-            <MessageSquare size={16} />
-            Comment
-          </button>
-          
-          <div className="relative group flex-1">
-            <button
-              className="w-full flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm"
-            >
-              <FileText size={16} />
-              Cite
-            </button>
-            
-            {/* ✅ IMPROVED: Citation dropdown now opens upward if near bottom */}
-            <div className={`absolute ${
-              citationPosition.placement === 'below' ? 'top-full mt-2' : 'bottom-full mb-2'
-            } left-0 hidden group-hover:block bg-white border border-slate-300 rounded-lg shadow-xl p-2 w-40 z-10`}>
-              {['APA', 'MLA', 'Chicago', 'Harvard'].map((style) => (
-                <button
-                  key={style}
-                  onClick={() => generateCitation(style)}
-                  disabled={loadingCitation}
-                  className="w-full text-left px-3 py-2 hover:bg-emerald-50 rounded text-sm transition-colors disabled:opacity-50"
-                >
-                  {style}
-                </button>
-              ))}
+            <div className="flex-1 overflow-y-auto p-4">
+              <pre className="whitespace-pre-wrap font-mono text-sm text-slate-700 bg-slate-50 p-4 rounded-lg border border-slate-200">
+                {extractedText}
+              </pre>
+            </div>
+            <div className="p-4 border-t border-slate-200 flex items-center justify-end gap-2">
+              <button
+                onClick={copyToClipboard}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
+              >
+                {copied ? <Check size={16} /> : <Copy size={16} />}
+                {copied ? 'Copied!' : 'Copy Text'}
+              </button>
             </div>
           </div>
-
-          <button
-            onClick={() => setShowCitationMenu(false)}
-            className="p-2 hover:bg-slate-100 rounded transition-colors"
-          >
-            <X size={16} />
-          </button>
         </div>
-      </div>
-    )}
+      )}
 
-      {/* Comment Dialog */}
-      {showCommentDialog && selectedBook && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh]">
-            <div className="p-4 border-b flex-shrink-0">
-              <h3 className="font-bold text-lg">Add Comment - Page {currentPage}</h3>
+      {/* 🔖 BOOKMARKS SIDEBAR */}
+      {showBookmarks && (
+        <div className="fixed inset-y-0 right-0 w-80 bg-white border-l border-slate-200 shadow-xl z-50 flex flex-col">
+          <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+            <h3 className="font-semibold text-slate-800">Bookmarks</h3>
+            <button
+              onClick={() => setShowBookmarks(false)}
+              className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+            >
+              <X size={18} />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4">
+            {bookmarks.length === 0 ? (
+              <div className="text-center py-8 text-slate-500">
+                <Bookmark className="mx-auto mb-2 text-slate-400" size={32} />
+                <p className="text-sm">No bookmarks yet</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {bookmarks.map((bookmark) => (
+                  <div
+                    key={bookmark.id}
+                    className="p-3 bg-slate-50 rounded-lg border border-slate-200 hover:border-blue-300 transition-colors cursor-pointer group"
+                    onClick={() => setCurrentPage(bookmark.page_number)}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1">
+                        <p className="text-sm font-medium text-slate-800">
+                          Page {bookmark.page_number}
+                        </p>
+                        {bookmark.note && (
+                          <p className="text-xs text-slate-600 mt-1">{bookmark.note}</p>
+                        )}
+                        <p className="text-xs text-slate-400 mt-1">
+                          {new Date(bookmark.created_at).toLocaleString()}
+                        </p>
+                      </div>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteBookmark(bookmark.id);
+                        }}
+                        className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded opacity-0 group-hover:opacity-100"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 💬 COMMENTS SIDEBAR */}
+      {showComments && (
+        <div className="fixed inset-y-0 right-0 w-96 bg-white border-l border-slate-200 shadow-xl z-50 flex flex-col">
+          <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+            <h3 className="font-semibold text-slate-800">Comments</h3>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowCommentDialog(true)}
+                className="px-3 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
+              >
+                Add Comment
+              </button>
+              <button
+                onClick={() => setShowComments(false)}
+                className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4">
+            {comments.filter(c => c.page_number === currentPage).length === 0 ? (
+              <div className="text-center py-8 text-slate-500">
+                <MessageSquare className="mx-auto mb-2 text-slate-400" size={32} />
+                <p className="text-sm">No comments on this page</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {comments
+                  .filter((c) => c.page_number === currentPage)
+                  .map((comment) => (
+                    <div
+                      key={comment.id}
+                      className="p-3 bg-slate-50 rounded-lg border border-slate-200"
+                    >
+                      {comment.selected_text && (
+                        <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs italic text-slate-700">
+                          &quot;{comment.selected_text.substring(0, 100)}
+                          {comment.selected_text.length > 100 ? '...' : ''}&quot;
+                        </div>
+                      )}
+                      <p className="text-sm text-slate-800 whitespace-pre-wrap">
+                        {comment.comment}
+                      </p>
+                      <div className="flex items-center justify-between mt-2">
+                        <p className="text-xs text-slate-400">
+                          {new Date(comment.created_at).toLocaleString()}
+                        </p>
+                        <button
+                          onClick={() => deleteComment(comment.id)}
+                          className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 📝 ADD COMMENT DIALOG */}
+      {showCommentDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
+            <div className="p-4 border-b border-slate-200">
+              <h3 className="text-lg font-semibold text-slate-800">Add Comment</h3>
+            </div>
+            <div className="p-4 space-y-3">
               {selectedTextForComment && (
-                <div className="mt-3 p-3 bg-slate-50 border border-slate-200 rounded-lg max-h-40 overflow-y-auto">
-                  <p className="text-xs text-slate-500 mb-1 font-medium">Selected Text:</p>
-                  <p className="text-sm text-slate-700 italic leading-relaxed">
-                    &quot;{selectedTextForComment}&quot;
-                  </p>
+                <div className="p-2 bg-blue-50 border border-blue-200 rounded text-xs italic text-slate-700">
+                  Selected text: &quot;{selectedTextForComment.substring(0, 100)}
+                  {selectedTextForComment.length > 100 ? '...' : ''}&quot;
                 </div>
               )}
-            </div>
-            
-            <div className="p-4 flex-1 overflow-y-auto">
               <textarea
                 value={commentDraft}
                 onChange={(e) => setCommentDraft(e.target.value)}
                 placeholder="Enter your comment..."
-                rows={8}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 resize-none"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                rows={4}
               />
             </div>
-
-            <div className="p-4 border-t flex justify-end gap-3 flex-shrink-0">
+            <div className="p-4 border-t border-slate-200 flex items-center justify-end gap-2">
               <button
                 onClick={() => {
                   setShowCommentDialog(false);
                   setCommentDraft('');
                   setSelectedTextForComment('');
                 }}
-                className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+                className="px-4 py-2 text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={addComment}
                 disabled={!commentDraft.trim()}
-                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors"
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
               >
                 Add Comment
               </button>
@@ -2594,49 +2177,127 @@ useEffect(() => {
         </div>
       )}
 
-      {/* Citation Dialog */}
-      {showCitationDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-2xl w-full max-w-2xl flex flex-col">
-            <div className="p-4 border-b flex items-center justify-between">
-              <h3 className="font-bold text-lg">Generated Citation</h3>
+      {/* 📌 CITATION MENU (On Text Selection) */}
+      {showCitationMenu && (
+        <div
+          data-citation-menu
+          className={`fixed bg-white rounded-lg shadow-xl border border-slate-200 p-3 z-50 ${
+            citationPosition.placement === 'fixed-top' ? 'top-4' : ''
+          }`}
+          style={{
+            left: citationPosition.placement === 'fixed-top' 
+              ? '50%' 
+              : `${citationPosition.x}px`,
+            top: citationPosition.placement === 'fixed-top' 
+              ? undefined 
+              : `${citationPosition.y}px`,
+            transform: citationPosition.placement === 'fixed-top'
+              ? 'translateX(-50%)'
+              : 'translate(-50%, -100%)',
+            width: '400px',
+            maxWidth: '90vw',
+          }}
+        >
+          <div className="space-y-2">
+            <div className="text-xs text-slate-600 mb-2 p-2 bg-slate-50 rounded border border-slate-200 max-h-20 overflow-y-auto">
+              &quot;{selectedTextForCitation.substring(0, 150)}
+              {selectedTextForCitation.length > 150 ? '...' : ''}&quot;
+            </div>
+
+            {/* Fix Spelling Button */}
+            <button
+              onClick={fixSelectedTextSpelling}
+              disabled={isFixingSpelling}
+              className="w-full px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 text-sm"
+            >
+              {isFixingSpelling ? (
+                <>
+                  <Loader2 className="animate-spin" size={16} />
+                  Fixing...
+                </>
+              ) : (
+                <>
+                  <Sparkles size={16} />
+                  Fix & Copy
+                </>
+              )}
+            </button>
+
+            {/* Citation Buttons */}
+            <div className="grid grid-cols-2 gap-2">
               <button
-                onClick={() => {
-                  navigator.clipboard.writeText(generatedCitation);
-                  alert('Citation copied!');
-                }}
-                className="p-2 hover:bg-slate-100 rounded transition-colors"
-                title="Copy citation"
+                onClick={() => generateCitation('APA')}
+                disabled={loadingCitation}
+                className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
               >
-                <Copy size={20} />
+                {loadingCitation ? <Loader2 className="animate-spin inline" size={14} /> : 'APA Citation'}
+              </button>
+              <button
+                onClick={() => generateCitation('MLA')}
+                disabled={loadingCitation}
+                className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
+              >
+                {loadingCitation ? <Loader2 className="animate-spin inline" size={14} /> : 'MLA Citation'}
+              </button>
+              <button
+                onClick={() => generateCitation('Chicago')}
+                disabled={loadingCitation}
+                className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
+              >
+                {loadingCitation ? <Loader2 className="animate-spin inline" size={14} /> : 'Chicago'}
+              </button>
+              <button
+                onClick={() => generateCitation('Harvard')}
+                disabled={loadingCitation}
+                className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
+              >
+                {loadingCitation ? <Loader2 className="animate-spin inline" size={14} /> : 'Harvard'}
               </button>
             </div>
-            
+
+            {/* Add Comment Button */}
+            <button
+              onClick={() => {
+                setShowCommentDialog(true);
+                setShowCitationMenu(false);
+              }}
+              className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-sm"
+            >
+              <MessageSquare size={16} />
+              Add Comment
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 📄 CITATION RESULT DIALOG */}
+      {showCitationDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full">
+            <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-slate-800">Generated Citation</h3>
+              <button
+                onClick={() => setShowCitationDialog(false)}
+                className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
             <div className="p-4">
-              <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg font-mono text-sm">
+              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 font-mono text-sm text-slate-700">
                 {generatedCitation}
               </div>
             </div>
-
-            <div className="p-4 border-t flex justify-end gap-3">
-              <button
-                onClick={() => {
-                  setShowCitationDialog(false);
-                  setGeneratedCitation('');
-                }}
-                className="px-4 py-2 bg-slate-200 rounded-lg hover:bg-slate-300 transition-colors"
-              >
-                Close
-              </button>
+            <div className="p-4 border-t border-slate-200 flex items-center justify-end">
               <button
                 onClick={() => {
                   navigator.clipboard.writeText(generatedCitation);
-                  alert('Citation copied!');
-                  setShowCitationDialog(false);
+                  alert('Citation copied to clipboard!');
                 }}
-                className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
               >
-                Copy & Close
+                <Copy size={16} />
+                Copy Citation
               </button>
             </div>
           </div>
