@@ -91,6 +91,16 @@ db.exec(`
     FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE SET NULL
   );
 
+  CREATE TABLE IF NOT EXISTS comments (
+    id TEXT PRIMARY KEY,
+    book_id TEXT NOT NULL,
+    page_number INTEGER NOT NULL,
+    selected_text TEXT,
+    comment TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+  );
+
   CREATE TABLE IF NOT EXISTS conversation_contexts (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -146,6 +156,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_contexts_topic ON conversation_contexts(topic);
   CREATE INDEX IF NOT EXISTS idx_summaries_session ON session_summaries(session_id);
   CREATE INDEX IF NOT EXISTS idx_global_memory_topic ON global_memory(topic);
+  CREATE INDEX IF NOT EXISTS idx_comments_book ON comments(book_id);
+  CREATE INDEX IF NOT EXISTS idx_comments_page ON comments(book_id, page_number);
 `);
 
 // ✅ Add modified_at column if it doesn't exist (migration)
@@ -690,6 +702,38 @@ export const getBookmarks = (documentId?: string, bookId?: string) => {
 
 export const deleteBookmark = (id: string) => {
   const stmt = db.prepare('DELETE FROM bookmarks WHERE id = ?');
+  return stmt.run(id);
+};
+
+// ==================== COMMENT FUNCTIONS ====================
+
+export const addComment = (comment: {
+  id: string;
+  bookId: string;
+  pageNumber: number;
+  selectedText?: string;
+  comment: string;
+}) => {
+  const stmt = db.prepare(`
+    INSERT INTO comments (id, book_id, page_number, selected_text, comment, created_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
+  `);
+  return stmt.run(
+    comment.id,
+    comment.bookId,
+    comment.pageNumber,
+    comment.selectedText || null,
+    comment.comment
+  );
+};
+
+export const getComments = (bookId: string) => {
+  const stmt = db.prepare('SELECT * FROM comments WHERE book_id = ? ORDER BY page_number ASC, created_at DESC');
+  return stmt.all(bookId);
+};
+
+export const deleteComment = (id: string) => {
+  const stmt = db.prepare('DELETE FROM comments WHERE id = ?');
   return stmt.run(id);
 };
 

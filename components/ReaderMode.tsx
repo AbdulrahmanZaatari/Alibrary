@@ -87,11 +87,33 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [showTextPopup, setShowTextPopup] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [expandedCommentId, setExpandedCommentId] = useState<string | null>(null);
   
   // Bookmarks
   const [bookmarks, setBookmarks] = useState<BookmarkType[]>([]);
   const [showBookmarks, setShowBookmarks] = useState(false);
   const [pdfCache, setPdfCache] = useState<Map<string, string>>(new Map());
+
+    // Comments
+  const [comments, setComments] = useState<Array<{
+    id: string;
+    page_number: number;
+    selected_text: string | null;
+    comment: string;
+    created_at: string;
+  }>>([]);
+  const [showComments, setShowComments] = useState(false);
+  const [showCommentDialog, setShowCommentDialog] = useState(false);
+  const [commentDraft, setCommentDraft] = useState('');
+  const [selectedTextForComment, setSelectedTextForComment] = useState('');
+
+  // Citation
+  const [showCitationMenu, setShowCitationMenu] = useState(false);
+  const [citationPosition, setCitationPosition] = useState({ x: 0, y: 0 });
+  const [selectedTextForCitation, setSelectedTextForCitation] = useState('');
+  const [generatedCitation, setGeneratedCitation] = useState('');
+  const [loadingCitation, setLoadingCitation] = useState(false);
+  const [showCitationDialog, setShowCitationDialog] = useState(false);
 
   // AI Chat
   const [showChat, setShowChat] = useState(false);
@@ -208,6 +230,12 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   }, [selectedBook?.id]);
 
   useEffect(() => {
+  if (selectedBook) {
+    loadComments();
+  }
+}, [selectedBook?.id, currentPage]);
+
+  useEffect(() => {
     if (selectedBook) {
       loadBookSessions(selectedBook.id);
     }
@@ -223,6 +251,87 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
       onBookSelect(selectedBook?.id || null);
     }
   }, [selectedBook?.id, onBookSelect]);
+
+useEffect(() => {
+  if (!selectedBook) return;
+
+  const container = document.getElementById('pdf-container');
+  if (!container) return;
+
+  const handleTextSelection = () => {
+    const selection = window.getSelection();
+    const selectedText = selection?.toString().trim();
+
+    if (selectedText && selectedText.length > 0) {
+      const range = selection?.getRangeAt(0);
+      const pdfContainer = document.getElementById('pdf-container');
+      
+      if (!pdfContainer || !range) return;
+      
+      // ✅ Check if selection is inside PDF container
+      const isInPdfContainer = pdfContainer.contains(range.commonAncestorContainer);
+      
+      if (!isInPdfContainer) {
+        setShowCitationMenu(false);
+        return;
+      }
+
+      // ✅ Exclude selections within UI elements (buttons, badges, etc.)
+      const ancestor = range.commonAncestorContainer;
+      const parentElement = ancestor.nodeType === Node.TEXT_NODE 
+        ? ancestor.parentElement 
+        : ancestor as HTMLElement;
+
+      // Check if selection is within excluded UI elements
+      const isInExcludedElement = parentElement?.closest('button, .bg-purple-600, .bg-emerald-600, [data-citation-menu]');
+      
+      if (isInExcludedElement) {
+        setShowCitationMenu(false);
+        return;
+      }
+
+      const rect = range.getBoundingClientRect();
+
+      if (rect) {
+        setSelectedTextForCitation(selectedText);
+        setSelectedTextForComment(selectedText);
+        setCitationPosition({
+          x: rect.left + rect.width / 2,
+          y: rect.top - 10,
+        });
+        setShowCitationMenu(true);
+      }
+    } else {
+      setShowCitationMenu(false);
+    }
+  };
+
+  container.addEventListener('mouseup', handleTextSelection);
+  
+  const handleClickOutside = (e: MouseEvent) => {
+    const target = e.target as HTMLElement;
+    const pdfContainer = document.getElementById('pdf-container');
+    const citationMenu = document.querySelector('[data-citation-menu]');
+    
+    if (pdfContainer && !pdfContainer.contains(target) && 
+        citationMenu && !citationMenu.contains(target)) {
+      setShowCitationMenu(false);
+    }
+  };
+
+  document.addEventListener('click', handleClickOutside);
+  document.addEventListener('selectionchange', () => {
+    const selection = window.getSelection();
+    if (!selection || selection.toString().trim().length === 0) {
+      setShowCitationMenu(false);
+    }
+  });
+
+  return () => {
+    container.removeEventListener('mouseup', handleTextSelection);
+    document.removeEventListener('click', handleClickOutside);
+  };
+}, [selectedBook]);
 
   useEffect(() => {
     if (persistedBookId && books.length > 0 && !hasRestoredRef.current) {
@@ -326,7 +435,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
       if (!isResizing) return;
       
       const newWidth = window.innerWidth - e.clientX;
-      if (newWidth >= 300 && newWidth <= 1200) { 
+      if (newWidth >= 300 && newWidth <= 2400) { 
         setChatPanelWidth(newWidth);
       }
     };
@@ -908,6 +1017,123 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     }
   }
 
+    // ==================== COMMENTS ====================
+
+  async function loadComments() {
+    if (!selectedBook) return;
+
+    try {
+      const res = await fetch(`/api/comments?bookId=${selectedBook.id}`);
+      if (!res.ok) {
+        console.warn(`Comments fetch failed: ${res.status}`);
+        setComments([]);
+        return;
+      }
+      const data = await res.json();
+      setComments(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error('Error loading comments:', error);
+      setComments([]);
+    }
+  }
+
+  async function addComment() {
+    if (!selectedBook || !commentDraft.trim()) return;
+
+    try {
+      await fetch('/api/comments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookId: selectedBook.id,
+          pageNumber: currentPage,
+          selectedText: selectedTextForComment || null,
+          comment: commentDraft,
+        }),
+      });
+      
+      setCommentDraft('');
+      setShowCommentDialog(false);
+      setSelectedTextForComment('');
+      await loadComments();
+    } catch (error) {
+      console.error('Error adding comment:', error);
+      alert('Failed to add comment');
+    }
+  }
+
+  async function deleteComment(commentId: string) {
+    if (!confirm('Delete this comment?')) return;
+
+    try {
+      await fetch('/api/comments', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: commentId }),
+      });
+      await loadComments();
+    } catch (error) {
+      console.error('Error deleting comment:', error);
+    }
+  }
+
+  // ==================== CITATIONS ====================
+
+  async function generateCitation(style: string) {
+    if (!selectedBook || !selectedTextForCitation) return;
+
+    setLoadingCitation(true);
+    try {
+      const res = await fetch('/api/citations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookId: selectedBook.id,
+          bookTitle: selectedBook.title,
+          selectedText: selectedTextForCitation,
+          pageNumber: currentPage,
+          citationStyle: style,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.citation) {
+        setGeneratedCitation(data.citation);
+        setShowCitationDialog(true);
+        setShowCitationMenu(false);
+      } else {
+        alert('Failed to generate citation');
+      }
+    } catch (error) {
+      console.error('Error generating citation:', error);
+      alert('Failed to generate citation');
+    } finally {
+      setLoadingCitation(false);
+    }
+  }
+
+  function handleTextSelection() {
+    const selection = window.getSelection();
+    const selectedText = selection?.toString().trim();
+
+    if (selectedText && selectedText.length > 0) {
+      const range = selection?.getRangeAt(0);
+      const rect = range?.getBoundingClientRect();
+
+      if (rect) {
+        setSelectedTextForCitation(selectedText);
+        setSelectedTextForComment(selectedText);
+        setCitationPosition({
+          x: rect.left + rect.width / 2,
+          y: rect.top - 10,
+        });
+        setShowCitationMenu(true);
+      }
+    } else {
+      setShowCitationMenu(false);
+    }
+  }
+
   // ==================== NAVIGATION & MANIPULATION ====================
 
   const goToPrevPage = () => {
@@ -1134,10 +1360,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   });
 
   StreamingMessage.displayName = 'StreamingMessage';
-
-  // ...existing code...
-
-  return (
+    return (
     <div className="h-full flex bg-slate-50">
       {/* Book Library Sidebar - Collapsible */}
       <div className={`bg-white border-r border-slate-200 transition-all duration-300 ${libraryCollapsed ? 'w-14' : 'w-80'} flex flex-col`}>
@@ -1281,6 +1504,22 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                   <FileText size={18} />
                   {extracting ? 'Extracting...' : 'Extract Text'}
                 </button>
+
+                <button
+                  onClick={() => {
+                    setShowComments(!showComments);
+                    if (!showComments) loadComments();
+                  }}
+                  className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors relative"
+                >
+                  <MessageSquare size={18} />
+                  Comments
+                  {comments.length > 0 && (
+                    <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-xs rounded-full flex items-center justify-center">
+                      {comments.length}
+                    </span>
+                  )}
+                </button>
                 
                 <button
                   onClick={() => setShowChat(!showChat)}
@@ -1349,7 +1588,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
               <div className="w-px h-6 bg-slate-300 mx-2"></div>
 
-              {/* Rotation Controls */}
               <button
                 onClick={rotateCounterClockwise}
                 className="p-2 rounded-lg hover:bg-white transition-colors"
@@ -1395,13 +1633,22 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
         <div 
           id="pdf-container"
-          className="flex-1 overflow-auto bg-slate-100"
+          className="flex-1 overflow-auto bg-slate-100 relative"
           style={{ 
             display: 'flex', 
             justifyContent: 'center',
             padding: '2rem'
           }}
         >
+          {selectedBook && comments.filter(c => c.page_number === currentPage).length > 0 && (
+          <div className="absolute top-4 right-4 z-10 bg-purple-600 text-white px-3 py-2 rounded-lg shadow-lg flex items-center gap-2 select-none pointer-events-none">
+            <MessageSquare size={16} />
+            <span className="text-sm font-medium">
+              {comments.filter(c => c.page_number === currentPage).length} comment(s) on this page
+            </span>
+          </div>
+        )}
+
           {loading ? (
             <div className="flex items-center justify-center h-full">
               <Loader2 className="animate-spin text-emerald-600" size={48} />
@@ -1515,10 +1762,140 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
         </div>
       )}
 
+            {/* Comments Sidebar */}
+      {showComments && selectedBook && (
+        <div className="w-96 bg-white border-l border-slate-200 flex flex-col">
+          <div className="flex items-center justify-between p-4 border-b border-slate-200">
+            <h3 className="font-semibold text-lg flex items-center gap-2">
+              <MessageSquare size={20} className="text-purple-600" />
+              Comments
+            </h3>
+            <button
+              onClick={() => setShowComments(false)}
+              className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+            >
+              <X size={20} />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4">
+            {comments.length === 0 ? (
+              <div className="text-center py-12">
+                <MessageSquare size={48} className="mx-auto text-slate-300 mb-3" />
+                <p className="text-slate-500 text-sm">No comments yet</p>
+                <p className="text-slate-400 text-xs mt-1">Select text and click Comment</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {/* Current Page Comments */}
+                {comments
+                  .filter(c => c.page_number === currentPage)
+                  .map((comment) => {
+                    const isExpanded = expandedCommentId === comment.id;
+                    const needsExpansion = comment.selected_text && comment.selected_text.length > 150;
+                    
+                    return (
+                      <div
+                        key={comment.id}
+                        className="p-3 border border-purple-200 rounded-lg bg-purple-50/50 hover:bg-purple-50 transition-colors group"
+                      >
+                        {comment.selected_text && (
+                          <div className="text-xs text-slate-600 italic mb-2 bg-white p-2 rounded">
+                            <div className={needsExpansion && !isExpanded ? 'line-clamp-3' : ''}>
+                              &quot;{comment.selected_text}&quot;
+                            </div>
+                            {needsExpansion && (
+                              <button
+                                onClick={() => setExpandedCommentId(isExpanded ? null : comment.id)}
+                                className="text-purple-600 hover:text-purple-700 mt-1 text-xs font-medium"
+                              >
+                                {isExpanded ? 'Show Less' : 'Read More'}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        <p className="text-sm text-slate-800">{comment.comment}</p>
+                        <div className="flex items-center justify-between mt-2">
+                          <p className="text-xs text-slate-400">
+                            {new Date(comment.created_at).toLocaleString()}
+                          </p>
+                          <button
+                            onClick={() => deleteComment(comment.id)}
+                            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 rounded transition-all"
+                          >
+                            <Trash2 size={14} className="text-red-600" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                
+                {/* Other Pages Comments */}
+                {comments.filter(c => c.page_number !== currentPage).length > 0 && (
+                  <div className="mt-6">
+                    <p className="text-xs font-medium text-slate-500 mb-2">Other Pages</p>
+                    {comments
+                      .filter(c => c.page_number !== currentPage)
+                      .map((comment) => {
+                        const isExpanded = expandedCommentId === comment.id;
+                        const needsExpansion = comment.selected_text && comment.selected_text.length > 150;
+                        
+                        return (
+                          <div
+                            key={comment.id}
+                            className="p-3 border border-slate-200 rounded-lg mb-2 cursor-pointer hover:border-purple-300 transition-colors group"
+                            onClick={() => setCurrentPage(comment.page_number)}
+                          >
+                            <div className="flex items-start justify-between mb-1">
+                              <span className="text-xs font-medium text-purple-600">
+                                Page {comment.page_number}
+                              </span>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  deleteComment(comment.id);
+                                }}
+                                className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 rounded transition-all"
+                              >
+                                <Trash2 size={12} className="text-red-600" />
+                              </button>
+                            </div>
+                            {comment.selected_text && (
+                              <div className="text-xs text-slate-600 italic mb-1 bg-slate-50 p-2 rounded">
+                                <div className={needsExpansion && !isExpanded ? 'line-clamp-2' : ''}>
+                                  &quot;{comment.selected_text}&quot;
+                                </div>
+                                {needsExpansion && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setExpandedCommentId(isExpanded ? null : comment.id);
+                                    }}
+                                    className="text-purple-600 hover:text-purple-700 mt-1 text-xs font-medium"
+                                  >
+                                    {isExpanded ? 'Show Less' : 'Read More'}
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                            <p className="text-xs text-slate-700 line-clamp-2">{comment.comment}</p>
+                            <p className="text-xs text-slate-400 mt-1">
+                              {new Date(comment.created_at).toLocaleDateString()}
+                            </p>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* AI Chat Sidebar - Resizable */}
       {showChat && selectedBook && (
         <>
-          {/* Resize Handle */}
           <div
             className="w-1 bg-slate-200 hover:bg-blue-400 cursor-col-resize transition-colors relative group"
             onMouseDown={() => setIsResizing(true)}
@@ -1531,7 +1908,12 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
           <div 
             className="bg-white border-l border-slate-200 flex flex-col"
-            style={{ width: `${chatPanelWidth}px`, minWidth: '300px', maxWidth: '1200px' }}
+            style={{ 
+              width: `${chatPanelWidth}px`, 
+              minWidth: '300px', 
+              maxWidth: '2400px',
+              flexShrink: 0 
+            }}
           >
             <div className="p-4 border-b border-slate-200">
               <div className="flex items-center justify-between mb-3">
@@ -1556,10 +1938,8 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                 </div>
               </div>
 
-              {/* Chat Settings Panel */}
               {showChatSettings && (
                 <div className="mb-3 p-3 bg-slate-50 rounded-lg space-y-3">
-                  {/* Prompt Selector */}
                   <div>
                     <label className="text-xs font-medium text-slate-700 mb-2 block">Custom Prompt</label>
                     <select
@@ -1576,7 +1956,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                     </select>
                   </div>
 
-                  {/* Corpus Selection */}
                   <div>
                     <label className="text-xs font-medium text-slate-700 mb-2 block">Corpus Documents ({selectedCorpus.length} selected)</label>
                     <div className="max-h-32 overflow-y-auto border border-slate-200 rounded-lg p-2 space-y-1">
@@ -1598,7 +1977,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                     </div>
                   </div>
 
-                  {/* Multi-Hop Reasoning Toggle */}
                   <div className="flex items-center justify-between">
                     <div>
                       <label className="text-xs font-medium text-slate-700">Multi-Hop Reasoning</label>
@@ -1616,7 +1994,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                     </button>
                   </div>
 
-                  {/* Spelling Correction Toggle */}
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-medium text-slate-700">Spelling Correction</label>
                     <button
@@ -1633,7 +2010,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                 </div>
               )}
 
-              {/* Session Management */}
               <div className="space-y-2">
                 <div className="flex gap-2">
                   <button
@@ -1658,7 +2034,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                 )}
               </div>
 
-              {/* Session List */}
               {showSessionList && bookSessions.length > 0 && (
                 <div className="mt-3 max-h-48 overflow-y-auto border border-slate-200 rounded-lg">
                   {bookSessions.map((session) => (
@@ -1714,7 +2089,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
               )}
             </div>
 
-            {/* Messages with auto-scroll */}
             <div 
               ref={chatContainerRef}
               className="flex-1 overflow-y-auto p-4 space-y-4"
@@ -1755,9 +2129,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
               )}
             </div>
 
-            {/* Input - Using isolated ChatInput component */}
             <div className="p-4 border-t border-slate-200">
-              {/* ✅ MODEL SELECTOR ABOVE INPUT */}
               <div className="mb-3 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <label className="text-xs font-medium text-slate-700">AI Model:</label>
@@ -1777,7 +2149,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                   </select>
                 </div>
                 
-                {/* ✅ SHOW WHICH MODEL WAS USED */}
                 {usedModel && usedModel !== selectedModel && (
                   <div className="text-[10px] text-amber-600 flex items-center gap-1">
                     <span>⚠️ Fallback: {usedModel}</span>
@@ -1785,7 +2156,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                 )}
               </div>
 
-              {/* ✅ SHOW MODEL ERROR IF ANY */}
               {modelError && (
                 <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded-lg">
                   <p className="text-xs text-red-700 font-medium mb-1">⚠️ Model Error</p>
@@ -1851,6 +2221,157 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                 className="w-full h-full min-h-[400px] p-3 font-sans text-sm leading-relaxed border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-none"
                 placeholder="Extracted text will appear here..."
               />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Citation/Comment Floating Menu */}
+      {showCitationMenu && selectedBook && (
+        <div
+          data-citation-menu
+          className="fixed z-50 bg-white border border-slate-300 rounded-lg shadow-2xl p-2 flex gap-2"
+          style={{
+            left: `${citationPosition.x}px`,
+            top: `${citationPosition.y}px`,
+            transform: 'translate(-50%, -100%)',
+          }}
+        >
+          <button
+            onClick={() => {
+              setShowCommentDialog(true);
+              setShowCitationMenu(false);
+            }}
+            className="flex items-center gap-2 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm"
+          >
+            <MessageSquare size={16} />
+            Comment
+          </button>
+          
+          <div className="relative group">
+            <button
+              className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm"
+            >
+              <FileText size={16} />
+              Cite
+            </button>
+            
+            <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block bg-white border border-slate-300 rounded-lg shadow-xl p-2 w-40">
+              {['APA', 'MLA', 'Chicago', 'Harvard'].map((style) => (
+                <button
+                  key={style}
+                  onClick={() => generateCitation(style)}
+                  disabled={loadingCitation}
+                  className="w-full text-left px-3 py-2 hover:bg-emerald-50 rounded text-sm transition-colors disabled:opacity-50"
+                >
+                  {style}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <button
+            onClick={() => setShowCitationMenu(false)}
+            className="p-2 hover:bg-slate-100 rounded transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
+      {/* Comment Dialog */}
+      {showCommentDialog && selectedBook && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh]">
+            <div className="p-4 border-b flex-shrink-0">
+              <h3 className="font-bold text-lg">Add Comment - Page {currentPage}</h3>
+              {selectedTextForComment && (
+                <div className="mt-3 p-3 bg-slate-50 border border-slate-200 rounded-lg max-h-40 overflow-y-auto">
+                  <p className="text-xs text-slate-500 mb-1 font-medium">Selected Text:</p>
+                  <p className="text-sm text-slate-700 italic leading-relaxed">
+                    &quot;{selectedTextForComment}&quot;
+                  </p>
+                </div>
+              )}
+            </div>
+            
+            <div className="p-4 flex-1 overflow-y-auto">
+              <textarea
+                value={commentDraft}
+                onChange={(e) => setCommentDraft(e.target.value)}
+                placeholder="Enter your comment..."
+                rows={8}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 resize-none"
+              />
+            </div>
+
+            <div className="p-4 border-t flex justify-end gap-3 flex-shrink-0">
+              <button
+                onClick={() => {
+                  setShowCommentDialog(false);
+                  setCommentDraft('');
+                  setSelectedTextForComment('');
+                }}
+                className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={addComment}
+                disabled={!commentDraft.trim()}
+                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors"
+              >
+                Add Comment
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Citation Dialog */}
+      {showCitationDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-2xl w-full max-w-2xl flex flex-col">
+            <div className="p-4 border-b flex items-center justify-between">
+              <h3 className="font-bold text-lg">Generated Citation</h3>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(generatedCitation);
+                  alert('Citation copied!');
+                }}
+                className="p-2 hover:bg-slate-100 rounded transition-colors"
+                title="Copy citation"
+              >
+                <Copy size={20} />
+              </button>
+            </div>
+            
+            <div className="p-4">
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg font-mono text-sm">
+                {generatedCitation}
+              </div>
+            </div>
+
+            <div className="p-4 border-t flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setShowCitationDialog(false);
+                  setGeneratedCitation('');
+                }}
+                className="px-4 py-2 bg-slate-200 rounded-lg hover:bg-slate-300 transition-colors"
+              >
+                Close
+              </button>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(generatedCitation);
+                  alert('Citation copied!');
+                  setShowCitationDialog(false);
+                }}
+                className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+              >
+                Copy & Close
+              </button>
             </div>
           </div>
         </div>
