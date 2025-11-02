@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
+import { hasTransliterationIssues } from '@/lib/transliterationMapper';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import React from 'react';
@@ -88,6 +89,8 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [extracting, setExtracting] = useState(false);
   const [copied, setCopied] = useState(false);
   const [expandedCommentId, setExpandedCommentId] = useState<string | null>(null);
+  const [isFixingSpelling, setIsFixingSpelling] = useState(false);
+  const [extractionCorrected, setExtractionCorrected] = useState(false);
   
   // Bookmarks
   const [bookmarks, setBookmarks] = useState<BookmarkType[]>([]);
@@ -109,7 +112,11 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
   // Citation
   const [showCitationMenu, setShowCitationMenu] = useState(false);
-  const [citationPosition, setCitationPosition] = useState({ x: 0, y: 0 });
+  const [citationPosition, setCitationPosition] = useState<{ 
+  x: number; 
+  y: number; 
+  placement?: 'above' | 'below' | 'fixed-top' 
+  }>({ x: 0, y: 0 });
   const [selectedTextForCitation, setSelectedTextForCitation] = useState('');
   const [generatedCitation, setGeneratedCitation] = useState('');
   const [loadingCitation, setLoadingCitation] = useState(false);
@@ -276,13 +283,12 @@ useEffect(() => {
         return;
       }
 
-      // ✅ Exclude selections within UI elements (buttons, badges, etc.)
+      // ✅ Exclude selections within UI elements
       const ancestor = range.commonAncestorContainer;
       const parentElement = ancestor.nodeType === Node.TEXT_NODE 
         ? ancestor.parentElement 
         : ancestor as HTMLElement;
 
-      // Check if selection is within excluded UI elements
       const isInExcludedElement = parentElement?.closest('button, .bg-purple-600, .bg-emerald-600, [data-citation-menu]');
       
       if (isInExcludedElement) {
@@ -291,14 +297,42 @@ useEffect(() => {
       }
 
       const rect = range.getBoundingClientRect();
+      const containerRect = pdfContainer.getBoundingClientRect();
 
       if (rect) {
         setSelectedTextForCitation(selectedText);
         setSelectedTextForComment(selectedText);
-        setCitationPosition({
-          x: rect.left + rect.width / 2,
-          y: rect.top - 10,
-        });
+        
+        // ✅ SMART POSITIONING WITH BOUNDARY DETECTION
+        const menuHeight = 280; // Approximate menu height (adjust if needed)
+        const menuWidth = 400;
+        const padding = 16; // Safety padding from edges
+        
+        let x = rect.left + rect.width / 2;
+        let y = rect.top - 10;
+        
+        // ✅ Horizontal boundary check (keep menu within viewport)
+        const minX = padding + menuWidth / 2;
+        const maxX = window.innerWidth - menuWidth / 2 - padding;
+        x = Math.max(minX, Math.min(x, maxX));
+        
+        // ✅ Vertical boundary check (flip menu below text if too close to top)
+        const spaceAbove = rect.top - containerRect.top;
+        const spaceBelow = containerRect.bottom - rect.bottom;
+        
+        if (spaceAbove < menuHeight && spaceBelow > menuHeight) {
+          // Not enough space above, show below
+          y = rect.bottom + 10;
+          setCitationPosition({ x, y, placement: 'below' });
+        } else if (spaceAbove < menuHeight && spaceBelow < menuHeight) {
+          // Not enough space either way, show at top of container
+          y = containerRect.top + padding;
+          setCitationPosition({ x, y, placement: 'fixed-top' });
+        } else {
+          // Enough space above (default)
+          setCitationPosition({ x, y, placement: 'above' });
+        }
+        
         setShowCitationMenu(true);
       }
     } else {
@@ -361,17 +395,29 @@ useEffect(() => {
   }, [currentPage, selectedBook?.id, selectedBook?.current_page]);
 
   useEffect(() => {
-    const updateWidth = () => {
-      const container = document.getElementById('pdf-container');
-      if (container) {
-        setContainerWidth(container.clientWidth);
-      }
-    };
+  const updateWidth = () => {
+    const container = document.getElementById('pdf-container');
+    if (container) {
+      setContainerWidth(container.clientWidth);
+    }
+  };
 
-    updateWidth();
-    window.addEventListener('resize', updateWidth);
-    return () => window.removeEventListener('resize', updateWidth);
-  }, [showChat, showBookmarks, showCorpus, libraryCollapsed, chatPanelWidth]);
+  updateWidth();
+  
+  // ✅ Add more triggers
+  const resizeObserver = new ResizeObserver(updateWidth);
+  const container = document.getElementById('pdf-container');
+  if (container) {
+    resizeObserver.observe(container);
+  }
+
+  window.addEventListener('resize', updateWidth);
+  
+  return () => {
+    window.removeEventListener('resize', updateWidth);
+    resizeObserver.disconnect();
+  };
+}, [showChat, showBookmarks, showComments, libraryCollapsed, chatPanelWidth]);
 
   // Updated keyboard shortcuts - only active when not in input fields
   useEffect(() => {
@@ -518,6 +564,59 @@ useEffect(() => {
       console.error('Error fetching prompts:', error);
     }
   }
+
+  const fixSelectedTextSpelling = async () => {
+  if (!selectedTextForCitation) return;
+  
+  setIsFixingSpelling(true);
+  try {
+    // ✅ Call server endpoint instead of client-side function
+    const response = await fetch('/api/fix-spelling', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        text: selectedTextForCitation, 
+        useAI: true 
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to fix spelling');
+    }
+
+    const data = await response.json();
+    
+    if (data.success) {
+      const hasChanges = data.changed;
+      
+      setSelectedTextForCitation(data.fixed);
+      setSelectedTextForComment(data.fixed);
+      
+      if (hasChanges) {
+        await navigator.clipboard.writeText(data.fixed);
+        console.log('📝 Original:', selectedTextForCitation.substring(0, 100));
+        console.log('✨ Fixed:', data.fixed.substring(0, 100));
+      }
+      
+      const tempDiv = document.createElement('div');
+      tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg';
+      tempDiv.innerHTML = hasChanges 
+        ? '✅ Fixed & copied to clipboard!' 
+        : '✓ Text is already clean';
+      document.body.appendChild(tempDiv);
+      setTimeout(() => document.body.removeChild(tempDiv), 3000);
+    }
+  } catch (error) {
+    console.error('Error:', error);
+    const tempDiv = document.createElement('div');
+    tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-red-600 text-white px-4 py-2 rounded-lg shadow-lg';
+    tempDiv.textContent = '❌ Failed to fix spelling';
+    document.body.appendChild(tempDiv);
+    setTimeout(() => document.body.removeChild(tempDiv), 2000);
+  } finally {
+    setIsFixingSpelling(false);
+  }
+};
 
   async function toggleCorpusDocument(docId: string) {
     try {
@@ -749,35 +848,42 @@ useEffect(() => {
   }
 
   async function extractPageText() {
-    if (!selectedBook) return;
+  if (!selectedBook) return;
 
-    setExtracting(true);
-    setShowTextPopup(true);
-    setExtractedText('🔄 Extracting text from page...\n\nThis may take a few seconds for scanned PDFs.');
+  setExtracting(true);
+  setShowTextPopup(true);
+  setExtractedText('🔄 Extracting text from page...\n\nApplying AI corrections for best accuracy.');
+  setExtractionCorrected(false);
 
-    try {
-      const res = await fetch('/api/books/extract-page', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          bookId: selectedBook.id,
-          pageNumber: currentPage,
-        }),
-      });
+  try {
+    const res = await fetch('/api/books/extract-page', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bookId: selectedBook.id,
+        pageNumber: currentPage,
+        enableAiCorrection: true, // ✅ Enable AI validation
+      }),
+    });
 
-      const data = await res.json();
-      if (data.success) {
-        setExtractedText(data.text);
-      } else {
-        setExtractedText('❌ Failed to extract text from this page.');
+    const data = await res.json();
+    if (data.success) {
+      setExtractedText(data.text);
+      setExtractionCorrected(data.corrected || false);
+      
+      if (data.corrected) {
+        console.log('✨ Corrections applied (Regex + AI)');
       }
-    } catch (error) {
-      console.error('Extraction error:', error);
-      setExtractedText('❌ Error extracting text. Please try again.');
-    } finally {
-      setExtracting(false);
+    } else {
+      setExtractedText('❌ Failed to extract text from this page.');
     }
+  } catch (error) {
+    console.error('Extraction error:', error);
+    setExtractedText('❌ Error extracting text. Please try again.');
+  } finally {
+    setExtracting(false);
   }
+}
 
   async function sendChatMessage(userMessage: string) {
     if (!userMessage.trim() || !selectedBook) return;
@@ -1488,7 +1594,14 @@ useEffect(() => {
       </div>
 
       {/* PDF Viewer Section */}
-      <div className="flex-1 flex flex-col bg-white">
+      <div className="flex-1 flex flex-col bg-white" style={{
+          width: showChat 
+            ? `calc(100% - ${libraryCollapsed ? '56px' : '320px'} - ${chatPanelWidth}px - 4px)` 
+            : showBookmarks || showComments
+              ? `calc(100% - ${libraryCollapsed ? '56px' : '320px'} - 384px)`
+              : `calc(100% - ${libraryCollapsed ? '56px' : '320px'})`,
+          transition: 'width 0.3s ease'
+        }}>
         <div className="p-4 border-b border-slate-200 flex items-center justify-between">
           <h3 className="font-semibold text-lg truncate">
             {selectedBook?.title || 'Select a book to read'}
@@ -1899,12 +2012,20 @@ useEffect(() => {
           <div
             className="w-1 bg-slate-200 hover:bg-blue-400 cursor-col-resize transition-colors relative group"
             onMouseDown={() => setIsResizing(true)}
-            style={{ userSelect: 'none' }}
+            style={{ userSelect: 'none', zIndex: 40 }}
+            title="Drag to resize chat panel"
           >
             <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-              <div className="w-1 h-12 bg-blue-500 rounded-full"></div>
+              <div className="w-1 h-16 bg-blue-600 rounded-full shadow-lg"></div>
+            </div>
+
+          {/* Drag hint */}
+          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+            <div className="bg-blue-600 text-white text-xs px-2 py-1 rounded whitespace-nowrap">
+              ↔️ Drag to resize
             </div>
           </div>
+        </div>
 
           <div 
             className="bg-white border-l border-slate-200 flex flex-col"
@@ -2176,87 +2297,231 @@ useEffect(() => {
       )}
 
       {/* Text Extraction Popup */}
-      {showTextPopup && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col">
-            <div className="p-4 border-b flex items-center justify-between">
-              <h3 className="font-bold text-lg">Extracted Text - Page {currentPage}</h3>
-              <div className="flex gap-2">
-                <button
-                  onClick={copyToClipboard}
-                  disabled={extracting || !extractedText}
-                  className="p-2 hover:bg-slate-100 rounded disabled:opacity-50 transition-colors"
-                  title="Copy to clipboard"
-                >
-                  {copied ? <Check size={20} className="text-green-600" /> : <Copy size={20} />}
-                </button>
-                <button
-                  onClick={() => {
-                    if (extractedText && extractedText.trim()) {
-                      setShowTextPopup(false);
-                      setShowChat(true);
-                    }
-                  }}
-                  disabled={extracting || !extractedText}
-                  className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                  title="Open in chat"
-                >
-                  <MessageSquare size={18} />
-                  <span className="text-sm">Open in Chat</span>
-                </button>
-                <button 
-                  onClick={() => setShowTextPopup(false)} 
-                  className="p-2 hover:bg-slate-100 rounded transition-colors"
-                >
-                  <X size={20} />
-                </button>
+            {showTextPopup && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-lg shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col">
+                <div className="p-4 border-b flex items-center justify-between flex-shrink-0">
+                  <div className="flex items-center gap-3">
+                    <h3 className="font-bold text-lg">Extracted Text - Page {currentPage}</h3>
+                    {extractionCorrected && (
+                      <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded flex items-center gap-1">
+                        <Sparkles size={12} />
+                        Auto-Corrected
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={async () => {
+                        const beforeFix = extractedText;
+                        setExtracting(true);
+                        
+                        try {
+                          // ✅ Use server endpoint
+                          const response = await fetch('/api/fix-spelling', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ 
+                              text: extractedText, 
+                              useAI: true 
+                            }),
+                          });
+
+                          if (!response.ok) {
+                            throw new Error('Failed to fix spelling');
+                          }
+
+                          const data = await response.json();
+                          
+                          if (data.success) {
+                            const hasChanges = data.changed;
+                            
+                            setExtractedText(data.fixed);
+                            setExtractionCorrected(true);
+                            
+                            if (hasChanges) {
+                              console.log('📝 Corrections applied');
+                              
+                              const tempDiv = document.createElement('div');
+                              tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg';
+                              tempDiv.textContent = '✅ AI corrections applied!';
+                              document.body.appendChild(tempDiv);
+                              setTimeout(() => document.body.removeChild(tempDiv), 2000);
+                            } else {
+                              const tempDiv = document.createElement('div');
+                              tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-blue-600 text-white px-4 py-2 rounded-lg shadow-lg';
+                              tempDiv.textContent = '✓ Text is already clean';
+                              document.body.appendChild(tempDiv);
+                              setTimeout(() => document.body.removeChild(tempDiv), 2000);
+                            }
+                          }
+                        } catch (error) {
+                          console.error('Error:', error);
+                          const tempDiv = document.createElement('div');
+                          tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-red-600 text-white px-4 py-2 rounded-lg shadow-lg';
+                          tempDiv.textContent = '❌ Failed to fix spelling';
+                          document.body.appendChild(tempDiv);
+                          setTimeout(() => document.body.removeChild(tempDiv), 2000);
+                        } finally {
+                          setExtracting(false);
+                        }
+                      }}
+                      disabled={extracting}
+                      className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                      title="Apply AI-powered corrections"
+                    >
+                      <Sparkles size={18} />
+                      <span className="text-sm">Fix Spelling (AI)</span>
+                    </button>
+                    <button
+                      onClick={copyToClipboard}
+                      disabled={extracting || !extractedText}
+                      className="p-2 hover:bg-slate-100 rounded disabled:opacity-50 transition-colors"
+                      title="Copy to clipboard"
+                    >
+                      {copied ? <Check size={20} className="text-green-600" /> : <Copy size={20} />}
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (extractedText && extractedText.trim()) {
+                          setShowTextPopup(false);
+                          setShowChat(true);
+                        }
+                      }}
+                      disabled={extracting || !extractedText}
+                      className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                      title="Open in chat"
+                    >
+                      <MessageSquare size={18} />
+                      <span className="text-sm">Open in Chat</span>
+                    </button>
+                    <button 
+                      onClick={() => setShowTextPopup(false)} 
+                      className="p-2 hover:bg-slate-100 rounded transition-colors"
+                    >
+                      <X size={20} />
+                    </button>
+                  </div>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto p-4">
+                  <textarea
+                    value={extractedText}
+                    onChange={(e) => setExtractedText(e.target.value)}
+                    disabled={extracting}
+                    className="w-full h-full min-h-[400px] p-3 font-sans text-sm leading-relaxed border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-none"
+                    placeholder="Extracted text will appear here..."
+                    style={{ fontFamily: 'Georgia, serif' }}
+                  />
+                </div>
+                
+                <div className="p-4 border-t bg-slate-50">
+                  <p className="text-xs text-slate-600">
+                    💡 <strong>Tip:</strong> Click &quot;Fix Spelling&quot; to correct transliteration issues (Shīʿī, Sunnī, Ḥadīth, etc.)
+                  </p>
+                </div>
               </div>
             </div>
-            
-            <div className="flex-1 overflow-y-auto p-4">
-              <textarea
-                value={extractedText}
-                onChange={(e) => setExtractedText(e.target.value)}
-                disabled={extracting}
-                className="w-full h-full min-h-[400px] p-3 font-sans text-sm leading-relaxed border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-none"
-                placeholder="Extracted text will appear here..."
-              />
-            </div>
-          </div>
-        </div>
-      )}
+          )}
 
-      {/* Citation/Comment Floating Menu */}
-      {showCitationMenu && selectedBook && (
-        <div
-          data-citation-menu
-          className="fixed z-50 bg-white border border-slate-300 rounded-lg shadow-2xl p-2 flex gap-2"
-          style={{
-            left: `${citationPosition.x}px`,
-            top: `${citationPosition.y}px`,
-            transform: 'translate(-50%, -100%)',
-          }}
-        >
+          {showCitationMenu && selectedBook && (
+      <div
+        data-citation-menu
+        className="fixed z-50 bg-white border border-slate-300 rounded-lg shadow-2xl p-2 flex flex-col gap-2"
+        style={{
+          left: `${citationPosition.x}px`,
+          top: citationPosition.placement === 'below' 
+            ? `${citationPosition.y}px` 
+            : citationPosition.placement === 'fixed-top'
+              ? `${citationPosition.y}px`
+              : `${citationPosition.y}px`,
+          transform: citationPosition.placement === 'below'
+            ? 'translate(-50%, 0)' 
+            : citationPosition.placement === 'fixed-top'
+              ? 'translate(-50%, 0)'
+              : 'translate(-50%, -100%)',
+          maxWidth: '400px',
+          maxHeight: '90vh', // ✅ Prevent menu from exceeding viewport
+          overflowY: 'auto', // ✅ Allow scrolling if content is too tall
+        }}
+      >
+        {/* ✅ Add placement indicator for debugging (optional) */}
+        {citationPosition.placement === 'below' && (
+          <div className="absolute -top-2 left-1/2 transform -translate-x-1/2 w-4 h-4 bg-white border-t border-l border-slate-300 rotate-45"></div>
+        )}
+        {citationPosition.placement === 'above' && (
+          <div className="absolute -bottom-2 left-1/2 transform -translate-x-1/2 w-4 h-4 bg-white border-b border-r border-slate-300 rotate-45"></div>
+        )}
+
+        {/* Show selected text preview */}
+        <div className="px-3 py-2 bg-slate-50 rounded text-xs max-h-32 overflow-y-auto border border-slate-200">
+          <p className="font-medium text-slate-600 mb-1">Selected Text:</p>
+          <p className="text-slate-700 leading-relaxed">
+            {selectedTextForCitation.substring(0, 150)}
+            {selectedTextForCitation.length > 150 ? '...' : ''}
+          </p>
+        </div>
+
+        <div className="flex gap-2">
+          <button
+            onClick={fixSelectedTextSpelling}
+            disabled={isFixingSpelling}
+            className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm disabled:opacity-50 flex-1"
+            title="Fix transliteration & copy to clipboard"
+          >
+            {isFixingSpelling ? (
+              <>
+                <Loader2 size={16} className="animate-spin" />
+                Fixing...
+              </>
+            ) : (
+              <>
+                <Sparkles size={16} />
+                Fix & Copy
+              </>
+            )}
+          </button>
+          
+          <button
+            onClick={async () => {
+              await navigator.clipboard.writeText(selectedTextForCitation);
+              const tempDiv = document.createElement('div');
+              tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg';
+              tempDiv.textContent = '✅ Copied!';
+              document.body.appendChild(tempDiv);
+              setTimeout(() => document.body.removeChild(tempDiv), 2000);
+            }}
+            className="p-2 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"
+            title="Copy as-is"
+          >
+            <Copy size={16} />
+          </button>
+        </div>
+
+        <div className="flex gap-2">
           <button
             onClick={() => {
               setShowCommentDialog(true);
               setShowCitationMenu(false);
             }}
-            className="flex items-center gap-2 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm"
+            className="flex items-center gap-2 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm flex-1"
           >
             <MessageSquare size={16} />
             Comment
           </button>
           
-          <div className="relative group">
+          <div className="relative group flex-1">
             <button
-              className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm"
+              className="w-full flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm"
             >
               <FileText size={16} />
               Cite
             </button>
             
-            <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block bg-white border border-slate-300 rounded-lg shadow-xl p-2 w-40">
+            {/* ✅ IMPROVED: Citation dropdown now opens upward if near bottom */}
+            <div className={`absolute ${
+              citationPosition.placement === 'below' ? 'top-full mt-2' : 'bottom-full mb-2'
+            } left-0 hidden group-hover:block bg-white border border-slate-300 rounded-lg shadow-xl p-2 w-40 z-10`}>
               {['APA', 'MLA', 'Chicago', 'Harvard'].map((style) => (
                 <button
                   key={style}
@@ -2277,7 +2542,8 @@ useEffect(() => {
             <X size={16} />
           </button>
         </div>
-      )}
+      </div>
+    )}
 
       {/* Comment Dialog */}
       {showCommentDialog && selectedBook && (

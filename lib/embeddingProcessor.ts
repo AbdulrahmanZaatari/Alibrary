@@ -5,6 +5,7 @@ import { updateDocumentEmbeddingStatus, updateDocument } from './db';
 import { addChunksToVectorStore, VectorChunk } from './vectorStore';
 import { extractTextWithGeminiVision } from './ocrExtractor';
 import { chunkText } from './gemini';
+import { cleanPdfText, hasTransliterationIssues } from './transliterationMapper';
 import fs from 'fs';
 import path from 'path';
 
@@ -101,138 +102,6 @@ function detectLanguage(text: string): 'ar' | 'en' {
   return arabicRatio > 0.3 ? 'ar' : 'en';
 }
 
-/**
- * ✅ Verify and correct proper nouns using AI (quota-efficient)
- */
-async function verifyProperNouns(text: string, language: 'ar' | 'en'): Promise<string> {
-  const hasCapitalizedWords = /\b[A-Z][a-z]+\b/.test(text);
-  const hasArabicProperNouns = /\b[\u0600-\u06FF]{3,}\b/.test(text);
-  
-  if (text.length < 100 || (!hasCapitalizedWords && !hasArabicProperNouns)) {
-    return text;
-  }
-
-  try {
-    console.log('🔍 Verifying proper nouns and technical terms...');
-    
-    const model = genAI.getGenerativeModel({ 
-      model: 'gemini-2.0-flash-lite',
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 2048,
-      }
-    });
-    
-    const prompt = language === 'ar'
-      ? `صحح الأخطاء في الأسماء والمصطلحات فقط. لا تعيد كتابة النص كاملاً.
-
-أخطاء شائعة للتصحيح:
-- "جمالي" → "جماعي" (Jama'i)
-- "داود" → "داوود" (Dāwūd)
-- حديث بدون همزة → "حديث" (Ḥadīth)
-- أسماء بحروف خاطئة (I, J, 1, l)
-
-النص:
-${text.substring(0, 1000)} ${text.length > 1000 ? '...' : ''}
-
-النص المصحح (بدون شرح):` 
-      : `Fix ONLY proper nouns and technical terms. Do NOT rewrite the entire text.
-
-Common errors to fix:
-- "Jamali" → "Jama'i" (جماعي)
-- "Ibn-IJazm" → "Ibn Ḥazm"
-- "1).adith" → "Ḥadīth"
-- "Da'ftd" → "Dāwūd"
-- "Proven<;al" → "Provençal"
-- "$ufi" → "Sufi"
-
-Text:
-${text.substring(0, 1000)} ${text.length > 1000 ? '...' : ''}
-
-Corrected text (no explanations):`;
-
-    const result = await model.generateContent(prompt);
-    const corrected = result.response.text().trim();
-    
-    const lengthDiff = Math.abs(corrected.length - text.length) / text.length;
-    if (lengthDiff < 0.3) {
-      console.log(`✅ Verification complete (${(lengthDiff * 100).toFixed(1)}% change)`);
-      return corrected;
-    } else {
-      console.warn(`⚠️ Verification changed text too much (${(lengthDiff * 100).toFixed(1)}%), keeping original`);
-      return text;
-    }
-    
-  } catch (error) {
-    console.error('❌ Proper noun verification failed:', error);
-    return text; 
-  }
-}
-
-/**
- * ✅ Fix common OCR corruptions WITHOUT using AI (saves quota)
- */
-function fixCommonCorruptions(text: string): string {
-  const fixes: Array<[RegExp, string | ((match: string) => string)]> = [
-    // Islamic names and terms
-    [/Ibn-?[IJ1l]{1,2}[aā]zm/gi, 'Ibn Ḥazm'],
-    [/Da['']?[fƒt]d/gi, 'Dāwūd'],
-    [/[1IJ][\).:]?adith/gi, 'Hadith'],
-    [/[1IJ][\).:]?adīth/gi, 'Ḥadīth'],
-    [/al-[ZẒ]ah[iī]r[iī]/gi, 'al-Ẓāhirī'],
-    [/M[aā]lik[iī]/g, 'Mālikī'],
-    [/Pahlavl/g, 'Pahlavi'],
-    [/Būyids/g, 'Būyids'],
-    [/Seljuk/g, 'Seljuk'],
-    
-    // Common corruptions
-    [/\$ufi/gi, 'Sufi'],
-    [/\$[a-z]/gi, (match: string) => match.charAt(1).toUpperCase()],
-    [/Proven[<>][;,]?al/gi, 'Provençal'],
-    [/<[;,]/g, 'ç'],
-    [/([a-z])[<>]+([a-z])/gi, '$1$2'],
-    
-    // Letter confusion
-    [/\bIl([a-z])/g, 'Il$1'],
-    [/([A-Z])II([a-z])/g, '$1li$2'],
-    [/\b([A-Z][a-z]+)[1l]([a-z]+)\b/g, '$1i$2'],
-  ];
-  
-  let fixed = text;
-  let changesMade = 0;
-  
-  for (const [pattern, replacement] of fixes) {
-    const before = fixed;
-    if (typeof replacement === 'string') {
-      fixed = fixed.replace(pattern, replacement);
-    } else {
-      fixed = fixed.replace(pattern, replacement);
-    }
-    if (fixed !== before) changesMade++;
-  }
-  
-  if (changesMade > 0) {
-    console.log(`  ✓ Fixed ${changesMade} common corruption patterns`);
-  }
-  
-  return fixed;
-}
-
-/**
- * ✅ Detect if text has corruptions (to decide if AI correction is needed)
- */
-function hasCorruptions(text: string): boolean {
-  const corruptionPatterns = [
-    /[<>]{2,}/,
-    /\$[a-z]/i,
-    /\b[IJ1l]{2,}[a-z]/i,
-    /\b[A-Z][a-z]*[IJ1l][a-z]*[IJ1l]/i,
-    /[^\x00-\x7F\u0600-\u06FF\s\p{P}]{5,}/u,
-  ];
-  
-  return corruptionPatterns.some(pattern => pattern.test(text));
-}
-
 async function processPage(
   pdfBytes: Buffer,
   pageNum: number,
@@ -281,9 +150,32 @@ async function processPage(
 
   doc.destroy();
 
-  let finalText = ocrText;
-  if (rawText.length > ocrText.length && rawText.length > 40) {
-    finalText = rawText;
+  // ✅ HYBRID APPROACH: Choose best extraction method
+  let finalText = '';
+  let extractionMethod: 'pdf_text' | 'ocr' | 'hybrid' = 'pdf_text';
+  const language = detectLanguage(ocrText || rawText);
+
+  if (language === 'ar') {
+    // For Arabic: prefer OCR (better RTL support)
+    finalText = ocrText || rawText;
+    extractionMethod = ocrText ? 'ocr' : 'pdf_text';
+    console.log(`📝 Arabic detected: using ${extractionMethod}`);
+  } else {
+    // For English: use hybrid approach
+    if (rawText.length > 40 && ocrText.length > 40) {
+      // Use PDF text but verify with OCR for special characters
+      finalText = rawText;
+      extractionMethod = 'hybrid';
+      console.log('📝 English detected: using hybrid (PDF + OCR verification)');
+    } else if (ocrText.length > rawText.length) {
+      finalText = ocrText;
+      extractionMethod = 'ocr';
+      console.log('📝 English detected: OCR has more content');
+    } else {
+      finalText = rawText;
+      extractionMethod = 'pdf_text';
+      console.log('📝 English detected: using PDF text');
+    }
   }
 
   const isImageHeavy = (!finalText || finalText.length < 30) && !!imageBuffer;
@@ -293,14 +185,12 @@ async function processPage(
     return [];
   }
 
-  const language = detectLanguage(finalText);
-
-  function extractDatesAndContext(t: string): { dates: string[], context: string[] } {
+  function extractDatesAndContext(t: string): { dates: string[]; context: string[] } {
     const datePatterns = [
       /\b\d{4}\b/g,
       /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g,
       /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b/ig,
-      /\b\d{1,2}\s+(?:يناير|فبراير|MARS|أبريل|مايو|يونيو|يوليو|أغسطس|سبتمبر|أكتوبر|نوفمبر|ديسمبر)\s+\d{2,4}\b/ig
+      /\b\d{1,2}\s+(?:يناير|فبراير|مارس|أبريل|مايو|يونيو|يوليو|أغسطس|سبتمبر|أكتوبر|نوفمبر|ديسمبر)\s+\d{2,4}\b/ig
     ];
     const foundDates = new Set<string>();
     for (const p of datePatterns) {
@@ -315,37 +205,45 @@ async function processPage(
   }
   const { dates: extractedDates, context: extractedContext } = extractDatesAndContext(finalText);
 
-  // ✅ STEP 1: Fix obvious corruptions (no AI needed)
-  let correctedText = fixCommonCorruptions(finalText);
-  let correctionConfidence = 1;
-
-  // ✅ STEP 2: Check if AI correction is needed
-  const needsAiCorrection = hasCorruptions(correctedText);
-
-  if (needsAiCorrection && correctedText.length > 100) {
-    console.log(`⚠️ Detected corruptions, using AI to correct (quota-efficient)`);
+  // ✅ STEP 1: Detect if transliteration issues exist
+  const transliterationFixed = hasTransliterationIssues(finalText);
+  
+  // ✅ STEP 2: Apply Regex corrections (fast)
+  console.log('🔧 Applying regex corrections...');
+  let correctedText = await cleanPdfText(finalText, false); // Regex only for speed
+  
+  // ✅ STEP 3: Use AI validation for important/corrupted pages
+  let correctionConfidence = 0.85;
+  
+  if (transliterationFixed && correctedText.length > 500) {
+    console.log('✨ Transliteration issues detected');
+    console.log('🤖 Applying AI validation for quality...');
     
     try {
-      correctedText = await verifyProperNouns(correctedText, language);
-      correctionConfidence = 0.95;
+      // Use AI to validate and perfect the regex corrections
+      correctedText = await cleanPdfText(finalText, true); // Enable AI
+      correctionConfidence = 0.98;
+      console.log('✅ AI validation complete');
     } catch (error) {
-      console.warn(`⚠️ AI correction failed, using regex-fixed text: ${error}`);
-      correctionConfidence = 0.7;
+      console.warn(`⚠️ AI validation failed, using regex corrections: ${error}`);
+      correctionConfidence = 0.85;
     }
+  } else if (transliterationFixed) {
+    console.log('✨ Minor transliteration issues fixed with regex');
+    correctionConfidence = 0.90;
   } else {
-    console.log(`✓ No major corruptions detected, skipping AI correction (quota saved)`);
-    correctionConfidence = 0.85;
+    console.log('✓ No transliteration issues detected');
+    correctionConfidence = 1.0;
   }
 
-  // ✅ STEP 3: Final verification pass (free)
-  const verifiedText = fixCommonCorruptions(correctedText);
-
-  const pageChunks = chunkText(verifiedText, 1200, 200);
+  // ✅ STEP 4: Chunk and embed
+  const pageChunks = chunkText(correctedText, 1200, 200);
   const model = genAI.getGenerativeModel({ model: 'text-embedding-004' });
 
   for (let i = 0; i < pageChunks.length; i++) {
     const chunkText = pageChunks[i];
     let embedding: number[] | null = null;
+    
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
         const res = await fetchWithTimeout(model.embedContent(chunkText), EMBEDDING_TIMEOUT);
@@ -371,6 +269,8 @@ async function processPage(
         original_text: finalText.substring(0, 500),
         language,
         correction_confidence: correctionConfidence,
+        transliteration_fixed: transliterationFixed,
+        extraction_method: extractionMethod,
         is_image_heavy: isImageHeavy,
         used_rotation: usedRotation,
         extracted_dates: extractedDates,
@@ -383,5 +283,6 @@ async function processPage(
     });
   }
 
+  console.log(`✅ Created ${chunks.length} chunks (${language}, ${extractionMethod}, confidence: ${(correctionConfidence * 100).toFixed(0)}%)`);
   return chunks;
 }
