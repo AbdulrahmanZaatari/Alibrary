@@ -28,6 +28,8 @@ db.exec(`
     updated_at TEXT DEFAULT (datetime('now'))
   );
 
+  
+
   CREATE TABLE IF NOT EXISTS bookmarks (
     id TEXT PRIMARY KEY,
     book_id TEXT,
@@ -176,6 +178,23 @@ try {
 
 // ✅ SMART PROMPT SYNC: Only update prompts that user hasn't modified
 console.log('🔄 Syncing default prompts...');
+
+try {
+  const bookColumns = db.prepare("PRAGMA table_info(books)").all() as Array<{ name: string }>;
+  
+  const metadataColumns = ['author', 'publisher', 'year', 'isbn', 'edition', 'language'];
+  
+  for (const column of metadataColumns) {
+    if (!bookColumns.some(col => col.name === column)) {
+      console.log(`🔄 Adding ${column} column to books...`);
+      const defaultValue = column === 'language' ? " DEFAULT 'Arabic'" : '';
+      db.exec(`ALTER TABLE books ADD COLUMN ${column} TEXT${defaultValue}`);
+      console.log(`✅ ${column} column added`);
+    }
+  }
+} catch (error) {
+  console.error('Books metadata migration error:', error);
+}
 
 const upsertPrompt = db.prepare(`
   INSERT INTO prompts (id, name, template, category, is_custom, created_at, modified_at)

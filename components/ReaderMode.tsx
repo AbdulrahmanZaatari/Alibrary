@@ -1976,8 +1976,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
       {/* 📝 TEXT EXTRACTION POPUP */}
       {showTextPopup && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+        <div className="fixed inset-0 backdrop-blur-sm flex items-center justify-center z-[100] p-4">        <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col">
             <div className="p-4 border-b border-slate-200 flex items-center justify-between">
               <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
                 <FileText size={20} className="text-blue-600" />
@@ -2015,7 +2014,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
       {/* 🔖 BOOKMARKS SIDEBAR */}
       {showBookmarks && (
-        <div className="fixed inset-y-0 right-0 w-80 bg-white border-l border-slate-200 shadow-xl z-50 flex flex-col">
+        <div className="fixed inset-y-0 right-0 w-80 bg-white border-l border-slate-200 shadow-xl z-[80] flex flex-col">
           <div className="p-4 border-b border-slate-200 flex items-center justify-between">
             <h3 className="font-semibold text-slate-800">Bookmarks</h3>
             <button
@@ -2071,8 +2070,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
       {/* 💬 COMMENTS SIDEBAR */}
       {showComments && (
-        <div className="fixed inset-y-0 right-0 w-96 bg-white border-l border-slate-200 shadow-xl z-50 flex flex-col">
-          <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+        <div className="fixed inset-y-0 right-0 w-96 bg-white border-l border-slate-200 shadow-xl z-[80] flex flex-col">          <div className="p-4 border-b border-slate-200 flex items-center justify-between">
             <h3 className="font-semibold text-slate-800">Comments</h3>
             <div className="flex items-center gap-2">
               <button
@@ -2134,16 +2132,41 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
       {/* 📝 ADD COMMENT DIALOG */}
       {showCommentDialog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
+            <div className="fixed inset-0 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
+            <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
             <div className="p-4 border-b border-slate-200">
               <h3 className="text-lg font-semibold text-slate-800">Add Comment</h3>
             </div>
             <div className="p-4 space-y-3">
               {selectedTextForComment && (
-                <div className="p-2 bg-blue-50 border border-blue-200 rounded text-xs italic text-slate-700">
-                  Selected text: &quot;{selectedTextForComment.substring(0, 100)}
-                  {selectedTextForComment.length > 100 ? '...' : ''}&quot;
+                <div className="p-2 bg-blue-50 border border-blue-200 rounded">
+                  <p className="text-xs font-medium text-slate-600 mb-1">Selected Text:</p>
+                  <div className="text-xs italic text-slate-700">
+                    {expandedCommentId === 'draft' ? (
+                      <>
+                        <p className="whitespace-pre-wrap">&quot;{selectedTextForComment}&quot;</p>
+                        <button
+                          onClick={() => setExpandedCommentId(null)}
+                          className="text-blue-600 hover:underline mt-1 text-xs"
+                        >
+                          Show less
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <p>&quot;{selectedTextForComment.substring(0, 100)}
+                        {selectedTextForComment.length > 100 ? '...' : ''}&quot;</p>
+                        {selectedTextForComment.length > 100 && (
+                          <button
+                            onClick={() => setExpandedCommentId('draft')}
+                            className="text-blue-600 hover:underline mt-1 text-xs"
+                          >
+                            Read more
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
                 </div>
               )}
               <textarea
@@ -2181,7 +2204,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
       {showCitationMenu && (
         <div
           data-citation-menu
-          className={`fixed bg-white rounded-lg shadow-xl border border-slate-200 p-3 z-50 ${
+          className={`fixed bg-white rounded-lg shadow-xl border border-slate-200 p-3 z-[100] ${
             citationPosition.placement === 'fixed-top' ? 'top-4' : ''
           }`}
           style={{
@@ -2203,7 +2226,25 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
               &quot;{selectedTextForCitation.substring(0, 150)}
               {selectedTextForCitation.length > 150 ? '...' : ''}&quot;
             </div>
-
+            {/* Direct Copy Button */}
+            <button
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(selectedTextForCitation);
+                  const tempDiv = document.createElement('div');
+                  tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-[150] bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg';
+                  tempDiv.textContent = '✅ Text Copied!';
+                  document.body.appendChild(tempDiv);
+                  setTimeout(() => document.body.removeChild(tempDiv), 2000);
+                } catch (error) {
+                  console.error('Copy failed:', error);
+                }
+              }}
+              className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-sm"
+            >
+              <Copy size={16} />
+              Copy Text
+            </button>
             {/* Fix Spelling Button */}
             <button
               onClick={fixSelectedTextSpelling}
@@ -2272,8 +2313,8 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
       {/* 📄 CITATION RESULT DIALOG */}
       {showCitationDialog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full">
+            <div className="fixed inset-0 backdrop-blur-sm flex items-center justify-center z-[100] p-4">          
+            <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full">
             <div className="p-4 border-b border-slate-200 flex items-center justify-between">
               <h3 className="text-lg font-semibold text-slate-800">Generated Citation</h3>
               <button

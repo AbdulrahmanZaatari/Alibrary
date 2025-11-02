@@ -6,7 +6,8 @@ import CorpusManager from '@/components/CorpusManager';
 import PromptLibrary from '@/components/PromptLibrary';
 import ChatPanel from '@/components/ChatPanel';
 import HistoryPanel from '@/components/HistoryPanel';
-import { Book, MessageSquare, Clock, Sparkles, FileText, Loader2 } from 'lucide-react';
+import MetadataManager from '@/components/MetaDataManager';
+import { Book, MessageSquare, Clock, Sparkles, FileText, Database, Loader2 } from 'lucide-react';
 
 const ReaderMode = dynamic(() => import('@/components/ReaderMode'), {
   ssr: false,
@@ -17,7 +18,7 @@ const ReaderMode = dynamic(() => import('@/components/ReaderMode'), {
   )
 });
 
-type ViewMode = 'reader' | 'prompts' | 'chat' | 'history';
+type ViewMode = 'reader' | 'chat' | 'prompts' | 'history' | 'metadata';
 
 export default function Home() {
   const [selectedDocuments, setSelectedDocuments] = useState<string[]>([]);
@@ -47,7 +48,8 @@ export default function Home() {
     { id: 'chat', label: 'AI Chat', icon: MessageSquare },
     { id: 'prompts', label: 'Prompts', icon: Sparkles },
     { id: 'history', label: 'History', icon: Clock },
-  ] as const;
+    { id: 'metadata', label: 'Metadata', icon: Database }, // ADD Database to imports at top
+  ];
 
   return (
     <div className="flex h-screen bg-gradient-to-br from-slate-50 to-slate-100">
@@ -142,6 +144,9 @@ export default function Home() {
           )}
           {currentView === 'history' && (
             <HistoryPanel />
+          )}
+          {currentView === 'metadata' && (
+            <MetadataManager />
           )}
         </div>
       </div>
