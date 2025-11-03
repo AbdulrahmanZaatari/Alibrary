@@ -165,8 +165,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Best Quality)', tier: 'premium' },
     { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Fast & Smart)', tier: 'premium' },
     { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', tier: 'standard' },
-    { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', tier: 'standard' },
-    { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite (Fastest)', tier: 'basic' },
+    { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', tier: 'standard' }
   ];
 
   // Refs
@@ -916,7 +915,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
       bookTitle: selectedBook?.title,
       bookPage: currentPage,
       extractedText: extractedText || undefined,
-      correctSpelling: true, // ✅ Always use AI correction
+      correctSpelling: false, 
       customPrompt: selectedPrompt || '',
       enableMultiHop: enableMultiHop,
       preferredModel: selectedModel,
@@ -985,20 +984,21 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
     console.log('✅ Chat response received');
     
+    
     try {
       await fetch('/api/reader-chat/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sessionId,
-          userMessage,
-          assistantMessage: fullResponse,
+          userMessage,    
+          assistantMessage: fullResponse,  
           customPromptName: selectedPromptId 
             ? availablePrompts.find(p => p.id === selectedPromptId)?.name 
             : null,
         }),
       });
-      console.log('✅ Messages saved to database');
+      console.log('✅ Messages saved to database in correct order');
     } catch (error) {
       console.error('❌ Failed to save messages:', error);
     }

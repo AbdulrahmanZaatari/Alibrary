@@ -117,28 +117,7 @@ export async function performMultiHopReasoning(
       chunks.forEach(c => usedDocuments.add(c.document_id));
     }
     
-    // ✅ STEP 4: Apply spelling correction if enabled and we have chunks
-    let processedChunks = chunks;
-    if (correctSpelling && chunks.length > 0 && !stepUsedGeneralKnowledge) {
-      console.log('🔧 Applying spelling correction...');
-      
-      const chunksByDoc = new Map<string, any[]>();
-      chunks.forEach(chunk => {
-        const docId = chunk.document_id;
-        if (!chunksByDoc.has(docId)) {
-          chunksByDoc.set(docId, []);
-        }
-        chunksByDoc.get(docId)!.push(chunk);
-      });
-      
-      processedChunks = [];
-      for (const [docId, docChunks] of chunksByDoc.entries()) {
-        const docLang = documentLanguages.get(docId) || responseLanguage;
-        const corrected = await correctChunksBatch(docChunks, docLang, aggressiveCorrection);
-        processedChunks.push(...corrected);
-      }
-    }
-    
+    const processedChunks = chunks;
     // ✅ STEP 5: Build context or use general knowledge
     let context = '';
     let documentSources: string[] = [];

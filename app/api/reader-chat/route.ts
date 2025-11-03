@@ -12,7 +12,6 @@ import {
 } from '@/lib/db';
 import { analyzeQuery } from '@/lib/queryProcessor';
 import { retrieveSmartContext } from '@/lib/smartRetrieval';
-import { correctChunksBatch } from '@/lib/spellingCorrection';
 import { createClient } from '@supabase/supabase-js';
 import { 
   isComplexQuery, 
@@ -143,7 +142,7 @@ export async function POST(req: NextRequest) {
         bookPage,
         extractedText,
         documentIds,
-        correctSpelling = false,
+        correctSpelling = false, // ✅ Still accepted but ignored
         aggressiveCorrection = false,
         customPrompt,
         enableMultiHop = false,
@@ -157,8 +156,6 @@ export async function POST(req: NextRequest) {
         hasMessage: !!userMessage,
         hasCorpus: documentIds?.length > 0,
         corpusCount: documentIds?.length || 0,
-        correctSpelling,
-        aggressiveCorrection,
         enableMultiHop,
         preferredModel
       });
@@ -265,8 +262,6 @@ export async function POST(req: NextRequest) {
           userMessage, 
           documentIds, 
           extractedText, 
-          correctSpelling, 
-          aggressiveCorrection,
           customPrompt,
           enableMultiHop,
           sessionId,
@@ -278,11 +273,11 @@ export async function POST(req: NextRequest) {
       } 
       else if (sessionId) {
         console.log('💬 Using general chat with history for Reader Chat');
-        await handleGeneralChat(writer, encoder, userMessage, sessionId, extractedText, bookPage, history);
+        await handleGeneralChat(writer, encoder, userMessage, sessionId, extractedText, bookPage, history, preferredModel);
       }
       else {
         console.log('📝 Using simple query response');
-        await handleSimpleQuery(writer, encoder, userMessage, extractedText);
+        await handleSimpleQuery(writer, encoder, userMessage, extractedText, preferredModel);
       }
 
       // ✅ STEP 4: Save user message
@@ -337,8 +332,6 @@ async function handleCorpusQuery(
   query: string,
   documentIds: string[],
   extractedText?: string,
-  correctSpelling?: boolean,
-  aggressiveCorrection?: boolean,
   customPrompt?: string,
   enableMultiHop: boolean = false,
   sessionId?: string,
@@ -412,9 +405,8 @@ async function handleCorpusQuery(
         documentIds,
         docLanguages,
         4,
-        responseLanguage,
-        correctSpelling || false,
-        aggressiveCorrection || false
+        responseLanguage
+        // ✅ Correction parameters removed - embeddings are pre-corrected
       );
       
       // Add conversation context prefix
@@ -468,27 +460,8 @@ async function handleCorpusQuery(
    - Chunks found: ${chunks.length}
    - Confidence: ${(confidence * 100).toFixed(1)}%`);
 
-  // ✅ Step 8: Process chunks with optional spelling correction
-  let processedChunks = chunks;
-  if (correctSpelling && chunks.length > 0) {
-    console.log('🔧 Applying spelling correction...');
-    
-    const chunksByDoc = new Map<string, any[]>();
-    chunks.forEach(chunk => {
-      const docId = chunk.document_id;
-      if (!chunksByDoc.has(docId)) {
-        chunksByDoc.set(docId, []);
-      }
-      chunksByDoc.get(docId)!.push(chunk);
-    });
-
-    processedChunks = [];
-    for (const [docId, docChunks] of chunksByDoc.entries()) {
-      const docLang = docLanguages.get(docId) || documentLanguage;
-      const corrected = await correctChunksBatch(docChunks, docLang, aggressiveCorrection);
-      processedChunks.push(...corrected);
-    }
-  }
+  // ✅ Step 8: Use chunks directly (already corrected at embedding time)
+  const processedChunks = chunks;
 
   // ✅ Step 9: Group chunks by document and format context
   if (processedChunks.length > 0) {
@@ -536,12 +509,10 @@ async function handleCorpusQuery(
         .map(([pageNum, pageChunks]) => {
           const bestSimilarity = Math.max(...pageChunks.map(c => c.similarity || 0));
           const relevanceIcon = bestSimilarity >= 0.5 ? '🎯' : bestSimilarity >= 0.4 ? '✓' : '📄';
-          const hasCorrected = pageChunks.some(c => c.corrected);
-          const correctionBadge = hasCorrected ? ' ✨' : '';
           
           const pageHeader = isArabic 
-            ? `**${relevanceIcon} صفحة ${pageNum}**${correctionBadge}`
-            : `**${relevanceIcon} Page ${pageNum}**${correctionBadge}`;
+            ? `**${relevanceIcon} صفحة ${pageNum}**`
+            : `**${relevanceIcon} Page ${pageNum}**`;
           
           const pageText = pageChunks.map(c => c.chunk_text).join('\n\n');
           return `${pageHeader}\n${pageText}`;
@@ -788,7 +759,7 @@ ${contextSection}
 **User:** ${message}
 **Assistant:**`;
 
-  const geminiResult = await generateResponse(prompt, preferredModel); // ✅ ADD preferredModel
+  const geminiResult = await generateResponse(prompt, preferredModel);
   const geminiStream = geminiResult.stream;
   
   let assistantResponse = '';
@@ -840,7 +811,7 @@ ${contextSection}
 **User:** ${query}
 **Assistant:**`;
 
-  const geminiResult = await generateResponse(prompt, preferredModel); // ✅ ADD preferredModel
+  const geminiResult = await generateResponse(prompt, preferredModel);
   const geminiStream = geminiResult.stream;
   
   for await (const chunk of geminiStream) {
