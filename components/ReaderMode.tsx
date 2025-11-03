@@ -1408,7 +1408,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   StreamingMessage.displayName = 'StreamingMessage';
 
   // ==================== RENDER ====================
-  // ...existing code...
 
   return (
     <div className="h-screen flex overflow-hidden bg-slate-50">
@@ -1535,13 +1534,55 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
           <>
             {/* Top Toolbar */}
             <div className="bg-white border-b border-slate-200 p-3 flex items-center justify-between gap-4 flex-wrap">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-3">
                 <h3 className="font-semibold text-slate-800 text-sm truncate max-w-xs">
                   {selectedBook.title}
                 </h3>
-                <span className="text-xs text-slate-500 bg-slate-100 px-2 py-1 rounded">
-                  Page {currentPage} / {numPages}
-                </span>
+              </div>
+
+              {/* 📄 PAGE NAVIGATION - MOVED TO TOP */}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={goToPrevPage}
+                  disabled={currentPage <= 1}
+                  className="p-2 bg-slate-100 rounded-lg hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  title="Previous Page (←)"
+                >
+                  <ChevronLeft size={18} />
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={1}
+                    max={numPages || 1}
+                    value={currentPage}
+                    onChange={(e) => {
+                      const page = parseInt(e.target.value);
+                      if (page >= 1 && page <= (numPages || 1)) {
+                        setCurrentPage(page);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    className="w-16 px-2 py-1 border border-slate-300 rounded-lg text-center text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <span className="text-xs text-slate-500">
+                    / {numPages || 0}
+                  </span>
+                </div>
+
+                <button
+                  onClick={goToNextPage}
+                  disabled={currentPage >= numPages}
+                  className="p-2 bg-slate-100 rounded-lg hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  title="Next Page (→)"
+                >
+                  <ChevronRight size={18} />
+                </button>
               </div>
 
               <div className="flex items-center gap-2 flex-wrap">
@@ -1685,41 +1726,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                   <p>Select a book to start reading</p>
                 </div>
               )}
-            </div>
-
-            {/* Bottom Navigation */}
-            <div className="bg-white border-t border-slate-200 p-3 flex items-center justify-between">
-              <button
-                onClick={goToPrevPage}
-                disabled={currentPage <= 1}
-                className="px-4 py-2 bg-slate-100 rounded-lg hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
-              >
-                <ChevronLeft size={18} />
-                Previous
-              </button>
-
-              <input
-                type="number"
-                min={1}
-                max={numPages}
-                value={currentPage}
-                onChange={(e) => {
-                  const page = parseInt(e.target.value);
-                  if (page >= 1 && page <= numPages) {
-                    setCurrentPage(page);
-                  }
-                }}
-                className="w-20 px-3 py-2 border border-slate-300 rounded-lg text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-
-              <button
-                onClick={goToNextPage}
-                disabled={currentPage >= numPages}
-                className="px-4 py-2 bg-slate-100 rounded-lg hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
-              >
-                Next
-                <ChevronRight size={18} />
-              </button>
             </div>
           </>
         ) : (
@@ -2204,7 +2210,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
       {showCitationMenu && (
         <div
           data-citation-menu
-          className={`fixed bg-white rounded-lg shadow-xl border border-slate-200 p-3 z-[100] ${
+          className={`fixed bg-white rounded-lg shadow-xl border border-slate-200 p-3 z-[9999] ${
             citationPosition.placement === 'fixed-top' ? 'top-4' : ''
           }`}
           style={{

@@ -6,6 +6,14 @@ import { getBookBuffer } from '@/lib/supabaseStorage';
 const pdfCache = new Map<string, { buffer: Buffer; timestamp: number }>();
 const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
 
+// ✅ Helper function to encode filename for Content-Disposition header
+function encodeRFC5987(filename: string): string {
+  // Encode using UTF-8 percent-encoding for non-ASCII characters
+  return encodeURIComponent(filename)
+    .replace(/['()]/g, escape) // Escape special chars
+    .replace(/\*/g, '%2A');
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -22,9 +30,16 @@ export async function GET(
       // Convert Buffer to Uint8Array for Blob compatibility
       const uint8Array = new Uint8Array(cached.buffer);
       const blob = new Blob([uint8Array], { type: 'application/pdf' });
+      
+      // ✅ Get filename from database for proper encoding
+      const db = getDb();
+      const book = db.prepare('SELECT filename FROM books WHERE id = ?').get(bookId) as any;
+      const encodedFilename = book ? encodeRFC5987(book.filename) : 'document.pdf';
+      
       return new NextResponse(blob, {
         headers: {
           'Content-Type': 'application/pdf',
+          'Content-Disposition': `inline; filename="document.pdf"; filename*=UTF-8''${encodedFilename}`,
           'Cache-Control': 'public, max-age=3600',
         },
       });
@@ -52,10 +67,14 @@ export async function GET(
     const uint8Array = new Uint8Array(buffer);
     const blob = new Blob([uint8Array], { type: 'application/pdf' });
 
+    // ✅ Encode filename for Content-Disposition (handles Arabic/Unicode)
+    const encodedFilename = encodeRFC5987(book.filename);
+
     return new NextResponse(blob, {
       headers: {
         'Content-Type': 'application/pdf',
-        'Content-Disposition': `inline; filename="${book.filename}"`,
+        // ✅ RFC 5987: Use both ASCII fallback and UTF-8 encoded filename
+        'Content-Disposition': `inline; filename="document.pdf"; filename*=UTF-8''${encodedFilename}`,
         'Cache-Control': 'public, max-age=3600',
       },
     });
