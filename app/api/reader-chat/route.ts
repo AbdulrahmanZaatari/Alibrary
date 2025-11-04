@@ -253,7 +253,59 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // ✅ Route to appropriate handler
+            // ✅ STEP 3: Generate summary (every 10 messages)
+      if (sessionId && history.length > 0 && history.length % 10 === 0) {
+        console.log('📝 Generating reader session summary...');
+        
+        try {
+          const queryLanguage = detectQueryLanguage(userMessage);
+          const conversationHistory = history.map(msg => ({
+            role: msg.role,
+            content: msg.content
+          }));
+
+          const summaryResult = await generateContextSummary(conversationHistory, queryLanguage);
+          
+          const summaryId = `sum-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+          createSessionSummary({
+            id: summaryId,
+            sessionId,
+            summary: summaryResult.summary,
+            keyPoints: summaryResult.keyPoints,
+            messageCount: history.length
+          });
+
+          console.log('✅ Reader summary created');
+        } catch (error) {
+          console.error('⚠️ Summary generation failed:', error);
+        }
+      }
+
+      // ✅ STEP 4: Save user message FIRST (MOVED HERE)
+      if (sessionId) {
+        const messageId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        addChatMessage({
+          id: messageId,
+          sessionId,
+          role: 'user',
+          content: userMessage,
+          mode: 'reader',
+          bookId,
+          bookTitle,
+          bookPage,
+          extractedText
+        });
+
+        updateSessionTimestamp(sessionId);
+
+        // Extract topics
+        const topics = extractTopicsFromMessage(userMessage);
+        if (topics.length > 0) {
+          console.log('📌 Extracted topics:', topics);
+        }
+      }
+
+      // ✅ STEP 5: Route to appropriate handler (NOW RUNS AFTER USER MESSAGE)
       if (documentIds && documentIds.length > 0) {
         console.log('🔄 Using corpus retrieval for Reader Chat');
         await handleCorpusQuery(
@@ -278,30 +330,6 @@ export async function POST(req: NextRequest) {
       else {
         console.log('📝 Using simple query response');
         await handleSimpleQuery(writer, encoder, userMessage, extractedText, preferredModel);
-      }
-
-      // ✅ STEP 4: Save user message
-      if (sessionId) {
-        const messageId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        addChatMessage({
-          id: messageId,
-          sessionId,
-          role: 'user',
-          content: userMessage,
-          mode: 'reader',
-          bookId,
-          bookTitle,
-          bookPage,
-          extractedText
-        });
-
-        updateSessionTimestamp(sessionId);
-
-        // Extract topics
-        const topics = extractTopicsFromMessage(userMessage);
-        if (topics.length > 0) {
-          console.log('📌 Extracted topics:', topics);
-        }
       }
 
       await writer.close();

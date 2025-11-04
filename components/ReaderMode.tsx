@@ -105,7 +105,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [commentDraft, setCommentDraft] = useState('');
   const [selectedTextForComment, setSelectedTextForComment] = useState('');
   const [expandedCommentId, setExpandedCommentId] = useState<string | null>(null);
-
+  const [commentView, setCommentView] = useState<'current' | 'all'>('current');
   // Citation State
   const [showCitationMenu, setShowCitationMenu] = useState(false);
   const [citationPosition, setCitationPosition] = useState<{ 
@@ -1653,19 +1653,24 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                   <Bookmark size={18} />
                 </button>
 
-                {/* Comments */}
                 <button
                   onClick={() => {
                     setShowComments(!showComments);
                     setShowBookmarks(false);
                     if (!showComments) loadComments();
                   }}
-                  className={`p-2 rounded transition-colors ${
+                  className={`p-2 rounded transition-colors relative ${
                     showComments ? 'bg-blue-100 text-blue-600' : 'hover:bg-slate-100'
                   }`}
                   title="Comments"
                 >
                   <MessageSquare size={18} />
+                  {/* ✅ ADD BADGE SHOWING COMMENT COUNT */}
+                  {comments.filter(c => c.page_number === currentPage).length > 0 && (
+                    <span className="absolute -top-1 -right-1 bg-blue-600 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center font-medium shadow-sm">
+                      {comments.filter(c => c.page_number === currentPage).length}
+                    </span>
+                  )}
                 </button>
 
                 {/* AI Chat Toggle */}
@@ -2073,283 +2078,385 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
           </div>
         </div>
       )}
-
-      {/* 💬 COMMENTS SIDEBAR */}
-      {showComments && (
-        <div className="fixed inset-y-0 right-0 w-96 bg-white border-l border-slate-200 shadow-xl z-[80] flex flex-col">          <div className="p-4 border-b border-slate-200 flex items-center justify-between">
-            <h3 className="font-semibold text-slate-800">Comments</h3>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setShowCommentDialog(true)}
-                className="px-3 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
-              >
-                Add Comment
-              </button>
-              <button
-                onClick={() => setShowComments(false)}
-                className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
-              >
-                <X size={18} />
-              </button>
-            </div>
-          </div>
-          <div className="flex-1 overflow-y-auto p-4">
-            {comments.filter(c => c.page_number === currentPage).length === 0 ? (
-              <div className="text-center py-8 text-slate-500">
-                <MessageSquare className="mx-auto mb-2 text-slate-400" size={32} />
-                <p className="text-sm">No comments on this page</p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {comments
-                  .filter((c) => c.page_number === currentPage)
-                  .map((comment) => (
-                    <div
-                      key={comment.id}
-                      className="p-3 bg-slate-50 rounded-lg border border-slate-200"
-                    >
-                      {comment.selected_text && (
-                        <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs italic text-slate-700">
-                          &quot;{comment.selected_text.substring(0, 100)}
-                          {comment.selected_text.length > 100 ? '...' : ''}&quot;
-                        </div>
-                      )}
-                      <p className="text-sm text-slate-800 whitespace-pre-wrap">
-                        {comment.comment}
-                      </p>
-                      <div className="flex items-center justify-between mt-2">
-                        <p className="text-xs text-slate-400">
-                          {new Date(comment.created_at).toLocaleString()}
-                        </p>
-                        <button
-                          onClick={() => deleteComment(comment.id)}
-                          className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-              </div>
-            )}
-          </div>
+      
+{/* 💬 COMMENTS SIDEBAR */}
+{showComments && (
+  <div className="fixed inset-y-0 right-0 w-96 bg-white border-l border-slate-200 shadow-xl z-[80] flex flex-col">
+    <div className="p-4 border-b border-slate-200">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-semibold text-slate-800">Comments</h3>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowCommentDialog(true)}
+            className="px-3 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
+          >
+            Add Comment
+          </button>
+          <button
+            onClick={() => setShowComments(false)}
+            className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+          >
+            <X size={18} />
+          </button>
         </div>
-      )}
-
-      {/* 📝 ADD COMMENT DIALOG */}
-      {showCommentDialog && (
-            <div className="fixed inset-0 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
-            <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
-            <div className="p-4 border-b border-slate-200">
-              <h3 className="text-lg font-semibold text-slate-800">Add Comment</h3>
-            </div>
-            <div className="p-4 space-y-3">
-              {selectedTextForComment && (
-                <div className="p-2 bg-blue-50 border border-blue-200 rounded">
-                  <p className="text-xs font-medium text-slate-600 mb-1">Selected Text:</p>
-                  <div className="text-xs italic text-slate-700">
-                    {expandedCommentId === 'draft' ? (
-                      <>
-                        <p className="whitespace-pre-wrap">&quot;{selectedTextForComment}&quot;</p>
-                        <button
-                          onClick={() => setExpandedCommentId(null)}
-                          className="text-blue-600 hover:underline mt-1 text-xs"
-                        >
-                          Show less
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <p>&quot;{selectedTextForComment.substring(0, 100)}
-                        {selectedTextForComment.length > 100 ? '...' : ''}&quot;</p>
-                        {selectedTextForComment.length > 100 && (
-                          <button
-                            onClick={() => setExpandedCommentId('draft')}
-                            className="text-blue-600 hover:underline mt-1 text-xs"
-                          >
-                            Read more
-                          </button>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-              )}
-              <textarea
-                value={commentDraft}
-                onChange={(e) => setCommentDraft(e.target.value)}
-                placeholder="Enter your comment..."
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-                rows={4}
-              />
-            </div>
-            <div className="p-4 border-t border-slate-200 flex items-center justify-end gap-2">
-              <button
-                onClick={() => {
-                  setShowCommentDialog(false);
-                  setCommentDraft('');
-                  setSelectedTextForComment('');
-                }}
-                className="px-4 py-2 text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={addComment}
-                disabled={!commentDraft.trim()}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
-              >
-                Add Comment
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 📌 CITATION MENU (On Text Selection) */}
-      {showCitationMenu && (
-        <div
-          data-citation-menu
-          className={`fixed bg-white rounded-lg shadow-xl border border-slate-200 p-3 z-[9999] ${
-            citationPosition.placement === 'fixed-top' ? 'top-4' : ''
+      </div>
+      
+      {/* ✅ VIEW TOGGLE */}
+      <div className="flex gap-2 bg-slate-100 rounded-lg p-1">
+        <button
+          onClick={() => setCommentView('current')}
+          className={`flex-1 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+            commentView === 'current'
+              ? 'bg-white text-slate-800 shadow-sm'
+              : 'text-slate-600 hover:text-slate-800'
           }`}
-          style={{
-            left: citationPosition.placement === 'fixed-top' 
-              ? '50%' 
-              : `${citationPosition.x}px`,
-            top: citationPosition.placement === 'fixed-top' 
-              ? undefined 
-              : `${citationPosition.y}px`,
-            transform: citationPosition.placement === 'fixed-top'
-              ? 'translateX(-50%)'
-              : 'translate(-50%, -100%)',
-            width: '400px',
-            maxWidth: '90vw',
-          }}
         >
-          <div className="space-y-2">
-            <div className="text-xs text-slate-600 mb-2 p-2 bg-slate-50 rounded border border-slate-200 max-h-20 overflow-y-auto">
-              &quot;{selectedTextForCitation.substring(0, 150)}
-              {selectedTextForCitation.length > 150 ? '...' : ''}&quot;
+          This Page ({comments.filter(c => c.page_number === currentPage).length})
+        </button>
+        <button
+          onClick={() => setCommentView('all')}
+          className={`flex-1 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+            commentView === 'all'
+              ? 'bg-white text-slate-800 shadow-sm'
+              : 'text-slate-600 hover:text-slate-800'
+          }`}
+        >
+          All ({comments.length})
+        </button>
+      </div>
+    </div>
+
+    <div className="flex-1 overflow-y-auto p-4">
+      {/* ✅ CURRENT PAGE VIEW */}
+      {commentView === 'current' && (
+        <>
+          {comments.filter(c => c.page_number === currentPage).length === 0 ? (
+            <div className="text-center py-8 text-slate-500">
+              <MessageSquare className="mx-auto mb-2 text-slate-400" size={32} />
+              <p className="text-sm">No comments on this page</p>
             </div>
-            {/* Direct Copy Button */}
-            <button
-              onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(selectedTextForCitation);
-                  const tempDiv = document.createElement('div');
-                  tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-[150] bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg';
-                  tempDiv.textContent = '✅ Text Copied!';
-                  document.body.appendChild(tempDiv);
-                  setTimeout(() => document.body.removeChild(tempDiv), 2000);
-                } catch (error) {
-                  console.error('Copy failed:', error);
-                }
-              }}
-              className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-sm"
-            >
-              <Copy size={16} />
-              Copy Text
-            </button>
-            {/* Fix Spelling Button */}
-            <button
-              onClick={fixSelectedTextSpelling}
-              disabled={isFixingSpelling}
-              className="w-full px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 text-sm"
-            >
-              {isFixingSpelling ? (
+          ) : (
+            <div className="space-y-3">
+              {comments
+                .filter((c) => c.page_number === currentPage)
+                .map((comment) => (
+                  <div
+                    key={comment.id}
+                    className="p-3 bg-slate-50 rounded-lg border border-slate-200"
+                  >
+                    {comment.selected_text && (
+                      <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs italic text-slate-700">
+                        &quot;{comment.selected_text.substring(0, 100)}
+                        {comment.selected_text.length > 100 ? '...' : ''}&quot;
+                      </div>
+                    )}
+                    <p className="text-sm text-slate-800 whitespace-pre-wrap">
+                      {comment.comment}
+                    </p>
+                    <div className="flex items-center justify-between mt-2">
+                      <p className="text-xs text-slate-400">
+                        {new Date(comment.created_at).toLocaleString()}
+                      </p>
+                      <button
+                        onClick={() => deleteComment(comment.id)}
+                        className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ✅ ALL COMMENTS VIEW */}
+      {commentView === 'all' && (
+        <>
+          {comments.length === 0 ? (
+            <div className="text-center py-8 text-slate-500">
+              <MessageSquare className="mx-auto mb-2 text-slate-400" size={32} />
+              <p className="text-sm">No comments yet</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {comments
+                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                .map((comment) => (
+                  <div
+                    key={comment.id}
+                    onClick={() => {
+                      setCurrentPage(comment.page_number);
+                      setCommentView('current');
+                    }}
+                    className="p-3 bg-slate-50 rounded-lg border border-slate-200 hover:border-blue-300 hover:bg-blue-50 transition-all cursor-pointer group"
+                  >
+                    {/* Page Number Badge */}
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs font-medium rounded group-hover:bg-blue-200">
+                        Page {comment.page_number}
+                      </span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteComment(comment.id);
+                        }}
+                        className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+
+                    {/* Selected Text Preview */}
+                    {comment.selected_text && (
+                      <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs italic text-slate-700">
+                        &quot;{comment.selected_text.substring(0, 80)}
+                        {comment.selected_text.length > 80 ? '...' : ''}&quot;
+                      </div>
+                    )}
+
+                    {/* Comment Text */}
+                    <p className="text-sm text-slate-800">
+                      {comment.comment.length > 150
+                        ? `${comment.comment.substring(0, 150)}...`
+                        : comment.comment}
+                    </p>
+
+                    {/* Timestamp */}
+                    <p className="text-xs text-slate-400 mt-2">
+                      {new Date(comment.created_at).toLocaleString()}
+                    </p>
+
+                    {/* Click to Navigate Hint */}
+                    <div className="mt-2 pt-2 border-t border-slate-200 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <p className="text-xs text-blue-600 flex items-center gap-1">
+                        <span>→</span> Click to go to page {comment.page_number}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  </div>
+)}
+
+{/* 📝 ADD COMMENT DIALOG */}
+{showCommentDialog && (
+  <div className="fixed inset-0 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
+    <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
+      <div className="p-4 border-b border-slate-200">
+        <h3 className="text-lg font-semibold text-slate-800">Add Comment</h3>
+      </div>
+      <div className="p-4 space-y-3">
+        {selectedTextForComment && (
+          <div className="p-2 bg-blue-50 border border-blue-200 rounded">
+            <p className="text-xs font-medium text-slate-600 mb-1">Selected Text:</p>
+            <div className="text-xs italic text-slate-700">
+              {expandedCommentId === 'draft' ? (
                 <>
-                  <Loader2 className="animate-spin" size={16} />
-                  Fixing...
+                  <p className="whitespace-pre-wrap">&quot;{selectedTextForComment}&quot;</p>
+                  <button
+                    onClick={() => setExpandedCommentId(null)}
+                    className="text-blue-600 hover:underline mt-1 text-xs"
+                  >
+                    Show less
+                  </button>
                 </>
               ) : (
                 <>
-                  <Sparkles size={16} />
-                  Fix & Copy
+                  <p>&quot;{selectedTextForComment.substring(0, 100)}
+                  {selectedTextForComment.length > 100 ? '...' : ''}&quot;</p>
+                  {selectedTextForComment.length > 100 && (
+                    <button
+                      onClick={() => setExpandedCommentId('draft')}
+                      className="text-blue-600 hover:underline mt-1 text-xs"
+                    >
+                      Read more
+                    </button>
+                  )}
                 </>
               )}
-            </button>
-
-            {/* Citation Buttons */}
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => generateCitation('APA')}
-                disabled={loadingCitation}
-                className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
-              >
-                {loadingCitation ? <Loader2 className="animate-spin inline" size={14} /> : 'APA Citation'}
-              </button>
-              <button
-                onClick={() => generateCitation('MLA')}
-                disabled={loadingCitation}
-                className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
-              >
-                {loadingCitation ? <Loader2 className="animate-spin inline" size={14} /> : 'MLA Citation'}
-              </button>
-              <button
-                onClick={() => generateCitation('Chicago')}
-                disabled={loadingCitation}
-                className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
-              >
-                {loadingCitation ? <Loader2 className="animate-spin inline" size={14} /> : 'Chicago'}
-              </button>
-              <button
-                onClick={() => generateCitation('Harvard')}
-                disabled={loadingCitation}
-                className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
-              >
-                {loadingCitation ? <Loader2 className="animate-spin inline" size={14} /> : 'Harvard'}
-              </button>
-            </div>
-
-            {/* Add Comment Button */}
-            <button
-              onClick={() => {
-                setShowCommentDialog(true);
-                setShowCitationMenu(false);
-              }}
-              className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-sm"
-            >
-              <MessageSquare size={16} />
-              Add Comment
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 📄 CITATION RESULT DIALOG */}
-      {showCitationDialog && (
-            <div className="fixed inset-0 backdrop-blur-sm flex items-center justify-center z-[100] p-4">          
-            <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full">
-            <div className="p-4 border-b border-slate-200 flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-slate-800">Generated Citation</h3>
-              <button
-                onClick={() => setShowCitationDialog(false)}
-                className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
-              >
-                <X size={18} />
-              </button>
-            </div>
-            <div className="p-4">
-              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 font-mono text-sm text-slate-700">
-                {generatedCitation}
-              </div>
-            </div>
-            <div className="p-4 border-t border-slate-200 flex items-center justify-end">
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(generatedCitation);
-                  alert('Citation copied to clipboard!');
-                }}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
-              >
-                <Copy size={16} />
-                Copy Citation
-              </button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+        <textarea
+          value={commentDraft}
+          onChange={(e) => setCommentDraft(e.target.value)}
+          placeholder="Enter your comment..."
+          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+          rows={4}
+        />
+      </div>
+      <div className="p-4 border-t border-slate-200 flex items-center justify-end gap-2">
+        <button
+          onClick={() => {
+            setShowCommentDialog(false);
+            setCommentDraft('');
+            setSelectedTextForComment('');
+          }}
+          className="px-4 py-2 text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={addComment}
+          disabled={!commentDraft.trim()}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+        >
+          Add Comment
+        </button>
+      </div>
     </div>
+  </div>
+)}
+
+{/* 📌 CITATION MENU (On Text Selection) */}
+{showCitationMenu && (
+  <div
+    data-citation-menu
+    className={`fixed bg-white rounded-lg shadow-xl border border-slate-200 p-3 z-[9999] ${
+      citationPosition.placement === 'fixed-top' ? 'top-4' : ''
+    }`}
+    style={{
+      left: citationPosition.placement === 'fixed-top' 
+        ? '50%' 
+        : `${citationPosition.x}px`,
+      top: citationPosition.placement === 'fixed-top' 
+        ? undefined 
+        : `${citationPosition.y}px`,
+      transform: citationPosition.placement === 'fixed-top'
+        ? 'translateX(-50%)'
+        : 'translate(-50%, -100%)',
+      width: '400px',
+      maxWidth: '90vw',
+    }}
+  >
+    <div className="space-y-2">
+      <div className="text-xs text-slate-600 mb-2 p-2 bg-slate-50 rounded border border-slate-200 max-h-20 overflow-y-auto">
+        &quot;{selectedTextForCitation.substring(0, 150)}
+        {selectedTextForCitation.length > 150 ? '...' : ''}&quot;
+      </div>
+      {/* Direct Copy Button */}
+      <button
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(selectedTextForCitation);
+            const tempDiv = document.createElement('div');
+            tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-[150] bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg';
+            tempDiv.textContent = '✅ Text Copied!';
+            document.body.appendChild(tempDiv);
+            setTimeout(() => document.body.removeChild(tempDiv), 2000);
+          } catch (error) {
+            console.error('Copy failed:', error);
+          }
+        }}
+        className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-sm"
+      >
+        <Copy size={16} />
+        Copy Text
+      </button>
+      {/* Fix Spelling Button */}
+      <button
+        onClick={fixSelectedTextSpelling}
+        disabled={isFixingSpelling}
+        className="w-full px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 text-sm"
+      >
+        {isFixingSpelling ? (
+          <>
+            <Loader2 className="animate-spin" size={16} />
+            Fixing...
+          </>
+        ) : (
+          <>
+            <Sparkles size={16} />
+            Fix & Copy
+          </>
+        )}
+      </button>
+
+      {/* Citation Buttons */}
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          onClick={() => generateCitation('APA')}
+          disabled={loadingCitation}
+          className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
+        >
+          {loadingCitation ? <Loader2 className="animate-spin inline" size={14} /> : 'APA Citation'}
+        </button>
+        <button
+          onClick={() => generateCitation('MLA')}
+          disabled={loadingCitation}
+          className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
+        >
+          {loadingCitation ? <Loader2 className="animate-spin inline" size={14} /> : 'MLA Citation'}
+        </button>
+        <button
+          onClick={() => generateCitation('Chicago')}
+          disabled={loadingCitation}
+          className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
+        >
+          {loadingCitation ? <Loader2 className="animate-spin inline" size={14} /> : 'Chicago'}
+        </button>
+        <button
+          onClick={() => generateCitation('Harvard')}
+          disabled={loadingCitation}
+          className="px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
+        >
+          {loadingCitation ? <Loader2 className="animate-spin inline" size={14} /> : 'Harvard'}
+        </button>
+      </div>
+
+      {/* Add Comment Button */}
+      <button
+        onClick={() => {
+          setShowCommentDialog(true);
+          setShowCitationMenu(false);
+        }}
+        className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-sm"
+      >
+        <MessageSquare size={16} />
+        Add Comment
+      </button>
+    </div>
+  </div>
+)}
+{/* 📄 CITATION RESULT DIALOG */}
+{showCitationDialog && (
+  <div className="fixed inset-0 backdrop-blur-sm flex items-center justify-center z-[100] p-4">          
+    <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full">
+      <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+        <h3 className="text-lg font-semibold text-slate-800">Generated Citation</h3>
+        <button
+          onClick={() => setShowCitationDialog(false)}
+          className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+        >
+          <X size={18} />
+        </button>
+      </div>
+      <div className="p-4">
+        <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 font-mono text-sm text-slate-700">
+          {generatedCitation}
+        </div>
+      </div>
+      <div className="p-4 border-t border-slate-200 flex items-center justify-end">
+        <button
+          onClick={() => {
+            navigator.clipboard.writeText(generatedCitation);
+            alert('Citation copied to clipboard!');
+          }}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
+        >
+          <Copy size={16} />
+          Copy Citation
+        </button>
+      </div>
+    </div>
+  </div>
+)}
+  </div>
   );
 }
