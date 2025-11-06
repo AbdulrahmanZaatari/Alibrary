@@ -162,6 +162,20 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_comments_page ON comments(book_id, page_number);
 `);
 
+try {
+  // ✅ Add 'mode' column to chat_sessions if it doesn't exist
+  const chatSessionColumns = db.prepare("PRAGMA table_info(chat_sessions)").all() as Array<{ name: string }>;
+  const hasModeColumn = chatSessionColumns.some(col => col.name === 'mode');
+  
+  if (!hasModeColumn) {
+    console.log('🔄 Adding mode column to chat_sessions...');
+    db.exec("ALTER TABLE chat_sessions ADD COLUMN mode TEXT DEFAULT 'general'");
+    console.log('✅ mode column added');
+  }
+} catch (error) {
+  console.error('Migration error:', error);
+}
+
 // ✅ Add modified_at column if it doesn't exist (migration)
 try {
   const columns = db.prepare("PRAGMA table_info(prompts)").all() as Array<{ name: string }>;
@@ -240,7 +254,45 @@ try {
   console.error('Migration error:', error);
 }
 
+// ==================== PERFORMANCE INDEXES ====================
+db.exec(`
+  -- ✅ Chat Messages - Faster session history loading
+  CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created 
+    ON chat_messages(session_id, created_at DESC);
+  
+  -- ✅ Chat Sessions - Faster recent chats display
+  CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated 
+    ON chat_sessions(updated_at DESC);
+  
+  CREATE INDEX IF NOT EXISTS idx_chat_sessions_mode 
+    ON chat_sessions(mode);
+  
+  -- ✅ Books - Faster "recently read" sorting
+  CREATE INDEX IF NOT EXISTS idx_books_last_read 
+    ON books(last_read DESC);
+  
+  -- ✅ Comments - Faster page-specific comment loading
+  CREATE INDEX IF NOT EXISTS idx_comments_book_page 
+    ON comments(book_id, page_number);
+  
+  -- ✅ Bookmarks - Faster bookmark retrieval
+  CREATE INDEX IF NOT EXISTS idx_bookmarks_book 
+    ON bookmarks(book_id, page_number);
+  
+  -- ✅ Conversation Contexts - Faster context retrieval
+  CREATE INDEX IF NOT EXISTS idx_conversation_contexts_session 
+    ON conversation_contexts(session_id);
+  
+  -- ✅ Documents - Faster status filtering
+  CREATE INDEX IF NOT EXISTS idx_documents_status 
+    ON documents(embedding_status);
+`);
+
+console.log('✅ Performance indexes created');
+
 export const getDb = () => db;
+
+
 
 // ==================== DOCUMENT FUNCTIONS ====================
 

@@ -32,8 +32,21 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [mode, setMode] = useState<'corpus' | 'general'>('corpus');
   const [showSettings, setShowSettings] = useState(false);
-  const [enableMultiHop, setEnableMultiHop] = useState(false); // ✅ NEW: Multi-hop toggle
+  const [enableMultiHop, setEnableMultiHop] = useState(false);
+  
+  // ✅ NEW: Model Selection State
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [usedModel, setUsedModel] = useState<string | null>(null);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const AVAILABLE_MODELS = [
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Best Quality)', tier: 'premium' },
+    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Fast & Smart)', tier: 'premium' },
+    { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', tier: 'standard' },
+    { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', tier: 'standard' }
+  ];
 
   useEffect(() => {
     fetchSessions();
@@ -122,30 +135,30 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
     }
   };
 
-const renameSession = async (sessionId: string) => {
-  const currentSession = sessions.find(s => s.id === sessionId);
-  if (!currentSession) return;
+  const renameSession = async (sessionId: string) => {
+    const currentSession = sessions.find(s => s.id === sessionId);
+    if (!currentSession) return;
 
-  const newName = prompt('Enter new session name:', currentSession.name);
-  if (!newName || newName.trim() === '' || newName === currentSession.name) return;
+    const newName = prompt('Enter new session name:', currentSession.name);
+    if (!newName || newName.trim() === '' || newName === currentSession.name) return;
 
-  try {
-    const res = await fetch('/api/chat/rename-session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId, name: newName.trim() })
-    });
+    try {
+      const res = await fetch('/api/chat/rename-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, name: newName.trim() })
+      });
 
-    if (res.ok) {
-      await fetchSessions();
-    } else {
+      if (res.ok) {
+        await fetchSessions();
+      } else {
+        alert('Failed to rename session');
+      }
+    } catch (error) {
+      console.error('Error renaming session:', error);
       alert('Failed to rename session');
     }
-  } catch (error) {
-    console.error('Error renaming session:', error);
-    alert('Failed to rename session');
-  }
-};
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -169,6 +182,7 @@ const renameSession = async (sessionId: string) => {
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setLoading(true);
+    setModelError(null); // ✅ Clear previous errors
 
     try {
       const endpoint = mode === 'corpus' ? '/api/query' : '/api/chat';
@@ -176,22 +190,41 @@ const renameSession = async (sessionId: string) => {
         ? { 
             query: userMessageContent, 
             documentIds: selectedDocuments,
-            enableMultiHop // ✅ Pass multi-hop setting for corpus mode
+            enableMultiHop,
+            preferredModel: selectedModel // ✅ Pass selected model
           }
         : { 
             message: userMessageContent, 
             sessionId: currentSession,
             documentIds: selectedDocuments.length > 0 ? selectedDocuments : undefined,
-            enableMultiHop // ✅ Pass multi-hop setting for general mode
+            enableMultiHop,
+            preferredModel: selectedModel // ✅ Pass selected model
           };
 
-      console.log('🔄 Sending request:', { endpoint, mode, enableMultiHop, hasDocuments: selectedDocuments.length > 0 });
+      console.log('🔄 Sending request:', { endpoint, mode, enableMultiHop, model: selectedModel, hasDocuments: selectedDocuments.length > 0 });
 
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
+
+      // ✅ Check for model errors
+      if (!res.ok) {
+        const errorText = await res.text();
+        if (errorText.includes('All models failed') || errorText.includes('quota')) {
+          setModelError(errorText);
+          throw new Error(`Model Error: ${errorText}`);
+        }
+        throw new Error(`API error: ${res.status}`);
+      }
+
+      // ✅ Capture which model was actually used
+      const modelUsedHeader = res.headers.get('X-Model-Used');
+      if (modelUsedHeader) {
+        setUsedModel(modelUsedHeader);
+        console.log(`✅ Response generated using: ${modelUsedHeader}`);
+      }
 
       const reader = res.body?.getReader();
       if (!reader) throw new Error('No reader available');
@@ -262,7 +295,7 @@ const renameSession = async (sessionId: string) => {
       setMessages(prev => [...prev, {
         id: crypto.randomUUID(),
         role: 'assistant',
-        content: 'Sorry, an error occurred. Please try again.',
+        content: `Sorry, an error occurred: ${error instanceof Error ? error.message : 'Unknown error'}`,
         timestamp: new Date().toISOString()
       }]);
     } finally {
@@ -305,29 +338,29 @@ const renameSession = async (sessionId: string) => {
                 {new Date(session.updated_at).toLocaleDateString()}
               </p>
               <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      renameSession(session.id);
-                    }}
-                    className="p-1 hover:bg-blue-100 rounded transition-all"
-                    title="Rename session"
-                  >
-                    <Pencil size={14} className="text-blue-600" />
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteSession(session.id);
-                    }}
-                    className="p-1 hover:bg-red-100 rounded transition-all"
-                    title="Delete session"
-                  >
-                    <Trash2 size={14} className="text-red-600" />
-                  </button>
-                </div>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    renameSession(session.id);
+                  }}
+                  className="p-1 hover:bg-blue-100 rounded transition-all"
+                  title="Rename session"
+                >
+                  <Pencil size={14} className="text-blue-600" />
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    deleteSession(session.id);
+                  }}
+                  className="p-1 hover:bg-red-100 rounded transition-all"
+                  title="Delete session"
+                >
+                  <Trash2 size={14} className="text-red-600" />
+                </button>
               </div>
-            ))}
+            </div>
+          ))}
         </div>
       </div>
 
@@ -363,10 +396,11 @@ const renameSession = async (sessionId: string) => {
                 </button>
               </div>
 
-              {/* ✅ NEW: Settings Button */}
               <button
                 onClick={() => setShowSettings(!showSettings)}
-                className={`p-2 rounded-lg transition-colors ${showSettings ? 'bg-emerald-100' : 'hover:bg-slate-100'}`}
+                className={`p-2 rounded-lg transition-colors ${
+                  showSettings ? 'bg-emerald-100 text-emerald-600' : 'hover:bg-slate-100'
+                }`}
                 title="Chat Settings"
               >
                 <Settings size={20} />
@@ -374,9 +408,41 @@ const renameSession = async (sessionId: string) => {
             </div>
           </div>
 
-          {/* ✅ NEW: Settings Panel */}
+          {/* ✅ UPDATED: Settings Panel with Model Selection */}
           {showSettings && (
-            <div className="mb-3 p-3 bg-slate-50 rounded-lg">
+            <div className="mb-3 p-4 bg-slate-50 rounded-lg space-y-4">
+              {/* Model Selection */}
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  AI Model
+                </label>
+                <select
+                  value={selectedModel}
+                  onChange={(e) => {
+                    setSelectedModel(e.target.value);
+                    setModelError(null);
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                >
+                  {AVAILABLE_MODELS.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.name}
+                    </option>
+                  ))}
+                </select>
+                {usedModel && (
+                  <p className="text-xs text-green-600 mt-1">
+                    ✓ Last used: {usedModel}
+                  </p>
+                )}
+                {modelError && (
+                  <p className="text-xs text-red-600 mt-1">
+                    ⚠ {modelError}
+                  </p>
+                )}
+              </div>
+
+              {/* Multi-Hop Reasoning */}
               <div className="flex items-center justify-between">
                 <div>
                   <label className="text-sm font-medium text-slate-700">Multi-Hop Reasoning</label>
@@ -405,7 +471,6 @@ const renameSession = async (sessionId: string) => {
                   : `Searching ${selectedDocuments.length} document${selectedDocuments.length > 1 ? 's' : ''}`
                 }
               </span>
-              {/* ✅ NEW: Multi-hop indicator */}
               {enableMultiHop && selectedDocuments.length > 0 && (
                 <span className="ml-auto text-xs text-blue-600 font-medium">
                   🧠 Multi-hop enabled
@@ -420,7 +485,6 @@ const renameSession = async (sessionId: string) => {
               <span className="text-sm text-blue-800">
                 Using {selectedDocuments.length} document{selectedDocuments.length > 1 ? 's' : ''} as context
               </span>
-              {/* ✅ NEW: Multi-hop indicator */}
               {enableMultiHop && (
                 <span className="ml-auto text-xs text-blue-600 font-medium">
                   🧠 Multi-hop enabled
@@ -452,7 +516,6 @@ const renameSession = async (sessionId: string) => {
                     ⚠️ Please select documents from the corpus library first
                   </p>
                 )}
-                {/* ✅ NEW: Multi-hop info */}
                 {enableMultiHop && selectedDocuments.length > 0 && (
                   <p className="text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded-lg p-3 mt-2">
                     🧠 Multi-hop reasoning is enabled for complex queries
@@ -461,146 +524,146 @@ const renameSession = async (sessionId: string) => {
               </div>
             </div>
           ) : (
-          <div className="space-y-6 max-w-4xl mx-auto">
-            {messages.map((message) => (
-              <div
-                key={message.id}
-                className={`flex gap-4 ${
-                  message.role === 'user' ? 'justify-end' : 'justify-start'
-                }`}
-              >
-                {message.role === 'assistant' && (
+            <div className="space-y-6 max-w-4xl mx-auto">
+              {messages.map((message) => (
+                <div
+                  key={message.id}
+                  className={`flex gap-4 ${
+                    message.role === 'user' ? 'justify-end' : 'justify-start'
+                  }`}
+                >
+                  {message.role === 'assistant' && (
+                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center flex-shrink-0">
+                      <Sparkles className="text-white" size={20} />
+                    </div>
+                  )}
+                  
+                  <div
+                    className={`max-w-3xl rounded-2xl px-6 py-4 ${
+                      message.role === 'user'
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-white border border-slate-200 text-slate-800'
+                    }`}
+                  >
+                    {message.role === 'assistant' ? (
+                      <div className="relative">
+                        <div className="flex justify-end">
+                          <button
+                            className="mb-1 mr-1 p-1 bg-slate-100 rounded hover:bg-slate-200 transition-colors text-xs"
+                            title="Copy response"
+                            onClick={() => {
+                              navigator.clipboard.writeText(message.content);
+                            }}
+                          >
+                            <Copy size={16} className="inline mr-1" />
+                            Copy
+                          </button>
+                        </div>
+                        <div 
+                          className="prose prose-sm max-w-none dark:prose-invert"
+                          dir={message.content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
+                        >
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              h1: ({ node, ...props }) => (
+                                <h1 className="text-xl font-bold mb-3 mt-4 text-slate-900" {...props} />
+                              ),
+                              h2: ({ node, ...props }) => (
+                                <h2 className="text-lg font-bold mb-2 mt-3 text-slate-900" {...props} />
+                              ),
+                              h3: ({ node, ...props }) => (
+                                <h3 className="text-base font-bold mb-2 mt-2 text-slate-800" {...props} />
+                              ),
+                              strong: ({ node, ...props }) => (
+                                <strong className="font-bold text-emerald-700" {...props} />
+                              ),
+                              ul: ({ node, ...props }) => (
+                                <ul className="list-disc mr-6 ml-6 my-2 space-y-1" {...props} />
+                              ),
+                              ol: ({ node, ...props }) => (
+                                <ol className="list-decimal mr-6 ml-6 my-2 space-y-1" {...props} />
+                              ),
+                              li: ({ node, ...props }) => (
+                                <li className="leading-relaxed text-slate-700" {...props} />
+                              ),
+                              blockquote: ({ node, ...props }) => (
+                                <blockquote
+                                  className="border-l-4 border-r-4 border-emerald-300 pl-4 pr-4 italic my-2 text-slate-600 bg-emerald-50 py-2 rounded-r"
+                                  {...props}
+                                />
+                              ),
+                              code: ({ node, inline, ...props }: any) =>
+                                inline ? (
+                                  <code
+                                    className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                                    {...props}
+                                  />
+                                ) : (
+                                  <code
+                                    className="block bg-slate-100 text-slate-800 p-3 rounded my-2 text-sm font-mono overflow-x-auto"
+                                    {...props}
+                                  />
+                                ),
+                              a: ({ node, ...props }) => (
+                                <a
+                                  className="text-emerald-600 hover:text-emerald-800 underline"
+                                  {...props}
+                                />
+                              ),
+                              p: ({ node, ...props }) => (
+                                <p className="mb-2 leading-relaxed text-slate-700" {...props} />
+                              ),
+                              em: ({ node, ...props }) => (
+                                <em className="italic text-slate-600" {...props} />
+                              ),
+                            }}
+                          >
+                            {message.content}
+                          </ReactMarkdown>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="whitespace-pre-wrap leading-relaxed">
+                        {message.content}
+                      </p>
+                    )}
+                    
+                    {message.documentsUsed && message.documentsUsed.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-slate-200">
+                        <p className="text-xs text-slate-500 flex items-center gap-1">
+                          <FileText size={12} />
+                          Referenced {message.documentsUsed.length} document{message.documentsUsed.length > 1 ? 's' : ''}
+                        </p>
+                      </div>
+                    )}
+                    
+                    <p className="text-xs opacity-60 mt-2">
+                      {new Date(message.timestamp).toLocaleTimeString()}
+                    </p>
+                  </div>
+
+                  {message.role === 'user' && (
+                    <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
+                      <span className="text-slate-600 font-semibold text-sm">You</span>
+                    </div>
+                  )}
+                </div>
+              ))}
+              
+              {loading && (
+                <div className="flex gap-4 justify-start">
                   <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center flex-shrink-0">
                     <Sparkles className="text-white" size={20} />
                   </div>
-                )}
-                
-                <div
-                  className={`max-w-3xl rounded-2xl px-6 py-4 ${
-                    message.role === 'user'
-                      ? 'bg-emerald-600 text-white'
-                      : 'bg-white border border-slate-200 text-slate-800'
-                  }`}
-                >
-                  {message.role === 'assistant' ? (
-                    <div className="relative">
-                      <div className="flex justify-end">
-                        <button
-                          className="mb-1 mr-1 p-1 bg-slate-100 rounded hover:bg-slate-200 transition-colors text-xs"
-                          title="Copy response"
-                          onClick={() => {
-                            navigator.clipboard.writeText(message.content);
-                          }}
-                        >
-                          <Copy size={16} className="inline mr-1" />
-                          Copy
-                        </button>
-                      </div>
-                    <div 
-                      className="prose prose-sm max-w-none dark:prose-invert"
-                      dir={message.content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
-                    >
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                          h1: ({ node, ...props }) => (
-                            <h1 className="text-xl font-bold mb-3 mt-4 text-slate-900" {...props} />
-                          ),
-                          h2: ({ node, ...props }) => (
-                            <h2 className="text-lg font-bold mb-2 mt-3 text-slate-900" {...props} />
-                          ),
-                          h3: ({ node, ...props }) => (
-                            <h3 className="text-base font-bold mb-2 mt-2 text-slate-800" {...props} />
-                          ),
-                          strong: ({ node, ...props }) => (
-                            <strong className="font-bold text-emerald-700" {...props} />
-                          ),
-                          ul: ({ node, ...props }) => (
-                            <ul className="list-disc mr-6 ml-6 my-2 space-y-1" {...props} />
-                          ),
-                          ol: ({ node, ...props }) => (
-                            <ol className="list-decimal mr-6 ml-6 my-2 space-y-1" {...props} />
-                          ),
-                          li: ({ node, ...props }) => (
-                            <li className="leading-relaxed text-slate-700" {...props} />
-                          ),
-                          blockquote: ({ node, ...props }) => (
-                            <blockquote
-                              className="border-l-4 border-r-4 border-emerald-300 pl-4 pr-4 italic my-2 text-slate-600 bg-emerald-50 py-2 rounded-r"
-                              {...props}
-                            />
-                          ),
-                          code: ({ node, inline, ...props }: any) =>
-                            inline ? (
-                              <code
-                                className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
-                                {...props}
-                              />
-                            ) : (
-                              <code
-                                className="block bg-slate-100 text-slate-800 p-3 rounded my-2 text-sm font-mono overflow-x-auto"
-                                {...props}
-                              />
-                            ),
-                          a: ({ node, ...props }) => (
-                            <a
-                              className="text-emerald-600 hover:text-emerald-800 underline"
-                              {...props}
-                            />
-                          ),
-                          p: ({ node, ...props }) => (
-                            <p className="mb-2 leading-relaxed text-slate-700" {...props} />
-                          ),
-                          em: ({ node, ...props }) => (
-                            <em className="italic text-slate-600" {...props} />
-                          ),
-                        }}
-                      >
-                        {message.content}
-                      </ReactMarkdown>
-                    </div>
+                  <div className="bg-white border border-slate-200 rounded-2xl px-6 py-4">
+                    <Loader2 className="animate-spin text-emerald-600" size={20} />
                   </div>
-                  ) : (
-                    <p className="whitespace-pre-wrap leading-relaxed">
-                      {message.content}
-                    </p>
-                  )}
-                  
-                  {message.documentsUsed && message.documentsUsed.length > 0 && (
-                    <div className="mt-3 pt-3 border-t border-slate-200">
-                      <p className="text-xs text-slate-500 flex items-center gap-1">
-                        <FileText size={12} />
-                        Referenced {message.documentsUsed.length} document{message.documentsUsed.length > 1 ? 's' : ''}
-                      </p>
-                    </div>
-                  )}
-                  
-                  <p className="text-xs opacity-60 mt-2">
-                    {new Date(message.timestamp).toLocaleTimeString()}
-                  </p>
                 </div>
-
-                {message.role === 'user' && (
-                  <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
-                    <span className="text-slate-600 font-semibold text-sm">You</span>
-                  </div>
-                )}
-              </div>
-            ))}
-            
-            {loading && (
-              <div className="flex gap-4 justify-start">
-                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center flex-shrink-0">
-                  <Sparkles className="text-white" size={20} />
-                </div>
-                <div className="bg-white border border-slate-200 rounded-2xl px-6 py-4">
-                  <Loader2 className="animate-spin text-emerald-600" size={20} />
-                </div>
-              </div>
-            )}
-            
-            <div ref={messagesEndRef} />
-          </div>
+              )}
+              
+              <div ref={messagesEndRef} />
+            </div>
           )}
         </div>
 

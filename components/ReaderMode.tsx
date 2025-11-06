@@ -93,6 +93,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [showBookmarks, setShowBookmarks] = useState(false);
 
   // Comments State
+  const [isAddingComment, setIsAddingComment] = useState(false);
   const [comments, setComments] = useState<Array<{
     id: string;
     page_number: number;
@@ -381,16 +382,27 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
   // Save reading position
   useEffect(() => {
-    if (!selectedBook?.id || currentPage <= 0 || currentPage === selectedBook.current_page) {
-      return;
-    }
-    
-    const timeoutId = setTimeout(() => {
-      updateReadingPosition(selectedBook.id, currentPage);
-    }, 1000);
-    
-    return () => clearTimeout(timeoutId);
-  }, [currentPage, selectedBook?.id, selectedBook?.current_page]);
+  if (!selectedBook?.id || currentPage <= 0) {
+    return;
+  }
+  
+  // ✅ Save immediately without debounce
+  updateReadingPosition(selectedBook.id, currentPage);
+  
+  // ✅ Update local book state immediately
+  setBooks(prevBooks => 
+    prevBooks.map(book => 
+      book.id === selectedBook.id 
+        ? { ...book, current_page: currentPage }
+        : book
+    )
+  );
+  
+  // ✅ Update selected book state
+  setSelectedBook(prev => 
+    prev ? { ...prev, current_page: currentPage } : null
+  );
+}, [currentPage, selectedBook?.id]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -799,54 +811,83 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   }
 
   async function updateReadingPosition(bookId: string, page: number) {
-    try {
-      await fetch('/api/books/reading-position', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bookId, currentPage: page }),
-      });
-    } catch (error) {
-      console.error('Error updating reading position:', error);
-    }
+  try {
+    await fetch('/api/books/reading-position', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bookId, currentPage: page }),
+    });
+    console.log(`✅ Saved reading position: Page ${page}`);
+  } catch (error) {
+    console.error('Error updating reading position:', error);
   }
+}
 
-  async function extractPageText() {
-    if (!selectedBook) return;
+async function extractPageText() {
+  if (!selectedBook) return;
 
-    setExtracting(true);
-    setShowTextPopup(true);
-    setExtractedText('🔄 Extracting text from page...\n\nApplying AI corrections for best accuracy.');
-    setExtractionCorrected(false);
+  setExtracting(true);
+  setShowTextPopup(true);
+  setExtractedText('🔄 Extracting text from page...\n\nApplying AI corrections for best accuracy.');
+  setExtractionCorrected(false);
 
-    try {
-      const res = await fetch('/api/books/extract-page', {
+  try {
+    // ✅ STEP 1: Extract raw text from page
+    const extractRes = await fetch('/api/books/extract-page', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bookId: selectedBook.id,
+        pageNumber: currentPage,
+        enableAiCorrection: false, // ✅ Get raw text first
+      }),
+    });
+
+    const extractData = await extractRes.json();
+    
+    if (!extractData.success) {
+      setExtractedText('❌ Failed to extract text from this page.');
+      return;
+    }
+
+    const rawText = extractData.text;
+    const isArabic = extractData.language === 'ar';
+
+    // ✅ STEP 2: Apply AI correction using fix-spelling endpoint
+    if (rawText && rawText.length > 20) {
+      const fixRes = await fetch('/api/fix-spelling', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          bookId: selectedBook.id,
-          pageNumber: currentPage,
-          enableAiCorrection: true,
+        body: JSON.stringify({ 
+          text: rawText, 
+          useAI: true,
+          language: isArabic ? 'ar' : 'en'
         }),
       });
 
-      const data = await res.json();
-      if (data.success) {
-        setExtractedText(data.text);
-        setExtractionCorrected(data.corrected || false);
-        
-        if (data.corrected) {
-          console.log('✨ Corrections applied (AI)');
+      if (fixRes.ok) {
+        const fixData = await fixRes.json();
+        if (fixData.success) {
+          setExtractedText(fixData.fixed);
+          setExtractionCorrected(fixData.changed || false);
+          console.log('✨ AI correction applied via fix-spelling endpoint');
+        } else {
+          setExtractedText(rawText);
         }
       } else {
-        setExtractedText('❌ Failed to extract text from this page.');
+        setExtractedText(rawText);
       }
-    } catch (error) {
-      console.error('Extraction error:', error);
-      setExtractedText('❌ Error extracting text. Please try again.');
-    } finally {
-      setExtracting(false);
+    } else {
+      setExtractedText(rawText);
     }
+
+  } catch (error) {
+    console.error('Extraction error:', error);
+    setExtractedText('❌ Error extracting text. Please try again.');
+  } finally {
+    setExtracting(false);
   }
+}
 
   async function sendChatMessage(userMessage: string) {
     if (!userMessage.trim() || !selectedBook) return;
@@ -1107,29 +1148,33 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   }
 
   async function addComment() {
-    if (!selectedBook || !commentDraft.trim()) return;
+  if (!selectedBook || !commentDraft.trim()) return;
 
-    try {
-      await fetch('/api/comments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          bookId: selectedBook.id,
-          pageNumber: currentPage,
-          selectedText: selectedTextForComment || null,
-          comment: commentDraft,
-        }),
-      });
-      
-      setCommentDraft('');
-      setShowCommentDialog(false);
-      setSelectedTextForComment('');
-      await loadComments();
-    } catch (error) {
-      console.error('Error adding comment:', error);
-      alert('Failed to add comment');
-    }
+  setIsAddingComment(true);
+
+  try {
+    await fetch('/api/comments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bookId: selectedBook.id,
+        pageNumber: currentPage,
+        selectedText: selectedTextForComment || null, // Already corrected
+        comment: commentDraft,
+      }),
+    });
+    
+    setCommentDraft('');
+    setShowCommentDialog(false);
+    setSelectedTextForComment('');
+    await loadComments();
+  } catch (error) {
+    console.error('Error adding comment:', error);
+    alert('Failed to add comment');
+  } finally {
+    setIsAddingComment(false);
   }
+}
 
   async function deleteComment(commentId: string) {
     if (!confirm('Delete this comment?')) return;
@@ -1768,7 +1813,11 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setShowChatSettings(!showChatSettings)}
-                  className="p-2 hover:bg-white rounded-lg transition-colors"
+                  className={`p-2 rounded-lg transition-colors ${
+                    showChatSettings 
+                      ? 'bg-blue-100 text-blue-600'  
+                      : 'hover:bg-white'
+                  }`}
                   title="Settings"
                 >
                   <Settings size={18} />
@@ -2146,8 +2195,30 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
                   >
                     {comment.selected_text && (
                       <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs italic text-slate-700">
-                        &quot;{comment.selected_text.substring(0, 100)}
-                        {comment.selected_text.length > 100 ? '...' : ''}&quot;
+                        {expandedCommentId === comment.id ? (
+                          <>
+                            <p className="whitespace-pre-wrap">&quot;{comment.selected_text}&quot;</p>
+                            <button
+                              onClick={() => setExpandedCommentId(null)}
+                              className="text-blue-600 hover:underline mt-1 text-xs"
+                            >
+                              Show less
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <p>&quot;{comment.selected_text.substring(0, 100)}
+                            {comment.selected_text.length > 100 ? '...' : ''}&quot;</p>
+                            {comment.selected_text.length > 100 && (
+                              <button
+                                onClick={() => setExpandedCommentId(comment.id)}
+                                className="text-blue-600 hover:underline mt-1 text-xs"
+                              >
+                                Read more
+                              </button>
+                            )}
+                          </>
+                        )}
                       </div>
                     )}
                     <p className="text-sm text-slate-800 whitespace-pre-wrap">
@@ -2170,7 +2241,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
           )}
         </>
       )}
-
       {/* ✅ ALL COMMENTS VIEW */}
       {commentView === 'all' && (
         <>
@@ -2304,10 +2374,17 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
         </button>
         <button
           onClick={addComment}
-          disabled={!commentDraft.trim()}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+          disabled={!commentDraft.trim() || isAddingComment}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
         >
-          Add Comment
+          {isAddingComment ? (
+            <>
+              <Loader2 className="animate-spin" size={16} />
+              Processing...
+            </>
+          ) : (
+            'Add Comment'
+          )}
         </button>
       </div>
     </div>
@@ -2412,14 +2489,59 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
       {/* Add Comment Button */}
       <button
-        onClick={() => {
+        onClick={async () => {
+          let textToUse = selectedTextForCitation;
+          
+          // ✅ FIX: Correct Arabic text BEFORE opening dialog
+          if (textToUse && textToUse.length > 20) {
+            const isArabic = /[\u0600-\u06FF]/.test(textToUse);
+            
+            if (isArabic) {
+              setIsFixingSpelling(true);
+              try {
+                const fixRes = await fetch('/api/fix-spelling', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ 
+                    text: textToUse, 
+                    useAI: true,
+                    language: 'ar'
+                  }),
+                });
+
+                if (fixRes.ok) {
+                  const fixData = await fixRes.json();
+                  if (fixData.success && fixData.fixed) {
+                    textToUse = fixData.fixed;
+                    console.log('✅ Arabic text corrected before comment dialog');
+                  }
+                }
+              } catch (error) {
+                console.warn('Failed to correct text, using original:', error);
+              } finally {
+                setIsFixingSpelling(false);
+              }
+            }
+          }
+          
+          setSelectedTextForComment(textToUse);
           setShowCommentDialog(true);
           setShowCitationMenu(false);
         }}
-        className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-sm"
+        disabled={isFixingSpelling}
+        className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 text-sm"
       >
-        <MessageSquare size={16} />
-        Add Comment
+        {isFixingSpelling ? (
+          <>
+            <Loader2 className="animate-spin" size={16} />
+            Correcting...
+          </>
+        ) : (
+          <>
+            <MessageSquare size={16} />
+            Add Comment
+          </>
+        )}
       </button>
     </div>
   </div>

@@ -227,186 +227,52 @@ export default function HistoryPanel() {
     }
   };
 
-  const exportAsPDF = () => {
+  // Lines 230-255 - Replace the exportAsPDF function
+
+const exportAsPDF = async () => {
   if (!selectedSession || messages.length === 0) return;
 
   const session = sessions.find(s => s.id === selectedSession);
 
-  const doc = new jsPDF({
-    orientation: 'portrait',
-    unit: 'pt',
-    format: 'a4',
-  });
-
-  doc.setFont('Amiri');
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
-  const leftMargin = 60;
-  const rightMargin = pageWidth - 60;
-  const maxWidth = pageWidth - 120; // Total width for text
-  let y = 40;
-
-  // Helper to check if text is Arabic
-  const isArabicText = (text: string) => /[\u0600-\u06FF]/.test(text);
-
-  // Helper to split text into lines that fit within maxWidth
-  const splitTextToLines = (text: string, fontSize: number, isArabic: boolean) => {
-    doc.setFontSize(fontSize);
-    const words = text.split(' ');
-    const lines: string[] = [];
-    let currentLine = '';
-
-    for (let i = 0; i < words.length; i++) {
-      const word = words[i];
-      const testLine = currentLine ? currentLine + ' ' + word : word;
-      const width = doc.getTextWidth(testLine);
-
-      if (width > maxWidth && currentLine) {
-        lines.push(currentLine);
-        currentLine = word;
-      } else {
-        currentLine = testLine;
-      }
-    }
-
-    if (currentLine) {
-      lines.push(currentLine);
-    }
-
-    return lines;
-  };
-
-  // Helper to add new page if needed
-  const checkPageBreak = (requiredSpace: number) => {
-    if (y + requiredSpace > pageHeight - 40) {
-      doc.addPage();
-      doc.setFont('Amiri');
-      y = 40;
-      return true;
-    }
-    return false;
-  };
-
-  // Header
-  doc.setFontSize(18);
-  doc.text(session?.name || 'Chat Session', rightMargin, y, { align: 'right' });
-  y += 30;
-
-  doc.setFontSize(12);
-  doc.text(`Mode: ${session?.mode || ''}`, rightMargin, y, { align: 'right' });
-  y += 20;
-  
-  if (session?.book_title) {
-    doc.text(`Book: ${session.book_title}`, rightMargin, y, { align: 'right' });
-    y += 20;
-  }
-  
-  doc.text(`Created: ${new Date(session?.created_at || '').toLocaleString()}`, rightMargin, y, { align: 'right' });
-  y += 20;
-  doc.text(`Last Updated: ${new Date(session?.updated_at || '').toLocaleString()}`, rightMargin, y, { align: 'right' });
-  y += 20;
-  doc.text(`Messages: ${messages.length}`, rightMargin, y, { align: 'right' });
-  y += 30;
-
-  // Process each message
-  messages.forEach((msg, idx) => {
-    checkPageBreak(60);
-
-    // Role label
-    doc.setFontSize(13);
-    if (msg.role === 'user') {
-      doc.setTextColor(30, 136, 229);
-    } else {
-      doc.setTextColor(0, 150, 136);
-    }
-    const label = msg.role === 'user' ? '👤 User:' : '🤖 Assistant:';
-    doc.text(label, leftMargin, y);
-    y += 18;
-
-    // Message content
-    doc.setFontSize(11);
-    doc.setTextColor(34, 34, 34);
-
-    // Split content into paragraphs
-    const paragraphs = msg.content.split('\n');
-
-    paragraphs.forEach((paragraph) => {
-      if (!paragraph.trim()) {
-        y += 10;
-        return;
-      }
-
-      // Remove markdown formatting
-      let cleanText = paragraph
-        .replace(/\*\*(.*?)\*\*/g, '$1')
-        .replace(/\*(.*?)\*/g, '$1')
-        .replace(/`(.*?)`/g, '$1');
-
-      // Handle bullet points
-      const isBullet = /^\s*[-*•]\s+/.test(cleanText);
-      if (isBullet) {
-        cleanText = '• ' + cleanText.replace(/^\s*[-*•]\s+/, '');
-      }
-
-      // Detect if paragraph is primarily Arabic
-      const isArabic = isArabicText(cleanText);
-      const align = isArabic ? 'right' : 'left';
-      const x = isArabic ? rightMargin : leftMargin;
-
-      // Split into lines that fit
-      const lines = splitTextToLines(cleanText, 11, isArabic);
-
-      lines.forEach((line) => {
-        checkPageBreak(16);
-        doc.text(line, x, y, { align, maxWidth });
-        y += 14;
-      });
-
-      y += 4; // Extra space between paragraphs
+  try {
+    const res = await fetch('/api/export/pdf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionName: session?.name,
+        bookTitle: session?.book_title,
+        mode: session?.mode,
+        messages: messages.map(msg => ({
+          role: msg.role,
+          content: msg.content,
+          created_at: msg.created_at,
+          book_page: msg.book_page,
+          document_names: msg.document_names,
+          custom_prompt_name: msg.custom_prompt_name,
+        })),
+      }),
     });
 
-    // Page number (if from reader mode)
-    if (msg.book_page) {
-      checkPageBreak(16);
-      doc.setFontSize(10);
-      doc.setTextColor(109, 40, 217);
-      doc.text(`Page: ${msg.book_page}`, rightMargin, y, { align: 'right' });
-      y += 14;
+    if (!res.ok) {
+      throw new Error('Export failed');
     }
 
-    // Documents used
-    if (msg.document_names) {
-      try {
-        const docNames = JSON.parse(msg.document_names);
-        if (docNames.length > 0) {
-          checkPageBreak(16);
-          doc.setFontSize(10);
-          doc.setTextColor(225, 29, 72);
-          doc.text(`Documents Used: ${docNames.join(', ')}`, rightMargin, y, { 
-            align: 'right',
-            maxWidth: maxWidth 
-          });
-          y += 14;
-        }
-      } catch {}
-    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${session?.name.replace(/[^a-z0-9]/gi, '_')}_${new Date().toISOString().split('T')[0]}.pdf`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
 
-    // Timestamp
-    checkPageBreak(16);
-    doc.setFontSize(9);
-    doc.setTextColor(136, 136, 136);
-    doc.text(new Date(msg.created_at).toLocaleString(), rightMargin, y, { align: 'right' });
-    y += 20;
-
-    // Separator line
-    checkPageBreak(12);
-    doc.setDrawColor(200, 200, 200);
-    doc.line(leftMargin, y, rightMargin, y);
-    y += 10;
-  });
-
-  doc.save(`${session?.name.replace(/[^a-z0-9]/gi, '_')}_${new Date().toISOString().split('T')[0]}.pdf`);
-  setShowExportMenu(false);
+    setShowExportMenu(false);
+    console.log('✅ PDF exported successfully');
+  } catch (error) {
+    console.error('PDF export error:', error);
+    alert('Failed to export PDF. Please try again.');
+  }
 };
 
   // ✅ NEW: Export as JSON
