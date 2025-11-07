@@ -1,46 +1,51 @@
-# dependencies
+# Dependencies
 /node_modules
 /.pnp
 .pnp.js
 
-# testing
+# Testing
 /coverage
 
-# next.js
+# Next.js
 /.next/
 /out/
 
-# production
+# Production
 /build
+/dist
 
-# misc
+# Misc
 .DS_Store
 *.pem
 
-# debug
+# Debug
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.pnpm-debug.log*
 
-# local env files
-.env*.local
+# Local env files
+.env
 .env.local
+.env*.local
 .env.development.local
 .env.test.local
 .env.production.local
 
-# vercel
+# Vercel
 .vercel
 
-# typescript
+# TypeScript
 *.tsbuildinfo
 next-env.d.ts
 
-# ✅ IMPORTANT: Don't commit sensitive data
-.env
-.env.local
+# Type declarations (auto-generated)
+*.d.ts
+!src/**/*.d.ts
+!types/**/*.d.ts
+!global.d.ts
 
-# ✅ Don't commit local database (it's user-specific)
+# Database (SQLite - user-specific)
 /data/
 data.db
 data.db-shm
@@ -49,23 +54,48 @@ data.db-wal
 *.db-shm
 *.db-wal
 
-# ✅ Don't commit backups
+# Backups
 /data/backups/
+/backups/
+
+# Uploads (PDFs and documents)
+/uploads/
+/public/uploads/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*.swn
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Logs
 *.log
 logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # Temporary files
 .tmp/
 temp/
+*.tmp
+
+# Python (if using any Python tools)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+
+# Railway
+.railway/
+
+# Supabase (local)
+.supabase/
