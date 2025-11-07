@@ -14,7 +14,7 @@ export async function POST(request: NextRequest) {
 
     const prompt = `Generate a short, descriptive title (max 5 words) for a chat that starts with this message: "${firstMessage}". Only return the title, nothing else.`;
 
-    const stream = await generateResponse(prompt);
+    const { stream } = await generateResponse(prompt);
     let title = '';
 
     for await (const chunk of stream) {

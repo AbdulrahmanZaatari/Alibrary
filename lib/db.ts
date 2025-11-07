@@ -3,15 +3,39 @@ import path from 'path';
 import fs from 'fs';
 import { DEFAULT_PROMPTS } from './defaultPrompts';
 
-const dbDir = path.join(process.cwd(), 'data');
+// ✅ Use persistent volume path on Railway, local path in development
+const getDbPath = () => {
+  if (process.env.RAILWAY_ENVIRONMENT) {
+    // Production on Railway - use persistent volume
+    const dbPath = path.join('/data', 'data.db');
+    console.log('🚂 Railway environment detected');
+    console.log('📁 Database path:', dbPath);
+    return dbPath;
+  } else {
+    // Local development
+    const dbDir = path.join(process.cwd(), 'data');
+    if (!fs.existsSync(dbDir)) {
+      fs.mkdirSync(dbDir, { recursive: true });
+    }
+    const dbPath = path.join(dbDir, 'data.db');
+    console.log('💻 Local environment detected');
+    console.log('📁 Database path:', dbPath);
+    return dbPath;
+  }
+};
+
+// ✅ Ensure database directory exists
+const dbPath = getDbPath();
+const dbDir = path.dirname(dbPath);
 if (!fs.existsSync(dbDir)) {
+  console.log('📂 Creating database directory:', dbDir);
   fs.mkdirSync(dbDir, { recursive: true });
 }
 
-const dbPath = path.join(dbDir, 'data.db');
 const db = new Database(dbPath);
-
 db.pragma('journal_mode = WAL');
+
+console.log('✅ Database initialized at:', dbPath);
 
 // Initialize schema
 db.exec(`
@@ -23,12 +47,16 @@ db.exec(`
     page_count INTEGER NOT NULL,
     current_page INTEGER DEFAULT 1,
     supabase_path TEXT NOT NULL,
+    author TEXT,
+    publisher TEXT,
+    year TEXT,
+    isbn TEXT,
+    edition TEXT,
+    language TEXT DEFAULT 'Arabic',
     uploaded_at TEXT DEFAULT (datetime('now')),
     last_read TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
   );
-
-  
 
   CREATE TABLE IF NOT EXISTS bookmarks (
     id TEXT PRIMARY KEY,
@@ -69,6 +97,7 @@ db.exec(`
     name TEXT NOT NULL,
     book_id TEXT,
     book_title TEXT,
+    mode TEXT DEFAULT 'general',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
@@ -160,10 +189,18 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_global_memory_topic ON global_memory(topic);
   CREATE INDEX IF NOT EXISTS idx_comments_book ON comments(book_id);
   CREATE INDEX IF NOT EXISTS idx_comments_page ON comments(book_id, page_number);
+  CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created ON chat_messages(session_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_chat_sessions_mode ON chat_sessions(mode);
+  CREATE INDEX IF NOT EXISTS idx_books_last_read ON books(last_read DESC);
+  CREATE INDEX IF NOT EXISTS idx_comments_book_page ON comments(book_id, page_number);
+  CREATE INDEX IF NOT EXISTS idx_bookmarks_book ON bookmarks(book_id, page_number);
+  CREATE INDEX IF NOT EXISTS idx_conversation_contexts_session ON conversation_contexts(session_id);
+  CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(embedding_status);
 `);
 
+// ✅ Add 'mode' column migration
 try {
-  // ✅ Add 'mode' column to chat_sessions if it doesn't exist
   const chatSessionColumns = db.prepare("PRAGMA table_info(chat_sessions)").all() as Array<{ name: string }>;
   const hasModeColumn = chatSessionColumns.some(col => col.name === 'mode');
   
@@ -176,7 +213,7 @@ try {
   console.error('Migration error:', error);
 }
 
-// ✅ Add modified_at column if it doesn't exist (migration)
+// ✅ Add modified_at column migration
 try {
   const columns = db.prepare("PRAGMA table_info(prompts)").all() as Array<{ name: string }>;
   const hasModifiedAt = columns.some(col => col.name === 'modified_at');
@@ -190,9 +227,7 @@ try {
   console.error('Migration error:', error);
 }
 
-// ✅ SMART PROMPT SYNC: Only update prompts that user hasn't modified
-console.log('🔄 Syncing default prompts...');
-
+// ✅ Add book metadata columns migration
 try {
   const bookColumns = db.prepare("PRAGMA table_info(books)").all() as Array<{ name: string }>;
   
@@ -209,6 +244,9 @@ try {
 } catch (error) {
   console.error('Books metadata migration error:', error);
 }
+
+// ✅ Sync default prompts
+console.log('🔄 Syncing default prompts...');
 
 const upsertPrompt = db.prepare(`
   INSERT INTO prompts (id, name, template, category, is_custom, created_at, modified_at)
@@ -240,7 +278,7 @@ syncTransaction(DEFAULT_PROMPTS);
 const promptCount = db.prepare('SELECT COUNT(*) as count FROM prompts').get() as { count: number };
 console.log(`✅ Prompt sync complete: ${promptCount.count} total prompts`);
 
-// ✅ Ensure custom_prompt_name column exists
+// ✅ Add custom_prompt_name column migration
 try {
   const columns = db.prepare("PRAGMA table_info(chat_messages)").all() as Array<{ name: string }>;
   const hasCustomPromptName = columns.some(col => col.name === 'custom_prompt_name');
@@ -254,45 +292,7 @@ try {
   console.error('Migration error:', error);
 }
 
-// ==================== PERFORMANCE INDEXES ====================
-db.exec(`
-  -- ✅ Chat Messages - Faster session history loading
-  CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created 
-    ON chat_messages(session_id, created_at DESC);
-  
-  -- ✅ Chat Sessions - Faster recent chats display
-  CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated 
-    ON chat_sessions(updated_at DESC);
-  
-  CREATE INDEX IF NOT EXISTS idx_chat_sessions_mode 
-    ON chat_sessions(mode);
-  
-  -- ✅ Books - Faster "recently read" sorting
-  CREATE INDEX IF NOT EXISTS idx_books_last_read 
-    ON books(last_read DESC);
-  
-  -- ✅ Comments - Faster page-specific comment loading
-  CREATE INDEX IF NOT EXISTS idx_comments_book_page 
-    ON comments(book_id, page_number);
-  
-  -- ✅ Bookmarks - Faster bookmark retrieval
-  CREATE INDEX IF NOT EXISTS idx_bookmarks_book 
-    ON bookmarks(book_id, page_number);
-  
-  -- ✅ Conversation Contexts - Faster context retrieval
-  CREATE INDEX IF NOT EXISTS idx_conversation_contexts_session 
-    ON conversation_contexts(session_id);
-  
-  -- ✅ Documents - Faster status filtering
-  CREATE INDEX IF NOT EXISTS idx_documents_status 
-    ON documents(embedding_status);
-`);
-
-console.log('✅ Performance indexes created');
-
 export const getDb = () => db;
-
-
 
 // ==================== DOCUMENT FUNCTIONS ====================
 
@@ -412,6 +412,56 @@ export const updateBookReadingPosition = (id: string, currentPage: number) => {
   return stmt.run(currentPage, id);
 };
 
+export const updateBookMetadata = (id: string, metadata: {
+  title?: string;
+  author?: string;
+  publisher?: string;
+  year?: string;
+  isbn?: string;
+  edition?: string;
+  language?: string;
+}) => {
+  const fields = [];
+  const values = [];
+  
+  if (metadata.title !== undefined) {
+    fields.push('title = ?');
+    values.push(metadata.title);
+  }
+  if (metadata.author !== undefined) {
+    fields.push('author = ?');
+    values.push(metadata.author);
+  }
+  if (metadata.publisher !== undefined) {
+    fields.push('publisher = ?');
+    values.push(metadata.publisher);
+  }
+  if (metadata.year !== undefined) {
+    fields.push('year = ?');
+    values.push(metadata.year);
+  }
+  if (metadata.isbn !== undefined) {
+    fields.push('isbn = ?');
+    values.push(metadata.isbn);
+  }
+  if (metadata.edition !== undefined) {
+    fields.push('edition = ?');
+    values.push(metadata.edition);
+  }
+  if (metadata.language !== undefined) {
+    fields.push('language = ?');
+    values.push(metadata.language);
+  }
+  
+  if (fields.length === 0) return;
+  
+  fields.push("updated_at = datetime('now')");
+  values.push(id);
+  
+  const stmt = db.prepare(`UPDATE books SET ${fields.join(', ')} WHERE id = ?`);
+  return stmt.run(...values);
+};
+
 export const deleteBook = (id: string) => {
   const stmt = db.prepare('DELETE FROM books WHERE id = ?');
   return stmt.run(id);
@@ -472,33 +522,36 @@ export const updatePrompt = (id: string, updates: {
   
   if (fields.length === 0) return;
   
-  // ✅ Always set modified_at when user edits
   fields.push("modified_at = datetime('now')");
-  
   values.push(id);
+  
   const stmt = db.prepare(`UPDATE prompts SET ${fields.join(', ')} WHERE id = ?`);
   return stmt.run(...values);
 };
 
 export const deletePrompt = (id: string) => {
-  // ✅ Allow deleting ANY prompt (system or custom)
   const stmt = db.prepare('DELETE FROM prompts WHERE id = ?');
   return stmt.run(id);
 };
 
 // ==================== CHAT HISTORY FUNCTIONS ====================
 
-export const createChatSession = (id: string, name?: string) => {
+export const createChatSession = (id: string, name?: string, mode?: string, bookId?: string, bookTitle?: string) => {
   const stmt = db.prepare(`
-    INSERT INTO chat_sessions (id, name, created_at, updated_at)
-    VALUES (?, ?, datetime('now'), datetime('now'))
+    INSERT INTO chat_sessions (id, name, mode, book_id, book_title, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
   `);
-  return stmt.run(id, name || 'New Chat');
+  return stmt.run(id, name || 'New Chat', mode || 'general', bookId || null, bookTitle || null);
 };
 
-export const getChatSessions = () => {
-  const stmt = db.prepare('SELECT * FROM chat_sessions ORDER BY updated_at DESC');
-  return stmt.all();
+export const getChatSessions = (mode?: string) => {
+  if (mode) {
+    const stmt = db.prepare('SELECT * FROM chat_sessions WHERE mode = ? ORDER BY updated_at DESC');
+    return stmt.all(mode);
+  } else {
+    const stmt = db.prepare('SELECT * FROM chat_sessions ORDER BY updated_at DESC');
+    return stmt.all();
+  }
 };
 
 export const renameChatSession = (id: string, name: string) => {
@@ -798,9 +851,14 @@ export const addComment = (comment: {
   );
 };
 
-export const getComments = (bookId: string) => {
-  const stmt = db.prepare('SELECT * FROM comments WHERE book_id = ? ORDER BY page_number ASC, created_at DESC');
-  return stmt.all(bookId);
+export const getComments = (bookId: string, pageNumber?: number) => {
+  if (pageNumber !== undefined) {
+    const stmt = db.prepare('SELECT * FROM comments WHERE book_id = ? AND page_number = ? ORDER BY created_at DESC');
+    return stmt.all(bookId, pageNumber);
+  } else {
+    const stmt = db.prepare('SELECT * FROM comments WHERE book_id = ? ORDER BY page_number ASC, created_at DESC');
+    return stmt.all(bookId);
+  }
 };
 
 export const deleteComment = (id: string) => {
@@ -808,13 +866,18 @@ export const deleteComment = (id: string) => {
   return stmt.run(id);
 };
 
+export const updateComment = (id: string, comment: string) => {
+  const stmt = db.prepare('UPDATE comments SET comment = ? WHERE id = ?');
+  return stmt.run(comment, id);
+};
+
 // ==================== READER MODE CHAT FUNCTIONS ====================
 
 export const createReaderChatSession = (bookId: string, bookTitle: string) => {
   const id = `reader-${bookId}-${Date.now()}`;
   const stmt = db.prepare(`
-    INSERT INTO chat_sessions (id, name, book_id, book_title, created_at, updated_at)
-    VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+    INSERT INTO chat_sessions (id, name, book_id, book_title, mode, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'reader', datetime('now'), datetime('now'))
   `);
   stmt.run(id, `Chat: ${bookTitle}`, bookId, bookTitle);
   return id;

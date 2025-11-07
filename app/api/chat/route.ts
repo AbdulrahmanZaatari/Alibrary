@@ -2,7 +2,6 @@ import { NextRequest } from 'next/server';
 import { generateResponse } from '@/lib/gemini';
 import { 
   getDb, 
-  getChatMessages, 
   addChatMessage, 
   updateChatSessionTimestamp,
   trackConversationContext,
