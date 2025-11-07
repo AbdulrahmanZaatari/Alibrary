@@ -115,7 +115,7 @@ ${query}
 
       console.log('🤖 Querying Gemini...');
 
-      const geminiStream = await generateResponse(prompt);
+      const { stream: geminiStream } = await generateResponse(prompt);
 
       for await (const chunk of geminiStream) {
         const text = chunk.text();
