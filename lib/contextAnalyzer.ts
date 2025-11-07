@@ -77,7 +77,7 @@ Respond ONLY in JSON format:
 
   try {
     let responseText = '';
-    const stream = await generateResponse(prompt);
+    const { stream } = await generateResponse(prompt);
     
     for await (const chunk of stream) {
       const text = chunk.text();
@@ -160,7 +160,7 @@ Respond ONLY in JSON format:
 
   try {
     let responseText = '';
-    const stream = await generateResponse(prompt);
+    const { stream } = await generateResponse(prompt);
     
     for await (const chunk of stream) {
       const text = chunk.text();
