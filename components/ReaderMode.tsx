@@ -2176,7 +2176,8 @@ async function extractPageText() {
     </div>
 
     <div className="flex-1 overflow-y-auto p-4">
-      {/* ✅ CURRENT PAGE VIEW */}
+      
+{/* ✅ IMPROVED: Current Page Comments */}
       {commentView === 'current' && (
         <>
           {comments.filter(c => c.page_number === currentPage).length === 0 ? (
@@ -2191,46 +2192,84 @@ async function extractPageText() {
                 .map((comment) => (
                   <div
                     key={comment.id}
-                    className="p-3 bg-slate-50 rounded-lg border border-slate-200"
+                    className="p-3 bg-slate-50 rounded-lg border border-slate-200 dark:bg-slate-800 dark:border-slate-700"
                   >
+                    {/* ✅ Selected Text - Smart Truncation */}
                     {comment.selected_text && (
-                      <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs italic text-slate-700">
-                        {expandedCommentId === comment.id ? (
-                          <>
-                            <p className="whitespace-pre-wrap">&quot;{comment.selected_text}&quot;</p>
+                      <div className="mb-2 p-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded text-xs">
+                        <p className="text-slate-600 dark:text-slate-400 font-medium mb-1">
+                          Selected text:
+                        </p>
+                        <div className="italic text-slate-700 dark:text-slate-300">
+                          {expandedCommentId === comment.id ? (
+                            // ✅ Expanded view with max height
+                            <div className="max-h-64 overflow-y-auto">
+                              <p className="whitespace-pre-wrap">&quot;{comment.selected_text}&quot;</p>
+                              <button
+                                onClick={() => setExpandedCommentId(null)}
+                                className="text-blue-600 hover:underline mt-2 text-xs font-medium"
+                              >
+                                Show less
+                              </button>
+                            </div>
+                          ) : (
+                            // ✅ Collapsed view - always truncated at 150 chars
+                            <>
+                              <p className="line-clamp-3">
+                                &quot;{comment.selected_text.substring(0, 150)}
+                                {comment.selected_text.length > 150 ? '...' : ''}&quot;
+                              </p>
+                              {comment.selected_text.length > 150 && (
+                                <button
+                                  onClick={() => setExpandedCommentId(comment.id)}
+                                  className="text-blue-600 hover:underline mt-1 text-xs font-medium"
+                                >
+                                  Read more ({comment.selected_text.length} chars)
+                                </button>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* ✅ Comment Text - Also truncated */}
+                    <div className="text-sm text-slate-800 dark:text-slate-200">
+                      {comment.comment.length > 200 ? (
+                        expandedCommentId === `${comment.id}-comment` ? (
+                          <div className="max-h-48 overflow-y-auto">
+                            <p className="whitespace-pre-wrap">{comment.comment}</p>
                             <button
                               onClick={() => setExpandedCommentId(null)}
-                              className="text-blue-600 hover:underline mt-1 text-xs"
+                              className="text-blue-600 hover:underline mt-2 text-xs"
                             >
                               Show less
                             </button>
-                          </>
+                          </div>
                         ) : (
                           <>
-                            <p>&quot;{comment.selected_text.substring(0, 100)}
-                            {comment.selected_text.length > 100 ? '...' : ''}&quot;</p>
-                            {comment.selected_text.length > 100 && (
-                              <button
-                                onClick={() => setExpandedCommentId(comment.id)}
-                                className="text-blue-600 hover:underline mt-1 text-xs"
-                              >
-                                Read more
-                              </button>
-                            )}
+                            <p className="line-clamp-4">{comment.comment.substring(0, 200)}...</p>
+                            <button
+                              onClick={() => setExpandedCommentId(`${comment.id}-comment`)}
+                              className="text-blue-600 hover:underline mt-1 text-xs"
+                            >
+                              Read more
+                            </button>
                           </>
-                        )}
-                      </div>
-                    )}
-                    <p className="text-sm text-slate-800 whitespace-pre-wrap">
-                      {comment.comment}
-                    </p>
+                        )
+                      ) : (
+                        <p className="whitespace-pre-wrap">{comment.comment}</p>
+                      )}
+                    </div>
+                    
+                    {/* Actions */}
                     <div className="flex items-center justify-between mt-2">
                       <p className="text-xs text-slate-400">
                         {new Date(comment.created_at).toLocaleString()}
                       </p>
                       <button
                         onClick={() => deleteComment(comment.id)}
-                        className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded"
+                        className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"
                       >
                         <Trash2 size={14} />
                       </button>

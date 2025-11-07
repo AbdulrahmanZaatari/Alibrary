@@ -18,7 +18,7 @@
     "lucide-react": "^0.546.0",
     "mupdf": "^1.26.4",
     "next": "16.0.0",
-    "openai": "^6.6.0",
+    "openai": "^6.8.1",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
     "pdf-poppler": "^0.2.3",
