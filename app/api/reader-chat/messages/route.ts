@@ -52,7 +52,22 @@ export async function POST(request: NextRequest) {
     }
 
     const db = getDb();
-    const now = new Date().toISOString();
+    
+    // ✅ Check for duplicates
+    const existingMessages = db.prepare(`
+      SELECT id FROM chat_messages 
+      WHERE session_id = ? 
+        AND content IN (?, ?)
+        AND created_at > datetime('now', '-10 seconds')
+    `).all(sessionId, userMessage, assistantMessage);
+
+    if (existingMessages.length > 0) {
+      console.log('⏭️ Reader messages already saved, skipping duplicate');
+      return NextResponse.json({ 
+        success: true, 
+        skipped: true 
+      });
+    }
     
     let documentNames: string[] = [];
     if (documentsUsed && Array.isArray(documentsUsed) && documentsUsed.length > 0) {
@@ -64,19 +79,10 @@ export async function POST(request: NextRequest) {
       documentNames = docs.map((doc: any) => doc.display_name);
     }
 
-    const existingMessages = db.prepare(`
-      SELECT id FROM chat_messages 
-      WHERE session_id = ? 
-        AND content IN (?, ?)
-        AND created_at > datetime('now', '-5 seconds')
-    `).all(sessionId, userMessage, assistantMessage);
-
-    if (existingMessages.length > 0) {
-      console.log('⚠️ Duplicate message detected, skipping save');
-      return NextResponse.json({ success: true, skipped: true });
-    }
-
+    // ✅ Save user message first
     const userMsgId = randomUUID();
+    const userTimestamp = new Date().toISOString();
+    
     db.prepare(`
       INSERT INTO chat_messages (
         id, session_id, role, content, mode, 
@@ -96,11 +102,12 @@ export async function POST(request: NextRequest) {
       documentsUsed ? JSON.stringify(documentsUsed) : null, 
       documentNames.length > 0 ? JSON.stringify(documentNames) : null,
       customPromptName || null,
-      now
+      userTimestamp
     );
 
+    // ✅ Save assistant message 1 second later
     const assistantMsgId = randomUUID();
-    const assistantTime = new Date(Date.now() + 1000).toISOString(); 
+    const assistantTimestamp = new Date(Date.now() + 1000).toISOString(); 
     
     db.prepare(`
       INSERT INTO chat_messages (
@@ -120,10 +127,10 @@ export async function POST(request: NextRequest) {
       extractedText || null,
       documentsUsed ? JSON.stringify(documentsUsed) : null,
       documentNames.length > 0 ? JSON.stringify(documentNames) : null,
-      assistantTime 
+      assistantTimestamp 
     );
 
-    db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(assistantTime, sessionId);
+    db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(assistantTimestamp, sessionId);
 
     console.log(`✅ Saved user + assistant messages for session ${sessionId}`);
     return NextResponse.json({ success: true });

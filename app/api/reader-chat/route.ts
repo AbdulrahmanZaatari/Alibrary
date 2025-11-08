@@ -142,7 +142,7 @@ export async function POST(req: NextRequest) {
         bookPage,
         extractedText,
         documentIds,
-        correctSpelling = false, // ✅ Still accepted but ignored
+        correctSpelling = false,
         aggressiveCorrection = false,
         customPrompt,
         enableMultiHop = false,
@@ -178,7 +178,7 @@ export async function POST(req: NextRequest) {
           LIMIT 10
         `).all(sessionId) as Array<{ role: string; content: string; created_at: string }>;
         
-        history.reverse(); // Chronological order
+        history.reverse();
         console.log(`📜 Loaded ${history.length} previous messages`);
       }
 
@@ -253,59 +253,7 @@ export async function POST(req: NextRequest) {
         }
       }
 
-            // ✅ STEP 3: Generate summary (every 10 messages)
-      if (sessionId && history.length > 0 && history.length % 10 === 0) {
-        console.log('📝 Generating reader session summary...');
-        
-        try {
-          const queryLanguage = detectQueryLanguage(userMessage);
-          const conversationHistory = history.map(msg => ({
-            role: msg.role,
-            content: msg.content
-          }));
-
-          const summaryResult = await generateContextSummary(conversationHistory, queryLanguage);
-          
-          const summaryId = `sum-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-          createSessionSummary({
-            id: summaryId,
-            sessionId,
-            summary: summaryResult.summary,
-            keyPoints: summaryResult.keyPoints,
-            messageCount: history.length
-          });
-
-          console.log('✅ Reader summary created');
-        } catch (error) {
-          console.error('⚠️ Summary generation failed:', error);
-        }
-      }
-
-      // ✅ STEP 4: Save user message FIRST (MOVED HERE)
-      if (sessionId) {
-        const messageId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        addChatMessage({
-          id: messageId,
-          sessionId,
-          role: 'user',
-          content: userMessage,
-          mode: 'reader',
-          bookId,
-          bookTitle,
-          bookPage,
-          extractedText
-        });
-
-        updateSessionTimestamp(sessionId);
-
-        // Extract topics
-        const topics = extractTopicsFromMessage(userMessage);
-        if (topics.length > 0) {
-          console.log('📌 Extracted topics:', topics);
-        }
-      }
-
-      // ✅ STEP 5: Route to appropriate handler (NOW RUNS AFTER USER MESSAGE)
+      // ✅ STEP 4: Route to appropriate handler (NO MESSAGE SAVING HERE)
       if (documentIds && documentIds.length > 0) {
         console.log('🔄 Using corpus retrieval for Reader Chat');
         await handleCorpusQuery(
@@ -368,7 +316,6 @@ async function handleCorpusQuery(
   bookPage?: number,
   preferredModel?: string
 ) {
-  // ✅ Build conversation context string
   let conversationContextString = '';
   let contextualPromptAddition = '';
   
@@ -392,7 +339,6 @@ async function handleCorpusQuery(
         : `\n\n📋 **Context Awareness:**\nRecent topics we've discussed: ${recentTopics}\n`;
     }
 
-    // Build recent conversation history (last 4 messages)
     const recentHistory = history.slice(-4);
     if (recentHistory.length > 0) {
       const queryLanguage = detectQueryLanguage(query);
@@ -409,19 +355,15 @@ async function handleCorpusQuery(
     }
   }
 
-  // ✅ Step 1: Detect languages for all documents
   const { primary: documentLanguage, languages: docLanguages, isMultilingual } = 
     await detectMultipleDocumentLanguages(documentIds);
 
-  // ✅ Step 2: Detect user's query language
   const queryLanguage = detectQueryLanguage(query);
   console.log(`🗣️ Query language: ${queryLanguage}`);
 
-  // ✅ Step 3: Determine response language
   const responseLanguage = queryLanguage;
   console.log(`💬 Response will be in: ${responseLanguage}`);
 
-  // ✅ Step 4: Check if query requires multi-hop reasoning (only if enabled)
   const requiresMultiHop = enableMultiHop && isComplexQuery(query);
   
   if (requiresMultiHop) {
@@ -434,10 +376,8 @@ async function handleCorpusQuery(
         docLanguages,
         4,
         responseLanguage
-        // ✅ Correction parameters removed - embeddings are pre-corrected
       );
       
-      // Add conversation context prefix
       let conversationPrefix = '';
       if (conversationContextString) {
         conversationPrefix = responseLanguage === 'ar'
@@ -456,12 +396,10 @@ async function handleCorpusQuery(
     }
   }
 
-  // ==================== STANDARD RETRIEVAL (DEFAULT OR FALLBACK) ====================
   console.log(enableMultiHop ? '📖 Using standard retrieval (fallback)' : '📖 Using standard retrieval strategy');
   
   const contextParts: string[] = [];
 
-  // ✅ Step 5: Analyze and translate query
   const queryAnalysis = await analyzeQuery(query, documentLanguage);
   console.log('🔍 Query Analysis:', {
     original: queryAnalysis.originalQuery,
@@ -471,7 +409,6 @@ async function handleCorpusQuery(
     isMultiDoc: queryAnalysis.isMultiDocumentQuery
   });
 
-  // ✅ Step 6: Add extracted text if provided
   if (extractedText) {
     const extractLabel = responseLanguage === 'ar' 
       ? '**📄 نص الصفحة الحالية:**'
@@ -479,7 +416,6 @@ async function handleCorpusQuery(
     contextParts.push(`${extractLabel}\n${extractedText}`);
   }
 
-  // ✅ Step 7: Smart corpus retrieval
   console.log('🔄 Starting smart retrieval...');
   const { chunks, strategy, confidence } = await retrieveSmartContext(queryAnalysis, documentIds);
   
@@ -488,10 +424,8 @@ async function handleCorpusQuery(
    - Chunks found: ${chunks.length}
    - Confidence: ${(confidence * 100).toFixed(1)}%`);
 
-  // ✅ Step 8: Use chunks directly (already corrected at embedding time)
   const processedChunks = chunks;
 
-  // ✅ Step 9: Group chunks by document and format context
   if (processedChunks.length > 0) {
     const chunksByDocument = new Map<string, any[]>();
     
@@ -506,7 +440,6 @@ async function handleCorpusQuery(
 
     const isArabic = responseLanguage === 'ar';
     
-    // ✅ Build document-separated context
     const documentContexts = Array.from(chunksByDocument.entries()).map(([docId, docChunks], docIndex) => {
       const docNumber = docIndex + 1;
       const docLang = docLanguages.get(docId);
@@ -516,7 +449,6 @@ async function handleCorpusQuery(
         ? `## 📘 الوثيقة ${docNumber} (${langLabel})`
         : `## 📘 Document ${docNumber} (${langLabel})`;
       
-      // Group by pages within this document
       const pageGroups = new Map<number, any[]>();
       docChunks.forEach(chunk => {
         if (!pageGroups.has(chunk.page_number)) {
@@ -556,7 +488,6 @@ async function handleCorpusQuery(
 
     contextParts.push(`${contextTitle}\n\n${documentContexts}`);
 
-    // ✅ Add multilingual note if applicable
     if (isMultilingual) {
       const multilingualNote = isArabic
         ? '\n\n📖 **ملاحظة:** المقاطع المعروضة من مستندات بلغات مختلفة (عربي وإنجليزي).'
@@ -564,7 +495,6 @@ async function handleCorpusQuery(
       contextParts.push(multilingualNote);
     }
 
-    // ✅ Add multi-document analysis instruction
     if (documentIds.length > 1 && queryAnalysis.isMultiDocumentQuery) {
       const comparisonInstruction = isArabic
         ? '\n\n⚠️ **تعليمات مهمة:** هذا سؤال مقارن. قارن وحلل المعلومات من جميع الوثائق المقدمة. أشر بوضوح إلى أوجه التشابه والاختلاف والجوانب الفريدة لكل وثيقة.'
@@ -572,7 +502,6 @@ async function handleCorpusQuery(
       contextParts.push(comparisonInstruction);
     }
 
-    // ✅ Add page validation
     const docPageMap = new Map<string, number[]>();
     processedChunks.forEach(chunk => {
       if (!docPageMap.has(chunk.document_id)) {
@@ -592,7 +521,6 @@ async function handleCorpusQuery(
     console.warn('⚠️ No relevant chunks found');
   }
 
-  // ✅ Step 10: Build enhanced prompt with conversation awareness
   const isArabic = responseLanguage === 'ar';
   
   const systemPrompt = isArabic
@@ -696,28 +624,16 @@ ${customPrompt ? `\n**Additional Instructions:**\n${customPrompt}\n` : ''}`;
   
   console.log(`✅ Response generated using: ${modelUsed}`);
   
-  let assistantResponse = '';
   for await (const chunk of geminiStream) {
     const text = chunk.text();
     if (text) {
-      assistantResponse += text;
       await writer.write(encoder.encode(text));
     }
   }
   
-  // ✅ Save assistant response
+  // ✅ ONLY UPDATE SESSION TIMESTAMP (frontend saves messages)
   if (sessionId) {
-    const messageId = `msg-${Date.now() + 1}-${Math.random().toString(36).substr(2, 9)}`;
-    addChatMessage({
-      id: messageId,
-      sessionId,
-      role: 'assistant',
-      content: assistantResponse,
-      mode: 'reader',
-      bookId: undefined,
-      bookTitle,
-      bookPage
-    });
+    updateSessionTimestamp(sessionId);
   }
   
   console.log('✅ Response complete');
@@ -734,7 +650,6 @@ async function handleGeneralChat(
   history?: Array<{ role: string; content: string }>,
   preferredModel?: string
 ) {
-  // Build conversation context
   let conversationContext = '';
   let contextualPromptAddition = '';
   
@@ -790,25 +705,15 @@ ${contextSection}
   const geminiResult = await generateResponse(prompt, preferredModel);
   const geminiStream = geminiResult.stream;
   
-  let assistantResponse = '';
   for await (const chunk of geminiStream) {
     const text = chunk.text();
     if (text) {
-      assistantResponse += text;
       await writer.write(encoder.encode(text));
     }
   }
   
-  // Save assistant response
-  const messageId = `msg-${Date.now() + 1}-${Math.random().toString(36).substr(2, 9)}`;
-  addChatMessage({
-    id: messageId,
-    sessionId,
-    role: 'assistant',
-    content: assistantResponse,
-    mode: 'reader',
-    bookPage
-  });
+  // ✅ ONLY UPDATE SESSION TIMESTAMP (frontend saves messages)
+  updateSessionTimestamp(sessionId);
 }
 
 // ==================== SIMPLE QUERY HANDLER ====================

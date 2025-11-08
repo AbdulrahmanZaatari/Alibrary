@@ -46,7 +46,7 @@ export async function POST(request: NextRequest) {
         sessionId, 
         documentIds,
         enableMultiHop = false,
-        preferredModel // ✅ NEW: Accept preferred model from client
+        preferredModel
       } = await request.json();
 
       if (!message || !sessionId) {
@@ -61,7 +61,7 @@ export async function POST(request: NextRequest) {
         hasDocuments: documentIds?.length > 0,
         documentCount: documentIds?.length || 0,
         enableMultiHop,
-        preferredModel // ✅ NEW: Log selected model
+        preferredModel
       });
 
       const db = getDb();
@@ -75,9 +75,7 @@ export async function POST(request: NextRequest) {
         LIMIT 10
       `).all(sessionId) as Array<{ role: string; content: string; created_at: string }>;
 
-      // Reverse to chronological order
       history.reverse();
-
       console.log(`📜 Loaded ${history.length} previous messages`);
 
       // ✅ STEP 2: Analyze conversation context (every 3 messages)
@@ -93,7 +91,6 @@ export async function POST(request: NextRequest) {
         try {
           const context = await analyzeConversationContext(conversationHistory, queryLanguage);
           
-          // Save context to database
           if (context.topics.length > 0) {
             for (const topic of context.topics.slice(0, 3)) {
               const contextId = `ctx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -108,7 +105,6 @@ export async function POST(request: NextRequest) {
             }
           }
 
-          // Track in global memory
           if (context.mainTheme) {
             const memoryId = `mem-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
             trackGlobalMemory({
@@ -129,7 +125,7 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // ✅ STEP 3: Generate summary for long conversations (every 10 messages)
+      // ✅ STEP 3: Generate summary (every 10 messages)
       if (history.length > 0 && history.length % 10 === 0) {
         console.log('📝 Generating session summary...');
         
@@ -162,7 +158,6 @@ export async function POST(request: NextRequest) {
       let contextualPromptAddition = '';
       
       if (history.length > 0) {
-        // Get tracked contexts from database
         const contexts = getSessionContexts(sessionId) as Array<{
           topic: string;
           keywords: string;
@@ -178,7 +173,6 @@ export async function POST(request: NextRequest) {
           contextualPromptAddition = `\n\n📋 **Context Awareness:**\nRecent topics we've discussed: ${recentTopics}\n`;
         }
 
-        // Build conversation history string
         conversationContextString = history
           .map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
           .join('\n\n');
@@ -210,7 +204,6 @@ export async function POST(request: NextRequest) {
             false
           );
 
-          // Add conversational context to response
           let conversationPrefix = '';
           if (history.length > 0) {
             const recentHistory = history.slice(-3);
@@ -231,30 +224,18 @@ export async function POST(request: NextRequest) {
           const formattedResponse = conversationPrefix + formatMultiHopResponse(multiHopResult, queryLanguage);
           await writer.write(encoder.encode(formattedResponse));
           
-          // ✅ Save user message
-          const messageId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-          addChatMessage({
-            id: messageId,
-            sessionId,
-            role: 'user',
-            content: message,
-            mode: 'general'
-          });
-          updateChatSessionTimestamp(sessionId);
-
           console.log('✅ Multi-hop conversational response complete');
           await writer.close();
           return;
 
         } catch (error) {
-          console.error('❌ Multi-hop reasoning failed in general chat, falling back to standard:', error);
+          console.error('❌ Multi-hop reasoning failed, falling back to standard:', error);
         }
       }
 
       // ==================== STANDARD CONVERSATIONAL CHAT ====================
       console.log(enableMultiHop ? '💬 Using standard conversational response (fallback)' : '💬 Using standard conversational response');
 
-      // Enhanced system prompt with memory awareness
       const systemPrompt = queryLanguage === 'ar'
         ? `أنت مساعد بحثي دقيق ومتخصص يتذكر السياق. استخدم تنسيق Markdown في إجاباتك.
 
@@ -355,7 +336,7 @@ ${conversationContextString}
 **User:** ${message}
 **Assistant:**`;
 
-      // ✅ NEW: Stream response with model selection + error handling
+      // ✅ Stream response
       let modelUsed: string | undefined;
       let assistantResponse = '';
       
@@ -378,7 +359,6 @@ ${conversationContextString}
       } catch (error: any) {
         console.error('❌ Model generation failed:', error);
         
-        // ✅ NEW: User-friendly error message
         const errorMessage = error.message.includes('All models failed')
           ? `⚠️ **Model Error**\n\nAll available AI models are currently unavailable:\n${error.message}\n\nPlease try:\n- Selecting a different model\n- Waiting a few minutes\n- Checking your API quota`
           : `⚠️ **Error:** ${error.message}`;
@@ -388,29 +368,10 @@ ${conversationContextString}
         return;
       }
 
-      // ✅ STEP 6: Save messages to database
-      const userMessageId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      const assistantMessageId = `msg-${Date.now() + 1}-${Math.random().toString(36).substr(2, 9)}`;
-
-      addChatMessage({
-        id: userMessageId,
-        sessionId,
-        role: 'user',
-        content: message,
-        mode: 'general'
-      });
-
-      addChatMessage({
-        id: assistantMessageId,
-        sessionId,
-        role: 'assistant',
-        content: assistantResponse,
-        mode: 'general'
-      });
-
+      // ✅ ONLY UPDATE SESSION TIMESTAMP (frontend saves messages)
       updateChatSessionTimestamp(sessionId);
 
-      // ✅ STEP 7: Extract and track topics from user message
+      // ✅ Extract and track topics
       const topics = extractTopicsFromMessage(message);
       if (topics.length > 0) {
         console.log('📌 Extracted topics:', topics);
