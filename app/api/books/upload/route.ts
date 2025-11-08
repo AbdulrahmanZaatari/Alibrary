@@ -13,6 +13,18 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 const BOOKS_BUCKET = 'reader-books';
 
+// --- User-Requested Fallback Models ---
+const FALLBACK_MODELS = [
+  'gemini-2.0-flash', 
+  'gemini-2.0-flash-lite',
+  'gemini-2.0-flash-exp',
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',   
+];
+
+// Removed metadataSchema as structured output is no longer being used.
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
@@ -47,16 +59,15 @@ export async function POST(req: NextRequest) {
     const timestamp = Date.now();
     const bookId = `${timestamp}`;
 
-    // ✅ FIX: Sanitize filename for Supabase (remove Arabic/special chars from storage key)
-    // Original filename (with Arabic) is preserved in database
+    // Sanitize filename for Supabase storage key
     const originalFileName = file.name;
     const fileExtension = '.pdf';
     
-    // Storage key: Use only timestamp + .pdf (safe for Supabase)
+    // Storage key: Use only bookId + .pdf (safe for Supabase)
     const storageFileName = `${bookId}${fileExtension}`;
     const supabasePath = `books/${storageFileName}`;
 
-    // ✅ Extract title from original filename (preserves Arabic)
+    // Extract title from original filename (preserves Arabic)
     const title = originalFileName.replace(/\.pdf$/i, '');
 
     console.log('📤 Uploading file:');
@@ -82,22 +93,20 @@ export async function POST(req: NextRequest) {
 
     console.log('✅ Uploaded to Supabase:', supabasePath);
 
-    // 🤖 AI METADATA EXTRACTION (with rate limit handling)
-    let author = null;
-    let publisher = null;
-    let year = null;
-    let language = 'Arabic';
+    // 🤖 AI METADATA EXTRACTION (with fallback and retry)
+    let author: string | null = null;
+    let publisher: string | null = null;
+    let year: string | null = null;
+    let language = 'Arabic'; // Default language
+    let metadataResponseText: string | null = null;
+    let usedModel: string | null = null;
 
     // Only try AI if it's a meaningful title (not test files)
     const shouldExtractMetadata = title.length > 5 && !title.toLowerCase().includes('test');
 
     if (shouldExtractMetadata) {
-      try {
-        console.log('🤖 Extracting metadata with AI for:', title);
-        
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-        
-        const metadataPrompt = `Analyze this book title and extract metadata. This is likely an Islamic/Arabic scholarly text.
+      // NOTE: Restored prompt to request raw JSON output (for regex parsing)
+      const metadataPrompt = `Analyze this book title and extract metadata. This is likely an Islamic/Arabic scholarly text.
 
 Title: "${title}"
 
@@ -110,66 +119,72 @@ Extract and return ONLY a valid JSON object with these exact fields:
 }
 
 EXTRACTION RULES:
-1. Common patterns:
-   - "Author - Title" → extract Author
-   - "Title by Author" → extract Author  
-   - "Title (Author)" → extract Author
-   - "Ibn X", "Al-X", "Imam X" are authors
-   
-2. Well-known Islamic authors:
-   - Ibn Kathir, Al-Ghazali, Ibn Taymiyyah, Al-Bukhari, Muslim, An-Nawawi, Ibn Qayyim, etc.
-   - Extract full name if present
-   
-3. Publishers:
-   - Dar al-Kutub, Maktabah, Dar al-Salam, Dar Ibn Hazm, etc.
-   - Only if clearly mentioned in title
-   
-4. Year:
-   - Extract if present (1400, 2020, etc.)
-   - Prefer Gregorian year
-   
-5. Language detection:
-   - Arabic script → "Arabic"
-   - English/Latin script → "English"
-   - If title contains Arabic characters, language is "Arabic"
-   
+1. Common patterns: Extract author from patterns like "Author - Title" or "Title by Author".
+2. Well-known Islamic authors: e.g., Ibn Kathir, Al-Ghazali, Al-Bukhari. Extract full name if present.
+3. Publishers: e.g., Dar al-Kutub. Only if clearly inferable from the title.
+4. Year: Prefer Gregorian year (YYYY).
+5. Language detection: If the title contains Arabic characters, the language is "Arabic". Otherwise, detect based on script (English, French, etc.).
 6. Return ONLY valid JSON, no explanations
-7. Use null (not "null" string) for unknown fields
+7. Use null (not "null" string) for unknown fields`;
 
-Example valid response:
-{"author":"Ibn Kathir","publisher":null,"year":"1999","language":"Arabic"}`;
+      let delay = 1000; // Initial delay of 1 second
 
-        const result = await model.generateContent(metadataPrompt);
-        const responseText = result.response.text().trim();
-        
-        console.log('AI Response:', responseText);
-        
-        // Parse AI response - try to extract JSON
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          try {
-            const metadata = JSON.parse(jsonMatch[0]);
-            
-            // Validate and assign
-            author = metadata.author && metadata.author !== 'null' ? metadata.author : null;
-            publisher = metadata.publisher && metadata.publisher !== 'null' ? metadata.publisher : null;
-            year = metadata.year && metadata.year !== 'null' ? metadata.year : null;
-            language = metadata.language || 'Arabic';
-            
-            console.log('✅ Extracted metadata:', { author, publisher, year, language });
-          } catch (parseError) {
-            console.error('Failed to parse AI JSON:', parseError);
+      for (const modelName of FALLBACK_MODELS) {
+        try {
+          console.log(`🤖 Attempting metadata extraction with model: ${modelName}`);
+          
+          const model = genAI.getGenerativeModel({ model: modelName });
+          
+          // NOTE: Removed generationConfig for structured output
+          const result = await model.generateContent(metadataPrompt);
+          metadataResponseText = result.response.text().trim();
+          usedModel = modelName;
+          
+          console.log('AI Response:', metadataResponseText);
+          console.log(`✅ Success with model ${modelName}.`);
+          break; // Exit the loop on success
+
+        } catch (aiError: any) {
+          // Check for rate limit status (though SDK error structure can vary)
+          const isRateLimit = aiError.message.includes('429') || aiError.message.includes('Rate limit exceeded');
+          
+          if (isRateLimit) {
+            console.warn(`⏳ Model ${modelName} hit rate limit. Waiting ${delay / 1000}s and trying next model...`);
+          } else {
+            console.warn(`⚠️ Model ${modelName} failed. Error: ${aiError.message}. Trying next model after ${delay / 1000}s...`);
           }
-        } else {
-          console.warn('No valid JSON found in AI response');
+          
+          // Implement exponential backoff before trying the next model
+          await new Promise(resolve => setTimeout(resolve, delay));
+          delay *= 2; // Double the delay for the next attempt
+          // Cap the max delay to prevent excessive waiting
+          if (delay > 8000) delay = 8000;
         }
-      } catch (aiError: any) {
-        if (aiError.status === 429) {
-          console.warn('⏳ AI rate limit hit. Saving without metadata. User can add later in Metadata Manager.');
+      }
+      
+      // --- Final Parsing and Assignment (Restored Regex Parsing) ---
+      if (metadataResponseText) {
+        // Use regex to extract the JSON object
+        const jsonMatch = metadataResponseText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            try {
+                const metadata = JSON.parse(jsonMatch[0]);
+                
+                // Validate and assign
+                author = (metadata.author && metadata.author !== 'null') ? String(metadata.author) : null;
+                publisher = (metadata.publisher && metadata.publisher !== 'null') ? String(metadata.publisher) : null;
+                year = (metadata.year && metadata.year !== 'null') ? String(metadata.year) : null;
+                language = String(metadata.language || 'Arabic');
+                
+                console.log(`✅ Extracted metadata (Used: ${usedModel}):`, { author, publisher, year, language });
+            } catch (parseError) {
+                console.error('Failed to parse AI JSON:', parseError);
+            }
         } else {
-          console.error('⚠️ AI metadata extraction failed:', aiError);
+            console.warn('No valid JSON found in AI response');
         }
-        // Continue with null values - not critical
+      } else {
+        console.warn('❌ AI metadata extraction failed after all retries. Saving with default metadata.');
       }
     } else {
       console.log('⏭️ Skipping AI extraction for test/short filename');
@@ -187,19 +202,17 @@ Example valid response:
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
       `);
 
-      // ✅ Store original filename in database (with Arabic chars)
-      // ✅ Store sanitized path for Supabase
       stmt.run(
         bookId,
-        originalFileName,  // Original name with Arabic preserved
-        title,             // Title with Arabic preserved
+        originalFileName,  // Original name with Arabic preserved
+        title,             // Title with Arabic preserved
         author,
         publisher,
         year,
         language,
         buffer.length,
         numPages,
-        supabasePath       // Sanitized storage path
+        supabasePath       // Sanitized storage path
       );
 
       console.log('✅ Book saved to database with metadata');
@@ -208,7 +221,7 @@ Example valid response:
         success: true,
         bookId,
         title,
-        filename: originalFileName,  // Return original name
+        filename: originalFileName,  // Return original name
         pageCount: numPages,
         metadata: {
           author,

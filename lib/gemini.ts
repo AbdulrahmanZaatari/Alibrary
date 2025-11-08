@@ -17,7 +17,8 @@ const CHAT_MODELS = [
 
 const RERANK_MODELS = [
   'gemini-2.5-flash-lite',
-  'gemini-2.0-flash'
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite'
 ];
 
 // Embed text using Gemini
