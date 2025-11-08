@@ -2,23 +2,26 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
+// --- User-Requested Fallback Models ---
+const FALLBACK_MODELS = [
+  'gemini-2.0-flash', 
+  'gemini-2.0-flash-lite',
+  'gemini-2.0-flash-exp',
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',   
+];
+
 /**
- * ✅ AI-powered Arabic text correction using Gemini
- * This matches the Gemini website behavior for perfect results
+ * ✅ AI-powered Arabic text correction using Gemini with model fallback and retry logic.
+ * This system attempts models in order to ensure high reliability.
  */
 export async function correctArabicWithAI(text: string): Promise<string> {
   if (!text || text.length < 20) return text;
   
-  try {
-    const model = genAI.getGenerativeModel({ 
-      model: 'gemini-2.0-flash',
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 8192,
-      }
-    });
+  let delay = 1000; // Initial delay of 1 second for exponential backoff
 
-    const prompt = `أنت خبير في تصحيح النصوص العربية المستخرجة من ملفات PDF.
+  const prompt = `أنت خبير في تصحيح النصوص العربية المستخرجة من ملفات PDF.
 
 **المهمة:** صحّح الأخطاء التالية فقط:
 1. إزالة المسافات الزائدة بين الأحرف (مثل: "الص لاة" → "الصلاة")
@@ -41,7 +44,7 @@ export async function correctArabicWithAI(text: string): Promise<string> {
 **أمثلة:**
 - ❌ خطأ: "المكتبة" → "المكتبه"
 - ✅ صحيح: "المكتبة" → "المكتبة"
-- ❌ خطأ: "على" → "علي"  
+- ❌ خطأ: "على" → "علي"  
 - ✅ صحيح: "على" → "على"
 - ❌ خطأ: "موسى" → "موسي"
 - ✅ صحيح: "موسى" → "موسى"
@@ -51,20 +54,50 @@ ${text}
 
 **النص المصحح:**`;
 
-    const result = await model.generateContent(prompt);
-    let correctedText = result.response.text().trim();
-    
-    // ✅ Remove any markdown formatting if AI adds it
-    correctedText = correctedText.replace(/^```[\s\S]*?\n/, '').replace(/\n```$/, '');
-    correctedText = correctedText.replace(/^\*\*.*?\*\*:?\s*/gm, '');
-    
-    console.log(`✅ AI correction complete: ${text.length} → ${correctedText.length} chars`);
-    
-    return correctedText;
-  } catch (error) {
-    console.error('❌ AI correction failed:', error);
-    return text;
+  for (const modelName of FALLBACK_MODELS) {
+    try {
+      console.log(`🤖 Attempting Arabic correction with model: ${modelName}`);
+
+      const model = genAI.getGenerativeModel({ 
+        model: modelName,
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 8192,
+        }
+      });
+
+      const result = await model.generateContent(prompt);
+      let correctedText = result.response.text().trim();
+      
+      // Remove any markdown formatting if AI adds it
+      correctedText = correctedText.replace(/^```[\s\S]*?\n/, '').replace(/\n```$/, '');
+      correctedText = correctedText.replace(/^\*\*.*?\*\*:?\s*/gm, '');
+      
+      console.log(`✅ AI correction success with ${modelName}: ${text.length} → ${correctedText.length} chars`);
+      return correctedText; // Return on successful correction
+
+    } catch (error: any) {
+      const errorMessage = error.message;
+      const isQuotaError = errorMessage.includes('429') || 
+                           errorMessage.includes('Rate limit exceeded') || 
+                           errorMessage.includes('Quota');
+
+      if (isQuotaError) {
+        console.warn(`⏳ Model ${modelName} hit rate limit. Waiting ${delay / 1000}s and trying next model...`);
+      } else {
+        console.warn(`⚠️ Model ${modelName} failed. Error: ${errorMessage}. Trying next model after ${delay / 1000}s...`);
+      }
+      
+      // Implement exponential backoff before trying the next model
+      await new Promise(resolve => setTimeout(resolve, delay));
+      delay *= 2; 
+      if (delay > 8000) delay = 8000;
+    }
   }
+
+  // If all models fail after all attempts
+  console.error('❌ All AI models failed for Arabic correction. Returning original text.');
+  return text;
 }
 
 /**
