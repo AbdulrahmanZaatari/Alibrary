@@ -2,6 +2,15 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
+const FALLBACK_MODELS = [
+  'gemini-2.0-flash', 
+  'gemini-2.0-flash-lite',
+  'gemini-2.0-flash-exp',
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',  
+];
+
 interface QueryAnalysis {
   originalQuery: string;
   translatedQuery?: string;
@@ -26,14 +35,12 @@ export function detectLanguage(text: string): 'ar' | 'en' | 'mixed' {
 }
 
 /**
- * Translate query to target language using Gemini
+ * ✅ Translate query to target language using Gemini with fallback
  */
 export async function translateQuery(
   query: string,
   targetLang: 'ar' | 'en'
 ): Promise<string> {
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-lite' });
-
   const prompt = targetLang === 'ar'
     ? `Translate this question to Arabic, preserving meaning and nuance. Return ONLY the Arabic translation, no explanations:
 
@@ -46,16 +53,44 @@ ${query}
 
 English translation:`;
 
-  const result = await model.generateContent(prompt);
-  return result.response.text().trim();
+  let lastError: Error | null = null;
+
+  // ✅ Try each fallback model
+  for (const modelName of FALLBACK_MODELS) {
+    try {
+      console.log(`   🔄 Trying translation with ${modelName}...`);
+      
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(prompt);
+      const translation = result.response.text().trim();
+      
+      if (translation && translation.length > 0) {
+        console.log(`   ✅ Translation successful with ${modelName}`);
+        return translation;
+      }
+      
+    } catch (error) {
+      lastError = error as Error;
+      console.warn(`   ⚠️ Translation failed with ${modelName}:`, error instanceof Error ? error.message : 'Unknown error');
+      
+      // Continue to next model
+      continue;
+    }
+  }
+
+  // ✅ All models failed - return original query
+  console.error('❌ All translation models failed, using original query');
+  if (lastError) {
+    console.error('Last error:', lastError.message);
+  }
+  
+  return query;
 }
 
 /**
- * Classify query type for better retrieval strategy
+ * ✅ Classify query type for better retrieval strategy with fallback
  */
 export async function classifyQuery(query: string): Promise<string> {
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-lite' });
-
   const prompt = `Classify this question into ONE category:
 
 Question: "${query}"
@@ -69,16 +104,41 @@ Categories:
 
 Return ONLY the category name:`;
 
-  const result = await model.generateContent(prompt);
-  return result.response.text().trim().toLowerCase();
+  let lastError: Error | null = null;
+
+  // ✅ Try each fallback model
+  for (const modelName of FALLBACK_MODELS) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(prompt);
+      const classification = result.response.text().trim().toLowerCase();
+      
+      if (classification && classification.length > 0) {
+        return classification;
+      }
+      
+    } catch (error) {
+      lastError = error as Error;
+      console.warn(`   ⚠️ Classification failed with ${modelName}:`, error instanceof Error ? error.message : 'Unknown error');
+      
+      // Continue to next model
+      continue;
+    }
+  }
+
+  // ✅ All models failed - return default
+  console.error('❌ All classification models failed, using default: thematic');
+  if (lastError) {
+    console.error('Last error:', lastError.message);
+  }
+  
+  return 'thematic';
 }
 
 /**
- * Expand query with synonyms and related terms
+ * ✅ Expand query with synonyms and related terms with fallback
  */
 export async function expandQuery(query: string, lang: 'ar' | 'en'): Promise<string[]> {
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-lite' });
-
   const prompt = lang === 'ar'
     ? `لهذا السؤال، أعطني 3-5 كلمات مفتاحية أو مرادفات للبحث. فقط الكلمات، بدون شرح:
 
@@ -91,14 +151,46 @@ Question: "${query}"
 
 Keywords:`;
 
-  const result = await model.generateContent(prompt);
-  const keywords = result.response
-    .text()
-    .split(/[,،\n]/)
-    .map(k => k.trim())
-    .filter(k => k.length > 0);
+  let lastError: Error | null = null;
 
-  return keywords;
+  // ✅ Try each fallback model
+  for (const modelName of FALLBACK_MODELS) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(prompt);
+      const keywords = result.response
+        .text()
+        .split(/[,،\n]/)
+        .map(k => k.trim())
+        .filter(k => k.length > 0);
+
+      if (keywords.length > 0) {
+        return keywords;
+      }
+      
+    } catch (error) {
+      lastError = error as Error;
+      console.warn(`   ⚠️ Keyword expansion failed with ${modelName}:`, error instanceof Error ? error.message : 'Unknown error');
+      
+      // Continue to next model
+      continue;
+    }
+  }
+
+  // ✅ All models failed - extract basic keywords from query
+  console.error('❌ All keyword expansion models failed, using basic extraction');
+  if (lastError) {
+    console.error('Last error:', lastError.message);
+  }
+  
+  // Fallback: simple keyword extraction
+  const basicKeywords = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(word => word.length > 3)
+    .slice(0, 5);
+  
+  return basicKeywords;
 }
 
 /**
@@ -115,7 +207,7 @@ function isComparativeQuery(query: string): boolean {
 }
 
 /**
- * Complete query analysis pipeline
+ * ✅ Complete query analysis pipeline with full fallback support
  */
 export async function analyzeQuery(
   query: string,
@@ -132,16 +224,27 @@ export async function analyzeQuery(
 
   if (queryLang !== documentLanguage && queryLang !== 'mixed') {
     console.log(`   🔄 Translating query to ${documentLanguage}...`);
-    translatedQuery = await translateQuery(query, documentLanguage);
-    searchQuery = translatedQuery;
-    console.log(`   ✅ Translated: "${translatedQuery}"`);
+    try {
+      translatedQuery = await translateQuery(query, documentLanguage);
+      searchQuery = translatedQuery;
+      console.log(`   ✅ Translated: "${translatedQuery}"`);
+    } catch (error) {
+      console.error('   ❌ Translation failed, using original query');
+      searchQuery = query;
+    }
   }
 
   // ✅ Detect comparative nature FIRST
   const isComparative = isComparativeQuery(query);
 
   // Classify query type
-  let queryType = await classifyQuery(query) as any;
+  let queryType: string;
+  try {
+    queryType = await classifyQuery(query);
+  } catch (error) {
+    console.error('   ❌ Classification failed, using default: thematic');
+    queryType = 'thematic';
+  }
   
   // ✅ Override with 'comparative' if detected
   if (isComparative && queryType !== 'comparative') {
@@ -151,8 +254,18 @@ export async function analyzeQuery(
   console.log(`   📋 Query type: ${queryType}${isComparative ? ' (comparative detected)' : ''}`);
 
   // Expand query with keywords
-  const keywords = await expandQuery(searchQuery, documentLanguage);
-  console.log(`   🔑 Keywords: ${keywords.join(', ')}`);
+  let keywords: string[];
+  try {
+    keywords = await expandQuery(searchQuery, documentLanguage);
+    console.log(`   🔑 Keywords: ${keywords.join(', ')}`);
+  } catch (error) {
+    console.error('   ❌ Keyword expansion failed, using basic extraction');
+    keywords = searchQuery
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(word => word.length > 3)
+      .slice(0, 5);
+  }
 
   // Build expanded query for embedding
   const expandedQuery = `${searchQuery} ${keywords.join(' ')}`;
@@ -162,7 +275,7 @@ export async function analyzeQuery(
     translatedQuery,
     detectedLanguage: queryLang,
     expandedQuery,
-    queryType,
+    queryType: queryType as any,
     keywords,
     isMultiDocumentQuery: isComparative,
   };
