@@ -38,6 +38,7 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
   const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
   const [modelError, setModelError] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
+  const [useReranking, setUseReranking] = useState(true);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -191,14 +192,16 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
             query: userMessageContent, 
             documentIds: selectedDocuments,
             enableMultiHop,
-            preferredModel: selectedModel // ✅ Pass selected model
+            preferredModel: selectedModel,
+            useReranking
           }
         : { 
             message: userMessageContent, 
             sessionId: currentSession,
             documentIds: selectedDocuments.length > 0 ? selectedDocuments : undefined,
             enableMultiHop,
-            preferredModel: selectedModel // ✅ Pass selected model
+            preferredModel: selectedModel,
+            useReranking
           };
 
       console.log('🔄 Sending request:', { endpoint, mode, enableMultiHop, model: selectedModel, hasDocuments: selectedDocuments.length > 0 });

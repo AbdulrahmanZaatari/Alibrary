@@ -29,11 +29,12 @@ interface RetrievalConfig {
 }
 
 /**
- * Enhanced retrieve context with advanced multi-stage retrieval
+ * ✅ Enhanced retrieve context with optional reranking
  */
 export async function retrieveSmartContext(
   queryAnalysis: any,
-  documentIds: string[]
+  documentIds: string[],
+  useReranking: boolean = true // ✅ NEW PARAMETER
 ): Promise<RetrievalResult> {
   const { 
     expandedQuery, 
@@ -44,6 +45,7 @@ export async function retrieveSmartContext(
   } = queryAnalysis;
 
   console.log(`🎯 Advanced retrieval for "${queryType}" query across ${documentIds.length} document(s)`);
+  console.log(`   Reranking: ${useReranking ? 'enabled' : 'disabled'}`);
 
   const embedding = await embedText(expandedQuery);
   const isMultiDoc = documentIds.length > 1;
@@ -54,7 +56,8 @@ export async function retrieveSmartContext(
       embedding,
       documentIds,
       originalQuery,
-      queryType
+      queryType,
+      useReranking // ✅ PASS PARAMETER
     );
   }
 
@@ -64,7 +67,8 @@ export async function retrieveSmartContext(
       embedding,
       documentIds,
       originalQuery,
-      queryType
+      queryType,
+      useReranking // ✅ PASS PARAMETER
     );
   }
 
@@ -74,18 +78,20 @@ export async function retrieveSmartContext(
     documentIds,
     originalQuery,
     queryType,
-    keywords
+    keywords,
+    useReranking // ✅ PASS PARAMETER
   );
 }
 
 /**
- * Comparative multi-document retrieval with cross-document analysis
+ * ✅ Comparative multi-document retrieval with optional reranking
  */
 async function comparativeMultiDocRetrieval(
   embedding: number[],
   documentIds: string[],
   query: string,
-  queryType: string
+  queryType: string,
+  useReranking: boolean = true
 ): Promise<RetrievalResult> {
   console.log('🔄 COMPARATIVE multi-document strategy');
 
@@ -94,8 +100,8 @@ async function comparativeMultiDocRetrieval(
     embedding,
     documentIds,
     {
-      chunksPerDoc: 20,
-      totalChunks: 80,
+      chunksPerDoc: useReranking ? 20 : 30, // ✅ More without reranking
+      totalChunks: useReranking ? 80 : 120,
       ensureAllDocs: true,
     }
   );
@@ -108,31 +114,41 @@ async function comparativeMultiDocRetrieval(
     queryType
   );
 
-  // Stage 3: Rerank for comparative relevance
-  const rerankedChunks = await rerankChunks(query, enhancedChunks, 50);
+  let finalChunks: any[];
+  let strategy: string;
 
-  // Stage 4: Ensure cross-document representation
-  const finalChunks = ensureCrossDocumentBalance(rerankedChunks, documentIds, 50);
+  // ✅ Stage 3: Conditional reranking
+  if (useReranking) {
+    console.log(`🔄 Reranking ${enhancedChunks.length} chunks...`);
+    const rerankedChunks = await rerankChunks(query, enhancedChunks, 50);
+    finalChunks = ensureCrossDocumentBalance(rerankedChunks, documentIds, 50);
+    strategy = 'comparative_balanced_reranked';
+  } else {
+    console.log('📋 Using direct results (no reranking)');
+    finalChunks = ensureCrossDocumentBalance(enhancedChunks, documentIds, 80);
+    strategy = 'comparative_balanced_direct';
+  }
 
   const metrics = assessRetrievalQuality(finalChunks, documentIds);
   const metadata = buildRetrievalMetadata(finalChunks, documentIds, enhancedChunks.length);
 
   return {
     chunks: finalChunks,
-    strategy: 'comparative_balanced_enhanced',
+    strategy,
     confidence: calculateConfidence(metrics, finalChunks),
     metadata
   };
 }
 
 /**
- * Multi-document retrieval for comprehensive analysis
+ * ✅ Multi-document retrieval with optional reranking
  */
 async function multiDocumentRetrieval(
   embedding: number[],
   documentIds: string[],
   query: string,
-  queryType: string
+  queryType: string,
+  useReranking: boolean = true
 ): Promise<RetrievalResult> {
   console.log('🔄 Multi-document comprehensive strategy');
 
@@ -141,8 +157,8 @@ async function multiDocumentRetrieval(
     embedding,
     documentIds,
     {
-      chunksPerDoc: 15,
-      totalChunks: 60,
+      chunksPerDoc: useReranking ? 15 : 25, // ✅ More without reranking
+      totalChunks: useReranking ? 60 : 100,
       ensureAllDocs: true,
     }
   );
@@ -155,29 +171,43 @@ async function multiDocumentRetrieval(
     queryType
   );
 
-  // Stage 3: Rerank with original query
-  const rerankedChunks = await rerankChunks(query, enhancedChunks, 35);
+  let finalChunks: any[];
+  let strategy: string;
 
-  const metrics = assessRetrievalQuality(rerankedChunks, documentIds);
-  const metadata = buildRetrievalMetadata(rerankedChunks, documentIds, enhancedChunks.length);
+  // ✅ Stage 3: Conditional reranking
+  if (useReranking) {
+    console.log(`🔄 Reranking ${enhancedChunks.length} chunks...`);
+    finalChunks = await rerankChunks(query, enhancedChunks, 35);
+    strategy = 'multi_document_comprehensive_reranked';
+  } else {
+    console.log('📋 Using direct results (no reranking)');
+    finalChunks = enhancedChunks
+      .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
+      .slice(0, 60);
+    strategy = 'multi_document_comprehensive_direct';
+  }
+
+  const metrics = assessRetrievalQuality(finalChunks, documentIds);
+  const metadata = buildRetrievalMetadata(finalChunks, documentIds, enhancedChunks.length);
 
   return {
-    chunks: rerankedChunks,
-    strategy: 'multi_document_comprehensive',
-    confidence: calculateConfidence(metrics, rerankedChunks) * 0.85,
+    chunks: finalChunks,
+    strategy,
+    confidence: calculateConfidence(metrics, finalChunks) * (useReranking ? 0.85 : 0.75),
     metadata
   };
 }
 
 /**
- * Single document deep retrieval with specialized strategies
+ * ✅ Single document deep retrieval with optional reranking
  */
 async function singleDocumentRetrieval(
   embedding: number[],
   documentIds: string[],
   query: string,
   queryType: string,
-  keywords: string[]
+  keywords: string[],
+  useReranking: boolean = true
 ): Promise<RetrievalResult> {
   console.log(`📄 Single document strategy: ${queryType}`);
 
@@ -187,35 +217,40 @@ async function singleDocumentRetrieval(
   // Stage 1: Strategy-specific retrieval
   switch (queryType) {
     case 'narrative':
-      chunks = await narrativeRetrieval(embedding, documentIds, keywords);
+      chunks = await narrativeRetrieval(embedding, documentIds, keywords, useReranking);
       strategy = 'narrative_contextual';
       break;
 
     case 'analytical':
-      chunks = await analyticalRetrieval(embedding, documentIds);
+      chunks = await analyticalRetrieval(embedding, documentIds, useReranking);
       strategy = 'analytical_diverse';
       break;
 
     case 'factual':
-      chunks = await factualRetrieval(embedding, documentIds, keywords);
+      chunks = await factualRetrieval(embedding, documentIds, keywords, useReranking);
       strategy = 'factual_precision';
       break;
 
     case 'thematic':
-      chunks = await thematicRetrieval(embedding, documentIds);
+      chunks = await thematicRetrieval(embedding, documentIds, useReranking);
       strategy = 'thematic_comprehensive';
       break;
 
     default:
-      chunks = await hybridRetrieval(embedding, documentIds, keywords);
+      chunks = await hybridRetrieval(embedding, documentIds, keywords, useReranking);
       strategy = 'hybrid_adaptive';
   }
 
-  // Stage 2: Rerank for precision
-  if (chunks.length > 0) {
+  // ✅ Stage 2: Conditional reranking
+  if (useReranking && chunks.length > 15) {
     console.log(`🔍 Reranking ${chunks.length} candidates for query: "${query}"`);
     chunks = await rerankChunks(query, chunks, 15);
     strategy += '_reranked';
+  } else if (!useReranking) {
+    console.log('📋 Using direct results (no reranking)');
+    // Keep more chunks without reranking
+    chunks = chunks.slice(0, queryType === 'factual' ? 50 : 40);
+    strategy += '_direct';
   }
 
   const confidence = calculateChunkConfidence(chunks);
@@ -227,24 +262,24 @@ async function singleDocumentRetrieval(
 }
 
 /**
- * NARRATIVE RETRIEVAL: Story flow with context preservation
+ * ✅ NARRATIVE RETRIEVAL with optional reranking support
  */
 async function narrativeRetrieval(
   embedding: number[],
   documentIds: string[],
-  keywords: string[]
+  keywords: string[],
+  useReranking: boolean = true
 ): Promise<any[]> {
-  const chunks: any[] = [];
   const chunkMap = new Map<string, any>();
 
-  // 1. Critical early content (setup, characters, themes)
+  // 1. Critical early content
   const { data: earlyChunks } = await supabaseAdmin
     .from('embeddings')
     .select('*')
     .in('document_id', documentIds)
     .lte('page_number', 25)
     .order('page_number', { ascending: true })
-    .limit(12);
+    .limit(useReranking ? 12 : 20); // ✅ More without reranking
 
   if (earlyChunks) {
     earlyChunks.forEach(c => {
@@ -258,20 +293,25 @@ async function narrativeRetrieval(
   }
 
   // 2. High-relevance vector search
-  const vectorResults = await searchSimilarChunks(embedding, documentIds, 100);
+  const vectorResults = await searchSimilarChunks(
+    embedding, 
+    documentIds, 
+    useReranking ? 100 : 150 // ✅ More without reranking
+  );
+  
   vectorResults
     .filter((r: any) => (r.similarity || 0) >= 0.35)
-    .slice(0, 30)
+    .slice(0, useReranking ? 30 : 50) // ✅ More without reranking
     .forEach(c => {
       if (!chunkMap.has(c.chunk_text) || c.similarity > (chunkMap.get(c.chunk_text)?.similarity || 0)) {
         chunkMap.set(c.chunk_text, { ...c, source: 'vector_match' });
       }
     });
 
-  // 3. Sequential context expansion (neighbors of high-scoring chunks)
+  // 3. Sequential context expansion
   const topChunks = Array.from(chunkMap.values())
     .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
-    .slice(0, 10);
+    .slice(0, useReranking ? 10 : 15); // ✅ More without reranking
 
   for (const chunk of topChunks) {
     const { data: neighbors } = await supabaseAdmin
@@ -281,7 +321,7 @@ async function narrativeRetrieval(
       .gte('page_number', chunk.page_number - 1)
       .lte('page_number', chunk.page_number + 1)
       .neq('chunk_text', chunk.chunk_text)
-      .limit(4);
+      .limit(useReranking ? 4 : 6); // ✅ More without reranking
 
     if (neighbors) {
       neighbors.forEach(n => {
@@ -297,13 +337,13 @@ async function narrativeRetrieval(
   }
 
   // 4. Keyword-enhanced retrieval
-  for (const keyword of keywords.slice(0, 4)) {
+  for (const keyword of keywords.slice(0, useReranking ? 4 : 6)) {
     const { data: keywordChunks } = await supabaseAdmin
       .from('embeddings')
       .select('*')
       .in('document_id', documentIds)
       .ilike('chunk_text', `%${keyword}%`)
-      .limit(8);
+      .limit(useReranking ? 8 : 12); // ✅ More without reranking
 
     if (keywordChunks) {
       keywordChunks.forEach(c => {
@@ -320,17 +360,23 @@ async function narrativeRetrieval(
 
   return Array.from(chunkMap.values())
     .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
-    .slice(0, 50);
+    .slice(0, useReranking ? 50 : 80); // ✅ More without reranking
 }
 
 /**
- * ANALYTICAL RETRIEVAL: Diverse perspectives with depth
+ * ✅ ANALYTICAL RETRIEVAL with optional reranking support
  */
 async function analyticalRetrieval(
   embedding: number[],
-  documentIds: string[]
+  documentIds: string[],
+  useReranking: boolean = true
 ): Promise<any[]> {
-  const vectorResults = await searchSimilarChunks(embedding, documentIds, 150);
+  const vectorResults = await searchSimilarChunks(
+    embedding, 
+    documentIds, 
+    useReranking ? 150 : 200 // ✅ More without reranking
+  );
+  
   const relevant = vectorResults.filter((r: any) => (r.similarity || 0) >= 0.30);
 
   // Strategy 1: Page-group diversity
@@ -345,14 +391,13 @@ async function analyticalRetrieval(
 
   const diverseChunks: any[] = [];
   for (const chunks of pageGroups.values()) {
-    // Take top 2 from each page group for diversity
-    diverseChunks.push(...chunks.slice(0, 2));
+    diverseChunks.push(...chunks.slice(0, useReranking ? 2 : 3)); // ✅ More without reranking
   }
 
-  // Strategy 2: Add high-confidence chunks regardless of page
+  // Strategy 2: Add high-confidence chunks
   const highConfidence = relevant
     .filter((r: any) => (r.similarity || 0) >= 0.65)
-    .slice(0, 15);
+    .slice(0, useReranking ? 15 : 25); // ✅ More without reranking
 
   const chunkMap = new Map<string, any>();
   [...diverseChunks, ...highConfidence].forEach(c => {
@@ -363,34 +408,39 @@ async function analyticalRetrieval(
 
   return Array.from(chunkMap.values())
     .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
-    .slice(0, 45);
+    .slice(0, useReranking ? 45 : 70); // ✅ More without reranking
 }
 
 /**
- * FACTUAL RETRIEVAL: Precision-focused with validation
+ * ✅ FACTUAL RETRIEVAL with optional reranking support (CRITICAL FOR YOUR USE CASE)
  */
 async function factualRetrieval(
   embedding: number[],
   documentIds: string[],
-  keywords: string[]
+  keywords: string[],
+  useReranking: boolean = true
 ): Promise<any[]> {
-  const chunks: any[] = [];
   const chunkMap = new Map<string, any>();
 
   // 1. High-precision vector search
-  const vectorResults = await searchSimilarChunks(embedding, documentIds, 80);
+  const vectorResults = await searchSimilarChunks(
+    embedding, 
+    documentIds, 
+    useReranking ? 80 : 150 // ✅ MUCH MORE without reranking
+  );
+  
   vectorResults
-    .filter((r: any) => (r.similarity || 0) >= 0.40) // Higher threshold for factual
+    .filter((r: any) => (r.similarity || 0) >= (useReranking ? 0.40 : 0.30)) // ✅ Lower threshold without reranking
     .forEach(c => chunkMap.set(c.chunk_text, c));
 
-  // 2. Exact keyword matching for factual accuracy
-  for (const keyword of keywords.slice(0, 5)) {
+  // 2. ✅ COMPREHENSIVE keyword matching (CRITICAL FOR "FIND ALL" QUERIES)
+  for (const keyword of keywords.slice(0, useReranking ? 5 : 10)) {
     const { data: exactMatches } = await supabaseAdmin
       .from('embeddings')
       .select('*')
       .in('document_id', documentIds)
       .ilike('chunk_text', `%${keyword}%`)
-      .limit(10);
+      .limit(useReranking ? 10 : 30); // ✅ MANY MORE without reranking
 
     if (exactMatches) {
       exactMatches.forEach(c => {
@@ -406,10 +456,10 @@ async function factualRetrieval(
     }
   }
 
-  // 3. Cross-reference validation (find supporting chunks)
+  // 3. Cross-reference validation
   const topChunks = Array.from(chunkMap.values())
     .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
-    .slice(0, 8);
+    .slice(0, useReranking ? 8 : 15); // ✅ More without reranking
 
   for (const chunk of topChunks) {
     const { data: relatedChunks } = await supabaseAdmin
@@ -419,7 +469,7 @@ async function factualRetrieval(
       .gte('page_number', Math.max(1, chunk.page_number - 2))
       .lte('page_number', chunk.page_number + 2)
       .neq('chunk_text', chunk.chunk_text)
-      .limit(3);
+      .limit(useReranking ? 3 : 5); // ✅ More without reranking
 
     if (relatedChunks) {
       relatedChunks.forEach(c => {
@@ -436,25 +486,31 @@ async function factualRetrieval(
 
   return Array.from(chunkMap.values())
     .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
-    .slice(0, 40);
+    .slice(0, useReranking ? 40 : 100); // ✅ UP TO 100 CHUNKS without reranking!
 }
 
 /**
- * THEMATIC RETRIEVAL: Comprehensive document understanding
+ * ✅ THEMATIC RETRIEVAL with optional reranking support
  */
 async function thematicRetrieval(
   embedding: number[],
-  documentIds: string[]
+  documentIds: string[],
+  useReranking: boolean = true
 ): Promise<any[]> {
   const chunkMap = new Map<string, any>();
 
   // 1. High-quality vector matches
-  const vectorResults = await searchSimilarChunks(embedding, documentIds, 120);
+  const vectorResults = await searchSimilarChunks(
+    embedding, 
+    documentIds, 
+    useReranking ? 120 : 180 // ✅ More without reranking
+  );
+  
   vectorResults
     .filter((r: any) => (r.similarity || 0) >= 0.32)
     .forEach(c => chunkMap.set(c.chunk_text, c));
 
-  // 2. Strategic document sampling (beginning, multiple middle sections, end)
+  // 2. Strategic document sampling
   const { data: maxPageData } = await supabaseAdmin
     .from('embeddings')
     .select('page_number')
@@ -480,7 +536,7 @@ async function thematicRetrieval(
         .gte('page_number', section.start)
         .lte('page_number', section.end)
         .order('page_number', { ascending: true })
-        .limit(6);
+        .limit(useReranking ? 6 : 10); // ✅ More without reranking
 
       if (sectionChunks) {
         sectionChunks.forEach(c => {
@@ -498,34 +554,40 @@ async function thematicRetrieval(
 
   return Array.from(chunkMap.values())
     .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
-    .slice(0, 50);
+    .slice(0, useReranking ? 50 : 80); // ✅ More without reranking
 }
 
 /**
- * HYBRID RETRIEVAL: Adaptive multi-strategy approach
+ * ✅ HYBRID RETRIEVAL with optional reranking support
  */
 async function hybridRetrieval(
   embedding: number[],
   documentIds: string[],
-  keywords: string[]
+  keywords: string[],
+  useReranking: boolean = true
 ): Promise<any[]> {
   const chunkMap = new Map<string, any>();
 
   // 1. Strong vector search
-  const vectorResults = await searchSimilarChunks(embedding, documentIds, 100);
+  const vectorResults = await searchSimilarChunks(
+    embedding, 
+    documentIds, 
+    useReranking ? 100 : 150 // ✅ More without reranking
+  );
+  
   vectorResults
     .filter((r: any) => (r.similarity || 0) >= 0.35)
-    .slice(0, 35)
+    .slice(0, useReranking ? 35 : 55) // ✅ More without reranking
     .forEach(c => chunkMap.set(c.chunk_text, c));
 
   // 2. Keyword support
-  for (const keyword of keywords.slice(0, 3)) {
+  for (const keyword of keywords.slice(0, useReranking ? 3 : 5)) {
     const { data: keywordChunks } = await supabaseAdmin
       .from('embeddings')
       .select('*')
       .in('document_id', documentIds)
       .ilike('chunk_text', `%${keyword}%`)
-      .limit(8);
+      .limit(useReranking ? 8 : 15); // ✅ More without reranking
 
     if (keywordChunks) {
       keywordChunks.forEach(c => {
@@ -541,12 +603,15 @@ async function hybridRetrieval(
   }
 
   // 3. Diversity sampling
-  const diverse = applyDiversitySampling(Array.from(chunkMap.values()), 15);
+  const diverse = applyDiversitySampling(
+    Array.from(chunkMap.values()), 
+    useReranking ? 15 : 25 // ✅ More without reranking
+  );
   diverse.forEach(c => chunkMap.set(c.chunk_text, c));
 
   return Array.from(chunkMap.values())
     .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
-    .slice(0, 45);
+    .slice(0, useReranking ? 45 : 70); // ✅ More without reranking
 }
 
 /**
@@ -561,7 +626,6 @@ async function enrichWithDocumentSpecificContent(
   const chunkMap = new Map<string, any>();
   baseChunks.forEach(c => chunkMap.set(c.chunk_text, c));
 
-  // Add high-scoring chunks from each document
   for (const docId of documentIds) {
     const docSpecific = await searchSimilarChunks(embedding, [docId], 15);
     docSpecific
@@ -589,7 +653,6 @@ async function applyQueryTypeEnhancement(
   const chunkMap = new Map<string, any>();
   chunks.forEach(c => chunkMap.set(c.chunk_text, c));
 
-  // Add targeted expansion based on query type
   const expansionLimit = queryType === 'thematic' ? 20 : 15;
   
   const additional = await searchSimilarChunks(embedding, documentIds, 50);
@@ -624,12 +687,10 @@ function ensureCrossDocumentBalance(
 
   const balanced: any[] = [];
   
-  // First pass: ensure minimum from each document
   for (const [docId, docChunks] of docGroups.entries()) {
     balanced.push(...docChunks.slice(0, minPerDoc));
   }
 
-  // Second pass: fill remaining slots with highest-scoring chunks
   const remaining = chunks.filter(c => !balanced.includes(c));
   balanced.push(...remaining.slice(0, targetCount - balanced.length));
 
@@ -652,7 +713,7 @@ function applyDiversitySampling(chunks: any[], sampleSize: number): any[] {
 
   const diverse: any[] = [];
   for (const group of pageGroups.values()) {
-    diverse.push(group[0]); // Take best from each group
+    diverse.push(group[0]);
     if (diverse.length >= sampleSize) break;
   }
 
@@ -707,6 +768,5 @@ function calculateChunkConfidence(chunks: any[]): number {
   const topScores = chunks.slice(0, 5).map(c => c.similarity || 0);
   const avgScore = topScores.reduce((a, b) => a + b, 0) / topScores.length;
   
-  // Boost confidence if we have good chunks
   return Math.max(avgScore, chunks.length >= 10 ? 0.65 : 0.55);
 }

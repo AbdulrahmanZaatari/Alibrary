@@ -161,6 +161,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
   const [modelError, setModelError] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
+  const [useReranking, setUseReranking] = useState(true);
 
   const AVAILABLE_MODELS = [
     { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Best Quality)', tier: 'premium' },
@@ -960,6 +961,7 @@ async function extractPageText() {
       customPrompt: selectedPrompt || '',
       enableMultiHop: enableMultiHop,
       preferredModel: selectedModel,
+      useReranking: useReranking,
     };
 
     console.log('🔄 Sending to:', endpoint, 'Model:', selectedModel);
@@ -1873,6 +1875,30 @@ async function extractPageText() {
                   )}
                 </div>
 
+                <div className="flex items-center justify-between p-2 bg-gray-50 rounded">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-purple-600" />
+                    <span className="text-xs font-medium">AI Reranking</span>
+                  </div>
+                  <button
+                    onClick={() => setUseReranking(!useReranking)}
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                      useReranking ? 'bg-purple-600' : 'bg-gray-300'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                        useReranking ? 'translate-x-5' : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  {useReranking 
+                    ? "Using AI to select 15 most relevant passages" 
+                    : "Returning up to 50 passages without AI filtering"}
+                </p>
+
                 {/* Corpus Selection */}
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-2">
@@ -2176,7 +2202,7 @@ async function extractPageText() {
     </div>
 
     <div className="flex-1 overflow-y-auto p-4">
-      
+
 {/* ✅ IMPROVED: Current Page Comments */}
       {commentView === 'current' && (
         <>

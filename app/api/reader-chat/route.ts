@@ -146,7 +146,8 @@ export async function POST(req: NextRequest) {
         aggressiveCorrection = false,
         customPrompt,
         enableMultiHop = false,
-        preferredModel
+        preferredModel, 
+        useReranking = true
       } = await req.json();
 
       const userMessage = message || query;
@@ -268,7 +269,8 @@ export async function POST(req: NextRequest) {
           history,
           bookTitle,
           bookPage,
-          preferredModel
+          preferredModel,
+          useReranking
         );
       } 
       else if (sessionId) {
@@ -314,7 +316,8 @@ async function handleCorpusQuery(
   history?: Array<{ role: string; content: string }>,
   bookTitle?: string,
   bookPage?: number,
-  preferredModel?: string
+  preferredModel?: string,
+  useReranking: boolean = true
 ) {
   let conversationContextString = '';
   let contextualPromptAddition = '';
@@ -417,12 +420,14 @@ async function handleCorpusQuery(
   }
 
   console.log('🔄 Starting smart retrieval...');
-  const { chunks, strategy, confidence } = await retrieveSmartContext(queryAnalysis, documentIds);
+  const { chunks, strategy, confidence } = await retrieveSmartContext(queryAnalysis, documentIds, useReranking);
   
   console.log(`📊 Retrieval Results:
    - Strategy: ${strategy}
    - Chunks found: ${chunks.length}
-   - Confidence: ${(confidence * 100).toFixed(1)}%`);
+   - Confidence: ${(confidence * 100).toFixed(1)}%
+   - Reranking: ${useReranking ? 'enabled' : 'disabled'}`); 
+
 
   const processedChunks = chunks;
 
