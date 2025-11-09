@@ -432,7 +432,7 @@ async function exhaustiveKeywordSearch(
       }
       return a.page_number - b.page_number;
     })
-    .slice(0, 150);
+    .slice(0, 130);
 }
 
 /**
