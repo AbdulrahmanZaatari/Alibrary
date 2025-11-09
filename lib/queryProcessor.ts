@@ -35,6 +35,98 @@ export function detectLanguage(text: string): 'ar' | 'en' | 'mixed' {
 }
 
 /**
+ * ✅ Clean and validate keywords for search
+ */
+function cleanKeywords(keywords: string[], lang: 'ar' | 'en'): string[] {
+  console.log('   🧹 Cleaning keywords...');
+  
+  const cleaned = keywords
+    .map(k => k.trim())
+    .filter(k => {
+      // Remove empty keywords
+      if (!k || k.length < 2) {
+        console.log(`   ⚠️ Skipping short keyword: "${k}"`);
+        return false;
+      }
+      
+      // Remove keywords with special characters at start
+      if (/^[*:#\-،.!?؛]/.test(k)) {
+        console.log(`   ⚠️ Skipping keyword with special char: "${k}"`);
+        return false;
+      }
+      
+      // For Arabic queries, skip English-only keywords
+      if (lang === 'ar' && /^[a-zA-Z\s:،\-]+$/.test(k)) {
+        console.log(`   ⚠️ Skipping English keyword in Arabic query: "${k}"`);
+        return false;
+      }
+      
+      return true;
+    })
+    // Extract actual words from complex patterns
+    .map(k => {
+      // Remove prefixes like "* مشتقات: " or "- تحليل:" and keep only the actual word
+      if (lang === 'ar') {
+        // Extract all Arabic words from the keyword
+        const arabicWords = k.match(/[\u0600-\u06FF]+/g);
+        if (arabicWords && arabicWords.length > 0) {
+          // Return the longest Arabic word (likely the main keyword)
+          return arabicWords.sort((a, b) => b.length - a.length)[0];
+        }
+      } else {
+        // For English, remove special chars and punctuation
+        return k.replace(/[*:#\-،.!?؛]/g, '').trim();
+      }
+      return k;
+    })
+    .filter(k => k.length >= 2) // Re-filter after extraction
+    // Remove duplicates (case-insensitive for English, exact for Arabic)
+    .filter((k, i, arr) => {
+      if (lang === 'ar') {
+        return arr.indexOf(k) === i; // Exact match for Arabic
+      } else {
+        return arr.findIndex(item => item.toLowerCase() === k.toLowerCase()) === i;
+      }
+    })
+    .slice(0, 20); // Limit to 20 keywords max
+
+  console.log(`   ✅ Cleaned keywords (${cleaned.length}):`, cleaned);
+  
+  return cleaned;
+}
+
+/**
+ * ✅ Extract Arabic words directly from query as fallback
+ */
+function extractArabicKeywords(query: string): string[] {
+  // Extract all Arabic words (3+ characters)
+  const arabicWords = query.match(/[\u0600-\u06FF]{3,}/g) || [];
+  
+  // Remove duplicates and common stop words
+  const stopWords = ['الذي', 'التي', 'هذا', 'هذه', 'ذلك', 'تلك', 'هنا', 'هناك', 'كان', 'يكون'];
+  
+  return arabicWords
+    .filter(word => !stopWords.includes(word))
+    .filter((word, i, arr) => arr.indexOf(word) === i)
+    .slice(0, 10);
+}
+
+/**
+ * ✅ Extract English words directly from query as fallback
+ */
+function extractEnglishKeywords(query: string): string[] {
+  // Extract words 4+ characters, excluding common stop words
+  const stopWords = ['this', 'that', 'these', 'those', 'what', 'where', 'when', 'which', 'there', 'their', 'about'];
+  
+  return query
+    .toLowerCase()
+    .match(/\b[a-z]{4,}\b/g)
+    ?.filter(word => !stopWords.includes(word))
+    .filter((word, i, arr) => arr.indexOf(word) === i)
+    .slice(0, 10) || [];
+}
+
+/**
  * ✅ Translate query to target language using Gemini with fallback
  */
 export async function translateQuery(
@@ -140,16 +232,18 @@ Return ONLY the category name:`;
  */
 export async function expandQuery(query: string, lang: 'ar' | 'en'): Promise<string[]> {
   const prompt = lang === 'ar'
-    ? `لهذا السؤال، أعطني 3-5 كلمات مفتاحية أو مرادفات للبحث. فقط الكلمات، بدون شرح:
+    ? `لهذا السؤال، استخرج الكلمات المفتاحية الأساسية (3-8 كلمات فقط).
+أعطني فقط الكلمات العربية المهمة، بدون رموز أو ترقيم أو شرح.
 
 السؤال: "${query}"
 
-الكلمات المفتاحية:`
-    : `For this question, give me 3-5 keywords or synonyms for search. Just the words, no explanations:
+الكلمات المفتاحية (كلمات عربية فقط):`
+    : `For this question, extract the core keywords (3-8 words only).
+Give me only the important English words, no symbols, numbering, or explanations.
 
 Question: "${query}"
 
-Keywords:`;
+Keywords (words only):`;
 
   let lastError: Error | null = null;
 
@@ -158,14 +252,19 @@ Keywords:`;
     try {
       const model = genAI.getGenerativeModel({ model: modelName });
       const result = await model.generateContent(prompt);
-      const keywords = result.response
+      const rawKeywords = result.response
         .text()
         .split(/[,،\n]/)
         .map(k => k.trim())
         .filter(k => k.length > 0);
 
-      if (keywords.length > 0) {
-        return keywords;
+      if (rawKeywords.length > 0) {
+        // Clean the keywords before returning
+        const cleaned = cleanKeywords(rawKeywords, lang);
+        
+        if (cleaned.length > 0) {
+          return cleaned;
+        }
       }
       
     } catch (error) {
@@ -177,20 +276,18 @@ Keywords:`;
     }
   }
 
-  // ✅ All models failed - extract basic keywords from query
-  console.error('❌ All keyword expansion models failed, using basic extraction');
+  // ✅ All models failed - extract keywords directly from query
+  console.error('❌ All keyword expansion models failed, using direct extraction');
   if (lastError) {
     console.error('Last error:', lastError.message);
   }
   
-  // Fallback: simple keyword extraction
-  const basicKeywords = query
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(word => word.length > 3)
-    .slice(0, 5);
-  
-  return basicKeywords;
+  // Fallback: extract keywords based on language
+  if (lang === 'ar') {
+    return extractArabicKeywords(query);
+  } else {
+    return extractEnglishKeywords(query);
+  }
 }
 
 /**
@@ -257,14 +354,21 @@ export async function analyzeQuery(
   let keywords: string[];
   try {
     keywords = await expandQuery(searchQuery, documentLanguage);
+    
+    // ✅ Final validation: ensure we have valid keywords
+    if (keywords.length === 0) {
+      console.warn('   ⚠️ No keywords after expansion, extracting from query...');
+      keywords = documentLanguage === 'ar' 
+        ? extractArabicKeywords(searchQuery)
+        : extractEnglishKeywords(searchQuery);
+    }
+    
     console.log(`   🔑 Keywords: ${keywords.join(', ')}`);
   } catch (error) {
-    console.error('   ❌ Keyword expansion failed, using basic extraction');
-    keywords = searchQuery
-      .toLowerCase()
-      .split(/\s+/)
-      .filter(word => word.length > 3)
-      .slice(0, 5);
+    console.error('   ❌ Keyword expansion failed, using direct extraction');
+    keywords = documentLanguage === 'ar'
+      ? extractArabicKeywords(searchQuery)
+      : extractEnglishKeywords(searchQuery);
   }
 
   // Build expanded query for embedding
