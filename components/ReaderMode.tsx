@@ -162,6 +162,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [modelError, setModelError] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
   const [useReranking, setUseReranking] = useState(true);
+  const [useKeywordSearch, setUseKeywordSearch] = useState(false);
 
   const AVAILABLE_MODELS = [
     { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Best Quality)', tier: 'premium' },
@@ -961,7 +962,8 @@ async function extractPageText() {
       customPrompt: selectedPrompt || '',
       enableMultiHop: enableMultiHop,
       preferredModel: selectedModel,
-      useReranking: useReranking,
+      useReranking: useKeywordSearch ? false : useReranking,
+      useKeywordSearch: useKeywordSearch,
     };
 
     console.log('🔄 Sending to:', endpoint, 'Model:', selectedModel);
@@ -1962,6 +1964,45 @@ async function extractPageText() {
                 </label>
               </div>
             )}
+
+            {/* Keyword-First Search Toggle */}
+              <div className="flex items-center justify-between p-2 bg-amber-50 rounded border border-amber-200">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <FileText className="w-4 h-4 text-amber-600" />
+                    <span className="text-xs font-medium text-amber-900">Keyword Search</span>
+                  </div>
+                  <p className="text-xs text-amber-700 mt-1">
+                    Find ALL exact word occurrences
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    setUseKeywordSearch(!useKeywordSearch);
+                    if (!useKeywordSearch) {
+                      setUseReranking(false); // Auto-disable reranking
+                    }
+                  }}
+                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                    useKeywordSearch ? 'bg-amber-600' : 'bg-gray-300'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                      useKeywordSearch ? 'translate-x-5' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {useKeywordSearch && (
+                <div className="p-2 bg-amber-100 rounded text-xs text-amber-800 space-y-1">
+                  <p><strong>🔑 Keyword Mode:</strong> Searches for exact text matches</p>
+                  <p><strong>✅ Best for:</strong> Finding specific Arabic words/phrases</p>
+                  <p><strong>📊 Returns:</strong> Up to 150 passages with matches</p>
+                  <p><strong>⚠️ Note:</strong> Bypasses AI embeddings completely</p>
+                </div>
+              )}
 
             {/* Session List */}
             {showSessionList && (

@@ -29,12 +29,89 @@ interface RetrievalConfig {
 }
 
 /**
- * ✅ Enhanced retrieve context with optional reranking
+ * ✅ EXHAUSTIVE KEYWORD SEARCH - Bypasses embeddings completely
+ * Uses PostgreSQL full-text search for exact matches
+ */
+async function exhaustiveKeywordSearch(
+  keywords: string[],
+  documentIds: string[]
+): Promise<any[]> {
+  console.log(`🔍 EXHAUSTIVE KEYWORD SEARCH MODE`);
+  console.log(`   Keywords:`, keywords);
+  console.log(`   Documents:`, documentIds.length);
+  
+  const allResults = new Map<string, any>();
+  
+  // ✅ Search for EACH keyword variant
+  for (const keyword of keywords) {
+    if (keyword.length < 2) continue; // Skip very short keywords
+    
+    console.log(`   📍 Searching for: "${keyword}"`);
+    
+    // ✅ Use ILIKE for case-insensitive, Arabic-friendly search
+    const { data, error } = await supabaseAdmin
+      .from('embeddings')
+      .select('*')
+      .in('document_id', documentIds)
+      .ilike('chunk_text', `%${keyword}%`)
+      .order('page_number', { ascending: true })
+      .limit(300); // Very high limit
+    
+    if (error) {
+      console.error(`   ❌ Error searching for "${keyword}":`, error);
+      continue;
+    }
+    
+    if (data && data.length > 0) {
+      console.log(`   ✅ Found ${data.length} matches for "${keyword}"`);
+      
+      data.forEach(chunk => {
+        // Use chunk ID + text as unique key to avoid duplicates
+        const key = `${chunk.id}-${chunk.chunk_text.substring(0, 50)}`;
+        
+        if (!allResults.has(key)) {
+          allResults.set(key, {
+            ...chunk,
+            matched_keyword: keyword,
+            source: 'exhaustive_keyword',
+            similarity: 0.75, // Assign good similarity score
+            keyword_count: (chunk.chunk_text.match(new RegExp(keyword, 'gi')) || []).length
+          });
+        } else {
+          // If already exists, update keyword count
+          const existing = allResults.get(key);
+          existing.keyword_count = (existing.keyword_count || 0) + 
+            (chunk.chunk_text.match(new RegExp(keyword, 'gi')) || []).length;
+        }
+      });
+    } else {
+      console.log(`   ⚠️ No matches found for "${keyword}"`);
+    }
+  }
+  
+  const results = Array.from(allResults.values());
+  console.log(`\n📊 TOTAL UNIQUE CHUNKS FOUND: ${results.length}`);
+  
+  // ✅ Sort by page number for chronological order
+  return results
+    .sort((a, b) => {
+      // First by document, then by page
+      if (a.document_id !== b.document_id) {
+        return a.document_id.localeCompare(b.document_id);
+      }
+      return a.page_number - b.page_number;
+    })
+    .slice(0, 150); // Return up to 150 chunks
+}
+
+/**
+ * ✅ Enhanced retrieve context with keyword-first search
  */
 export async function retrieveSmartContext(
   queryAnalysis: any,
   documentIds: string[],
-  useReranking: boolean = true // ✅ NEW PARAMETER
+  useReranking: boolean = true,
+  useKeywordSearch: boolean = false // ✅ NEW PARAMETER
 ): Promise<RetrievalResult> {
   const { 
     expandedQuery, 
@@ -46,6 +123,27 @@ export async function retrieveSmartContext(
 
   console.log(`🎯 Advanced retrieval for "${queryType}" query across ${documentIds.length} document(s)`);
   console.log(`   Reranking: ${useReranking ? 'enabled' : 'disabled'}`);
+  console.log(`   Keyword Search: ${useKeywordSearch ? 'enabled' : 'disabled'}`);
+
+  // ✅ PRIORITY 0: Keyword-first search (if enabled)
+  if (useKeywordSearch && keywords && keywords.length > 0) {
+    console.log('🔑 Using KEYWORD-FIRST search strategy');
+    
+    const keywordResults = await exhaustiveKeywordSearch(keywords, documentIds);
+    
+    if (keywordResults.length > 0) {
+      const metadata = buildRetrievalMetadata(keywordResults, documentIds, keywordResults.length);
+      
+      return {
+        chunks: keywordResults,
+        strategy: 'keyword_exhaustive',
+        confidence: 0.95, // High confidence for exact matches
+        metadata
+      };
+    } else {
+      console.log('⚠️ No keyword matches found, falling back to vector search');
+    }
+  }
 
   const embedding = await embedText(expandedQuery);
   const isMultiDoc = documentIds.length > 1;
@@ -57,7 +155,7 @@ export async function retrieveSmartContext(
       documentIds,
       originalQuery,
       queryType,
-      useReranking // ✅ PASS PARAMETER
+      useReranking
     );
   }
 
@@ -68,7 +166,7 @@ export async function retrieveSmartContext(
       documentIds,
       originalQuery,
       queryType,
-      useReranking // ✅ PASS PARAMETER
+      useReranking
     );
   }
 
@@ -79,7 +177,7 @@ export async function retrieveSmartContext(
     originalQuery,
     queryType,
     keywords,
-    useReranking // ✅ PASS PARAMETER
+    useReranking
   );
 }
 

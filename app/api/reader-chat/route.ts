@@ -147,7 +147,8 @@ export async function POST(req: NextRequest) {
         customPrompt,
         enableMultiHop = false,
         preferredModel, 
-        useReranking = true
+        useReranking = true,
+        useKeywordSearch = false
       } = await req.json();
 
       const userMessage = message || query;
@@ -158,7 +159,8 @@ export async function POST(req: NextRequest) {
         hasCorpus: documentIds?.length > 0,
         corpusCount: documentIds?.length || 0,
         enableMultiHop,
-        preferredModel
+        preferredModel,
+        useKeywordSearch
       });
 
       if (!userMessage) {
@@ -270,7 +272,8 @@ export async function POST(req: NextRequest) {
           bookTitle,
           bookPage,
           preferredModel,
-          useReranking
+          useKeywordSearch ? false : useReranking,
+          useKeywordSearch
         );
       } 
       else if (sessionId) {
@@ -317,7 +320,8 @@ async function handleCorpusQuery(
   bookTitle?: string,
   bookPage?: number,
   preferredModel?: string,
-  useReranking: boolean = true
+  useReranking: boolean = true,
+  useKeywordSearch: boolean = false
 ) {
   let conversationContextString = '';
   let contextualPromptAddition = '';
@@ -420,14 +424,18 @@ async function handleCorpusQuery(
   }
 
   console.log('🔄 Starting smart retrieval...');
-  const { chunks, strategy, confidence } = await retrieveSmartContext(queryAnalysis, documentIds, useReranking);
+  const { chunks, strategy, confidence } = await retrieveSmartContext(
+    queryAnalysis, 
+    documentIds, 
+    useReranking, 
+    useKeywordSearch
+  );
   
   console.log(`📊 Retrieval Results:
    - Strategy: ${strategy}
    - Chunks found: ${chunks.length}
    - Confidence: ${(confidence * 100).toFixed(1)}%
-   - Reranking: ${useReranking ? 'enabled' : 'disabled'}`); 
-
+   - Keyword Search: ${useKeywordSearch ? 'enabled' : 'disabled'}`);
 
   const processedChunks = chunks;
 
@@ -464,20 +472,30 @@ async function handleCorpusQuery(
       
       const pageEntries = Array.from(pageGroups.entries())
         .sort((a, b) => {
-          const maxSimA = Math.max(...a[1].map(c => c.similarity || 0));
-          const maxSimB = Math.max(...b[1].map(c => c.similarity || 0));
-          return maxSimB - maxSimA;
+          if (useKeywordSearch) {
+            // Sort by page number for keyword search
+            return a[0] - b[0];
+          } else {
+            // Sort by similarity for regular search
+            const maxSimA = Math.max(...a[1].map(c => c.similarity || 0));
+            const maxSimB = Math.max(...b[1].map(c => c.similarity || 0));
+            return maxSimB - maxSimA;
+          }
         })
-        .slice(0, 10);
+        .slice(0, useKeywordSearch ? 50 : 10); // More pages for keyword search
       
       const pagesText = pageEntries
         .map(([pageNum, pageChunks]) => {
           const bestSimilarity = Math.max(...pageChunks.map(c => c.similarity || 0));
-          const relevanceIcon = bestSimilarity >= 0.5 ? '🎯' : bestSimilarity >= 0.4 ? '✓' : '📄';
+          const matchedKeyword = pageChunks[0]?.matched_keyword;
+          
+          const relevanceIcon = useKeywordSearch 
+            ? '🔍' 
+            : (bestSimilarity >= 0.5 ? '🎯' : bestSimilarity >= 0.4 ? '✓' : '📄');
           
           const pageHeader = isArabic 
-            ? `**${relevanceIcon} صفحة ${pageNum}**`
-            : `**${relevanceIcon} Page ${pageNum}**`;
+            ? `**${relevanceIcon} صفحة ${pageNum}${matchedKeyword ? ` (${matchedKeyword})` : ''}**`
+            : `**${relevanceIcon} Page ${pageNum}${matchedKeyword ? ` (${matchedKeyword})` : ''}**`;
           
           const pageText = pageChunks.map(c => c.chunk_text).join('\n\n');
           return `${pageHeader}\n${pageText}`;
@@ -528,8 +546,28 @@ async function handleCorpusQuery(
 
   const isArabic = responseLanguage === 'ar';
   
+  // ✅ ADD KEYWORD SEARCH INSTRUCTIONS TO SYSTEM PROMPT
+  let keywordSearchInstructions = '';
+  if (useKeywordSearch) {
+    keywordSearchInstructions = isArabic
+      ? `\n\n🔑 **وضع البحث بالكلمات المفتاحية:**
+   - النتائج تحتوي على تطابقات دقيقة للكلمات المطلوبة
+   - **اذكر جميع الاستخدامات الموجودة** مرتبة حسب رقم الصفحة
+   - ضع رقم الصفحة لكل استخدام
+   - قدم سياقاً موجزاً وتحليلاً لكل تطابق
+   - اجمع الاستخدامات المتشابهة معاً إن أمكن
+   - **لا تلخص - اذكر كل ما وجدته**\n`
+      : `\n\n🔑 **KEYWORD SEARCH MODE:**
+   - Results contain EXACT MATCHES for the search terms
+   - **List ALL occurrences found** in chronological order (by page)
+   - Include page number for each occurrence
+   - Provide brief context and analysis for each match
+   - Group similar usages together if applicable
+   - **Do not summarize - list everything found**\n`;
+  }
+  
   const systemPrompt = isArabic
-  ? `أنت مساعد بحثي دقيق ومتخصص يتذكر السياق. استخدم تنسيق Markdown في إجاباتك.
+    ? `أنت مساعد بحثي دقيق ومتخصص يتذكر السياق. استخدم تنسيق Markdown في إجاباتك.
 
 📋 **القواعد الأساسية:**
 
@@ -569,9 +607,8 @@ async function handleCorpusQuery(
 
 ${isMultilingual ? '7. **تعدد اللغات:** قد تحتوي المقاطع على نصوص بالإنجليزية، ترجمها حسب الحاجة\n' : ''}
 
-${contextualPromptAddition}
-${customPrompt ? `\n**تعليمات إضافية:**\n${customPrompt}\n` : ''}`
-  : `You are an accurate and specialized research assistant with conversational memory. Use Markdown formatting in your responses.
+${keywordSearchInstructions}${contextualPromptAddition}${customPrompt ? `\n**تعليمات إضافية:**\n${customPrompt}\n` : ''}`
+    : `You are an accurate and specialized research assistant with conversational memory. Use Markdown formatting in your responses.
 
 📋 **Core Guidelines:**
 
@@ -611,8 +648,7 @@ ${customPrompt ? `\n**تعليمات إضافية:**\n${customPrompt}\n` : ''}`
 
 ${isMultilingual ? '7. **Multilingual:** Passages may contain Arabic text, translate as needed\n' : ''}
 
-${contextualPromptAddition}
-${customPrompt ? `\n**Additional Instructions:**\n${customPrompt}\n` : ''}`;
+${keywordSearchInstructions}${contextualPromptAddition}${customPrompt ? `\n**Additional Instructions:**\n${customPrompt}\n` : ''}`;
 
   const userQuery = queryAnalysis?.originalQuery || query;
 
