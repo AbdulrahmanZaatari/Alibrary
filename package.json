@@ -5,7 +5,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start -p ${PORT:-3000}",
-    "lint": "next lint"
+    "lint": "next lint",
+    "clean-chunks": "tsx scripts/cleanAllChunks.ts",
+    "clean-chunks-doc": "tsx scripts/cleanAllChunks.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -44,6 +46,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.0.0",
     "tailwindcss": "^4",
+    "tsx": "^4.20.6",
     "typescript": "^5"
   }
 }
