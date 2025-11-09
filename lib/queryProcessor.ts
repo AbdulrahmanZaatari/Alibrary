@@ -19,7 +19,6 @@ interface QueryAnalysis {
   queryType: 'narrative' | 'analytical' | 'factual' | 'thematic' | 'comparative';
   keywords: string[];
   isMultiDocumentQuery: boolean;
-  // ✅ NEW: Follow-up detection fields
   isFollowUp?: boolean;
   followUpConfidence?: number;
   needsNewRetrieval?: boolean;

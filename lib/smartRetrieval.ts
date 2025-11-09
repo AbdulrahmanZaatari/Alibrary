@@ -60,8 +60,8 @@ export async function detectFollowUpWithAI(
   confidence: number;
   reason: string;
   needsNewRetrieval: boolean;
-  enhancedKeywords?: string[]; // ✅ NEW: Extracted keywords to reuse
-  pageFilter?: number; // ✅ NEW: Page number filter if specified
+  enhancedKeywords?: string[];
+  pageFilter?: number;
 }> {
   if (!conversationHistory || conversationHistory.length === 0) {
     return {
@@ -116,9 +116,9 @@ export async function detectFollowUpWithAI(
     .reverse()
     .find(m => m.role === 'user')?.content;
 
-  const prompt = `You are an expert at analyzing conversation flow and query intent.
+  const prompt = `You are an expert at analyzing conversation flow and query intent in a research system.
 
-**Task:** Determine if the current query is a follow-up question to the previous conversation.
+**Task:** Determine if the current query is a follow-up and what action to take.
 
 **Previous Conversation:**
 ${historyText}
@@ -129,36 +129,47 @@ ${historyText}
 
 **Analysis Instructions:**
 
-1. A query is a FOLLOW-UP if it:
-   - Contains words like "المزيد" (more), "أيضاً" (also), "كذلك" (likewise)
-   - References "صفحة" (page) with numbers but doesn't introduce new search terms
-   - Uses pronouns: "هذه" (this), "ذلك" (that), "السابق" (previous)
-   - Asks for elaboration: "حلل" (analyze), "اشرح" (explain), "وضح" (clarify)
-   - Continues the same topic without re-establishing context
+1. **FOLLOW-UP PATTERNS:**
+   - "المزيد من صفحة X" → Follow-up with page filter (reuse keywords)
+   - "اشرح/حلل/فصّل" → Follow-up for analysis (no new retrieval)
+   - New keywords + references → Follow-up needing expansion
+   - Pronouns (هذه/ذلك/this/that) → Follow-up (context-dependent)
 
-2. A query is NOT a follow-up if it:
-   - Introduces completely new search keywords
-   - Provides full independent context
-   - Could be understood without reading previous messages
+2. **NOT A FOLLOW-UP:**
+   - Completely new topic
+   - No references to previous conversation
+   - Could be understood independently
 
-3. NEW RETRIEVAL is needed if:
-   - Follow-up specifies page numbers/ranges → YES (filter existing results)
-   - Follow-up asks for analysis only → NO (use existing context)
-   - Follow-up introduces new aspects → YES (expand search)
-   - Not a follow-up → YES (always retrieve for new topics)
+3. **RETRIEVAL DECISION:**
+   - Page filter specified → YES (with filter)
+   - Analysis only → NO (reuse context)
+   - New aspects → YES (expand)
+   - Not follow-up → YES (fresh)
 
-4. EXTRACT KEYWORDS (if follow-up with page filter):
-   - Look at the last user query for original search terms
-   - Extract main keywords that were searched for
-   - These should be reused with the new page filter
+4. **KEYWORD EXTRACTION (CRITICAL):**
+   - If "more from page X": Extract keywords from **previous user query**
+   - Look for Arabic words like: تمتم، غمغم، استخدام، أسباب
+   - Return as array: ["keyword1", "keyword2", ...]
+   - If no keywords found, return null
 
-**Response Format (JSON only, no markdown):**
+**Response Format (JSON only):**
 {
-  "isFollowUp": true/false,
+  "isFollowUp": boolean,
   "confidence": 0.0-1.0,
-  "reason": "brief explanation in English",
-  "needsNewRetrieval": true/false,
-  "extractedKeywords": ["keyword1", "keyword2"] or null
+  "reason": "explanation",
+  "needsNewRetrieval": boolean,
+  "extractedKeywords": ["word1", "word2"] or nullexport async function retrieveSmartContext(
+}
+
+**Example:**
+Previous: "ابحث عن كلمة تمتم في الكتاب"
+Current: "المزيد من صفحة 200"
+→ {
+  "isFollowUp": true,
+  "confidence": 0.98,
+  "reason": "User wants more results from page 200 using same search term",
+  "needsNewRetrieval": true,
+  "extractedKeywords": ["تمتم"]
 }`;
 
   for (const modelName of FALLBACK_MODELS) {
@@ -174,12 +185,10 @@ ${historyText}
       const result = await model.generateContent(prompt);
       let response = result.response.text().trim();
 
-      // Clean response
       response = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
       const parsed = JSON.parse(response);
 
-      // Validate response structure
       if (
         typeof parsed.isFollowUp === 'boolean' &&
         typeof parsed.confidence === 'number' &&
@@ -197,7 +206,6 @@ ${historyText}
         if (parsed.extractedKeywords && Array.isArray(parsed.extractedKeywords)) {
           result.enhancedKeywords = parsed.extractedKeywords;
         } else if (context?.previousKeywords) {
-          // Fallback to context keywords
           result.enhancedKeywords = context.previousKeywords;
         }
 
@@ -221,7 +229,6 @@ ${historyText}
     }
   }
 
-  // ✅ FALLBACK TO ENHANCED HEURISTICS if all AI models fail
   console.log('⚠️ All AI models failed, using enhanced heuristic fallback');
   return heuristicFollowUpDetection(currentQuery, conversationHistory, context, detectedPageFilter);
 }
@@ -436,7 +443,7 @@ export async function retrieveSmartContext(
   documentIds: string[],
   useReranking: boolean = true,
   useKeywordSearch: boolean = false,
-  followUpContext?: { // ✅ NEW: Pass follow-up context
+  followUpContext?: { 
     isFollowUp: boolean;
     enhancedKeywords?: string[];
     pageFilter?: number;

@@ -32,7 +32,7 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// ✅ NEW: In-memory cache for retrieval context (alternative to database)
+// ✅ In-memory cache for retrieval context
 interface RetrievalCache {
   query: string;
   keywords: string[];
@@ -44,7 +44,7 @@ interface RetrievalCache {
 
 const sessionRetrievalCache = new Map<string, RetrievalCache>();
 
-// ✅ NEW: Clean old cache entries (older than 10 minutes)
+// ✅ Clean old cache entries (older than 10 minutes)
 function cleanOldCache() {
   const now = Date.now();
   const tenMinutes = 10 * 60 * 1000;
@@ -55,6 +55,63 @@ function cleanOldCache() {
       console.log(`🧹 Cleaned old cache for session: ${sessionId}`);
     }
   }
+}
+
+/**
+ * ✅ Exhaustive keyword search with page filter
+ */
+async function exhaustiveKeywordSearchWithFilter(
+  keywords: string[],
+  documentIds: string[],
+  pageFilter: number
+): Promise<any[]> {
+  console.log(`🔍 EXHAUSTIVE KEYWORD SEARCH WITH PAGE FILTER`);
+  console.log(`   Keywords: ${keywords.join(', ')}`);
+  console.log(`   Page filter: >= ${pageFilter}`);
+  console.log(`   Documents: ${documentIds.length}`);
+
+  const allResults = new Map<string, any>();
+
+  for (const keyword of keywords) {
+    console.log(`   📍 Searching for: "${keyword}"`);
+
+    const { data, error } = await supabaseAdmin
+      .from('embeddings')
+      .select('*')
+      .in('document_id', documentIds)
+      .ilike('chunk_text', `%${keyword}%`)
+      .gte('page_number', pageFilter)
+      .order('page_number', { ascending: true })
+      .limit(300);
+
+    if (error) {
+      console.error(`   ❌ Error: ${error.message}`);
+      continue;
+    }
+
+    if (data && data.length > 0) {
+      console.log(`   ✅ Found ${data.length} matches (page >= ${pageFilter})`);
+
+      data.forEach((chunk) => {
+        const key = `${chunk.id}-${chunk.page_number}`;
+        if (!allResults.has(key)) {
+          allResults.set(key, {
+            ...chunk,
+            matched_keyword: keyword,
+            source: 'keyword_filtered',
+            similarity: 0.8,
+          });
+        }
+      });
+    } else {
+      console.log(`   ⚠️ No matches for "${keyword}"`);
+    }
+  }
+
+  const results = Array.from(allResults.values());
+  console.log(`\n📊 TOTAL FILTERED CHUNKS: ${results.length}`);
+
+  return results.sort((a, b) => a.page_number - b.page_number).slice(0, 150);
 }
 
 /**
@@ -151,28 +208,6 @@ async function detectMultipleDocumentLanguages(documentIds: string[]): Promise<{
   return { primary, languages, isMultilingual };
 }
 
-// ✅ NEW: Enhance keywords for follow-up queries
-function enhanceKeywordsForFollowUp(
-  currentKeywords: string[],
-  cachedKeywords: string[],
-  currentQuery: string
-): string[] {
-  const genericTerms = ['المزيد', 'صفحة', 'استخدامات', 'استخدام', 'more', 'page', 'additional', 'usage', 'find'];
-  
-  const hasOnlyGenericTerms = currentKeywords.every(kw => 
-    genericTerms.some(gt => kw.toLowerCase().includes(gt.toLowerCase()) || gt.includes(kw.toLowerCase()))
-  );
-  
-  if (hasOnlyGenericTerms && cachedKeywords.length > 0) {
-    console.log('🔄 Replacing generic keywords with cached specific ones');
-    console.log('   Old:', currentKeywords);
-    console.log('   New:', cachedKeywords);
-    return cachedKeywords;
-  }
-  
-  return currentKeywords;
-}
-
 export async function POST(req: NextRequest) {
   const encoder = new TextEncoder();
   const stream = new TransformStream();
@@ -203,7 +238,6 @@ export async function POST(req: NextRequest) {
         preferredModel, 
         useReranking = true,
         useKeywordSearch = false,
-        // ✅ NEW: Accept cached context from frontend
         cachedChunks,
         reuseCachedContext = false
       } = body;
@@ -228,7 +262,7 @@ export async function POST(req: NextRequest) {
         return;
       }
 
-      // ✅ STEP 1: Load conversation history (if session exists)
+      // ✅ STEP 1: Load conversation history
       let history: Array<{ role: string; content: string; created_at: string }> = [];
       if (sessionId) {
         const db = getDb();
@@ -250,13 +284,26 @@ export async function POST(req: NextRequest) {
         content: msg.content
       }));
 
-      const followUpDetection = await detectFollowUpWithAI(userMessage, conversationHistory);
+      // Get cached context for keyword extraction
+      const cachedContext = sessionId ? sessionRetrievalCache.get(sessionId) : undefined;
+
+      const followUpDetection = await detectFollowUpWithAI(
+        userMessage, 
+        conversationHistory,
+        cachedContext ? {
+          previousQuery: cachedContext.query,
+          previousKeywords: cachedContext.keywords,
+          previousChunksCount: cachedContext.chunks.length
+        } : undefined
+      );
 
       console.log(`🔍 Reader Mode Follow-up Analysis:`, {
         isFollowUp: followUpDetection.isFollowUp,
         confidence: followUpDetection.confidence,
         reason: followUpDetection.reason,
-        needsRetrieval: followUpDetection.needsNewRetrieval
+        needsRetrieval: followUpDetection.needsNewRetrieval,
+        hasEnhancedKeywords: !!followUpDetection.enhancedKeywords,
+        pageFilter: followUpDetection.pageFilter
       });
 
       // ✅ STEP 2: Analyze conversation context (every 3 messages)
@@ -322,7 +369,7 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // ✅ STEP 4: Route to appropriate handler (NO MESSAGE SAVING HERE)
+      // ✅ STEP 4: Route to appropriate handler
       if (documentIds && documentIds.length > 0) {
         console.log('🔄 Using corpus retrieval for Reader Chat');
         
@@ -379,7 +426,6 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  // ✅ Add model used header after stream completes
   if (modelUsed) {
     response.headers.set('X-Model-Used', modelUsed);
   }
@@ -387,7 +433,7 @@ export async function POST(req: NextRequest) {
   return response;
 }
 
-// ==================== CORPUS QUERY HANDLER (WITH CONTEXT CACHING) ====================
+// ==================== CORPUS QUERY HANDLER (SMART FOLLOW-UP AWARE) ====================
 async function handleCorpusQuery(
   writer: WritableStreamDefaultWriter,
   encoder: TextEncoder,
@@ -403,7 +449,14 @@ async function handleCorpusQuery(
   preferredModel?: string,
   useReranking: boolean = true,
   useKeywordSearch: boolean = false,
-  followUpDetection?: { isFollowUp: boolean; confidence: number; reason: string; needsNewRetrieval: boolean },
+  followUpDetection?: { 
+    isFollowUp: boolean; 
+    confidence: number; 
+    reason: string; 
+    needsNewRetrieval: boolean;
+    enhancedKeywords?: string[];
+    pageFilter?: number;
+  },
   cachedChunks?: any[],
   reuseCachedContext: boolean = false
 ): Promise<string> {
@@ -491,8 +544,22 @@ async function handleCorpusQuery(
   
   const contextParts: string[] = [];
 
-  // ✅ Perform query analysis
-  const queryAnalysis = await analyzeQuery(query, documentLanguage);
+  // ✅ Perform query analysis (ONLY if not a follow-up with enhanced keywords)
+  let queryAnalysis: any;
+  
+  if (followUpDetection?.isFollowUp && followUpDetection.enhancedKeywords && followUpDetection.pageFilter) {
+    // Skip full analysis for "more from page X" pattern
+    console.log('⚡ Skipping query analysis - using enhanced follow-up context');
+    queryAnalysis = {
+      originalQuery: query,
+      queryType: 'factual',
+      keywords: followUpDetection.enhancedKeywords,
+      isMultiDocumentQuery: false,
+      expandedQuery: query
+    };
+  } else {
+    queryAnalysis = await analyzeQuery(query, documentLanguage);
+  }
   
   // ✅ ADD follow-up info to query analysis
   if (followUpDetection) {
@@ -501,29 +568,17 @@ async function handleCorpusQuery(
     queryAnalysis.needsNewRetrieval = followUpDetection.needsNewRetrieval;
   }
 
-  // ✅ NEW: Check for cached context
-  let cachedContext: RetrievalCache | undefined;
-  if (sessionId) {
-    cachedContext = sessionRetrievalCache.get(sessionId);
-    
-    if (cachedContext) {
-      const ageSeconds = Math.round((Date.now() - cachedContext.timestamp) / 1000);
-      console.log(`♻️ Found cached retrieval context:`, {
-        originalQuery: cachedContext.query,
-        chunksCount: cachedContext.chunks.length,
-        keywords: cachedContext.keywords,
-        age: `${ageSeconds}s ago`
-      });
-      
-      // ✅ Enhance keywords if follow-up detected
-      if (queryAnalysis.isFollowUp && cachedContext.keywords.length > 0) {
-        queryAnalysis.keywords = enhanceKeywordsForFollowUp(
-          queryAnalysis.keywords,
-          cachedContext.keywords,
-          query
-        );
-      }
-    }
+  // ✅ Check for cached context
+  const cachedContext = sessionId ? sessionRetrievalCache.get(sessionId) : undefined;
+  
+  if (cachedContext) {
+    const ageSeconds = Math.round((Date.now() - cachedContext.timestamp) / 1000);
+    console.log(`♻️ Found cached retrieval context:`, {
+      originalQuery: cachedContext.query,
+      chunksCount: cachedContext.chunks.length,
+      keywords: cachedContext.keywords,
+      age: `${ageSeconds}s ago`
+    });
   }
 
   console.log('🔍 Query Analysis:', {
@@ -543,49 +598,143 @@ async function handleCorpusQuery(
     contextParts.push(`${extractLabel}\n${extractedText}`);
   }
 
-  // ✅ SMART RETRIEVAL DECISION
-  let retrievedContext = '';
+  // ==================== SMART RETRIEVAL LOGIC ====================
   let processedChunks: any[] = [];
-  let retrievalStrategy = 'none';
+  let retrievalStrategy = 'unknown';
   let retrievalConfidence = 0;
   let newChunksRetrieved = false;
 
-  // ✅ Check if we should reuse cached context
-  const shouldReuseCache = (
-    reuseCachedContext && 
-    (cachedChunks && cachedChunks.length > 0) ||
-    (cachedContext && !queryAnalysis.needsNewRetrieval && queryAnalysis.isFollowUp)
-  );
+  const isCacheFresh = cachedContext ? (Date.now() - cachedContext.timestamp) < 5 * 60 * 1000 : false;
 
-  if (shouldReuseCache) {
-    console.log('♻️ Reusing cached retrieval context');
-    
-    // Use chunks from frontend or backend cache
-    processedChunks = cachedChunks || cachedContext!.chunks;
-    retrievalStrategy = 'cached';
-    retrievalConfidence = cachedContext?.confidence || 0.95;
-    
-    // ✅ Filter chunks if page number specified in follow-up
-    const pageMatch = query.match(/صفحة\s*(\d+)|page\s*(\d+)|من\s*(\d+)/i);
-    if (pageMatch) {
-      const pageNumber = parseInt(pageMatch[1] || pageMatch[2] || pageMatch[3]);
-      if (!isNaN(pageNumber)) {
-        console.log(`🔍 Filtering chunks for pages >= ${pageNumber}`);
-        processedChunks = processedChunks.filter(chunk => chunk.page_number >= pageNumber);
-        console.log(`   ✅ Filtered to ${processedChunks.length} chunks`);
+  // ✅ SMART FOLLOW-UP HANDLING
+  if (followUpDetection?.isFollowUp) {
+    console.log('🔄 Follow-up query detected - using smart retrieval logic');
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // CASE 1: "More from page X" - Filter existing results
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if (followUpDetection.pageFilter && followUpDetection.enhancedKeywords) {
+      console.log(`📄 "More from page X" pattern detected`);
+      console.log(`   🔑 Using enhanced keywords: ${followUpDetection.enhancedKeywords.join(', ')}`);
+      console.log(`   📍 Page filter: >= ${followUpDetection.pageFilter}`);
+
+      // Try to filter cached chunks first
+      if (cachedContext && cachedContext.chunks.length > 0) {
+        const filteredChunks = cachedContext.chunks.filter(
+          chunk => chunk.page_number >= followUpDetection.pageFilter!
+        );
+
+        if (filteredChunks.length > 0) {
+          console.log(`   ✅ Found ${filteredChunks.length} cached chunks matching page filter`);
+          processedChunks = filteredChunks;
+          retrievalStrategy = 'cached_filtered';
+          retrievalConfidence = 0.9;
+        } else {
+          console.log(`   ⚠️ No cached chunks match page filter, performing new keyword search`);
+          
+          processedChunks = await exhaustiveKeywordSearchWithFilter(
+            followUpDetection.enhancedKeywords,
+            documentIds,
+            followUpDetection.pageFilter
+          );
+          
+          retrievalStrategy = 'keyword_exhaustive_filtered';
+          retrievalConfidence = 0.95;
+          newChunksRetrieved = true;
+        }
+      } else {
+        console.log(`   ℹ️ No cache available, performing fresh keyword search`);
+        
+        processedChunks = await exhaustiveKeywordSearchWithFilter(
+          followUpDetection.enhancedKeywords,
+          documentIds,
+          followUpDetection.pageFilter
+        );
+        
+        retrievalStrategy = 'keyword_exhaustive_filtered';
+        retrievalConfidence = 0.95;
+        newChunksRetrieved = true;
       }
     }
-    
-  } else if (queryAnalysis.needsNewRetrieval || !queryAnalysis.isFollowUp) {
-    console.log('📚 Performing new retrieval for reader mode...');
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // CASE 2: Analysis/Clarification - Reuse existing context
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    else if (!followUpDetection.needsNewRetrieval && cachedContext) {
+      console.log(`♻️ Follow-up asks for analysis - reusing ${cachedContext.chunks.length} cached chunks`);
+      processedChunks = cachedContext.chunks;
+      retrievalStrategy = 'cached_analysis';
+      retrievalConfidence = cachedContext.confidence || 0.85;
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // CASE 3: Expansion - Combine enhanced keywords with new analysis
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    else if (followUpDetection.needsNewRetrieval && followUpDetection.enhancedKeywords) {
+      console.log(`🔍 Follow-up needs expansion - using enhanced keywords as base`);
+      console.log(`   Base keywords: ${followUpDetection.enhancedKeywords.join(', ')}`);
+
+      const modifiedAnalysis = {
+        ...queryAnalysis,
+        keywords: followUpDetection.enhancedKeywords,
+        expandedQuery: query
+      };
+
+      const { chunks, strategy, confidence } = await retrieveSmartContext(
+        modifiedAnalysis,
+        documentIds,
+        useReranking,
+        useKeywordSearch,
+        followUpDetection ? {
+          isFollowUp: followUpDetection.isFollowUp,
+          enhancedKeywords: followUpDetection.enhancedKeywords,
+          pageFilter: followUpDetection.pageFilter
+        } : undefined
+      );
+
+      processedChunks = chunks;
+      retrievalStrategy = strategy + '_follow_up_expanded';
+      retrievalConfidence = confidence;
+      newChunksRetrieved = true;
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // CASE 4: Fallback - Standard retrieval
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    else {
+      console.log(`ℹ️ Follow-up fallback - performing standard retrieval`);
+      
+      const { chunks, strategy, confidence } = await retrieveSmartContext(
+        queryAnalysis,
+        documentIds,
+        useReranking,
+        useKeywordSearch,
+        followUpDetection ? {
+          isFollowUp: followUpDetection.isFollowUp,
+          enhancedKeywords: followUpDetection.enhancedKeywords,
+          pageFilter: followUpDetection.pageFilter
+        } : undefined
+      );
+
+      processedChunks = chunks;
+      retrievalStrategy = strategy;
+      retrievalConfidence = confidence;
+      newChunksRetrieved = true;
+    }
+
+  } else {
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // NEW QUERY: Full analysis + fresh retrieval
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    console.log('📚 New independent query - performing fresh retrieval');
     
     const { chunks, strategy, confidence } = await retrieveSmartContext(
-      queryAnalysis, 
-      documentIds, 
-      useReranking, 
+      queryAnalysis,
+      documentIds,
+      useReranking,
       useKeywordSearch
     );
-    
+
     console.log(`📊 Retrieval Results:
    - Strategy: ${strategy}
    - Chunks found: ${chunks.length}
@@ -596,37 +745,43 @@ async function handleCorpusQuery(
     retrievalStrategy = strategy;
     retrievalConfidence = confidence;
     newChunksRetrieved = true;
-    
-    // ✅ NEW: Cache the retrieval results
-    if (sessionId && chunks.length > 0) {
-      const newCache: RetrievalCache = {
-        query: query,
-        keywords: queryAnalysis.keywords,
-        chunks: chunks,
-        timestamp: Date.now(),
-        strategy: strategy,
-        confidence: confidence
-      };
-      
-      sessionRetrievalCache.set(sessionId, newCache);
-      console.log(`💾 Cached retrieval context for session: ${sessionId}`);
-    }
-    
-  } else {
-    console.log('💬 Follow-up detected - reusing conversation context');
-    
-    // Use previous context from history
-    if (history && history.length > 0) {
-      retrievedContext = history
-        .filter(msg => msg.role === 'assistant')
-        .slice(-2)
-        .map(msg => msg.content)
-        .join('\n\n---\n\n');
-      
-      contextParts.push(`**${responseLanguage === 'ar' ? 'السياق السابق' : 'Previous Context'}:**\n\n${retrievedContext}`);
-    }
   }
 
+  // ✅ Cache management
+  if (sessionId && newChunksRetrieved && processedChunks.length > 0) {
+    const keywords = followUpDetection?.enhancedKeywords || queryAnalysis.keywords;
+    
+    const newCache: RetrievalCache = {
+      query: query,
+      keywords: keywords,
+      chunks: processedChunks,
+      timestamp: Date.now(),
+      strategy: retrievalStrategy,
+      confidence: retrievalConfidence
+    };
+    
+    sessionRetrievalCache.set(sessionId, newCache);
+    console.log(`💾 Cached ${processedChunks.length} chunks with ${keywords.length} keywords`);
+  }
+
+  console.log(`\n📊 Final Retrieval Summary:
+   - Strategy: ${retrievalStrategy}
+   - Chunks: ${processedChunks.length}
+   - Confidence: ${(retrievalConfidence * 100).toFixed(1)}%
+   - New retrieval: ${newChunksRetrieved ? 'YES' : 'NO (reused cache)'}
+`);
+
+  // Validate we have chunks
+  if (processedChunks.length === 0) {
+    console.warn('⚠️ No chunks retrieved, falling back to general knowledge');
+    await writer.write(encoder.encode(
+      responseLanguage === 'ar'
+        ? '⚠️ لم أجد معلومات كافية في المستندات المتاحة. سأحاول الإجابة بناءً على المعرفة العامة.\n\n'
+        : '⚠️ Insufficient information in available documents. I will try to answer based on general knowledge.\n\n'
+    ));
+  }
+
+  // ==================== BUILD CONTEXT FOR LLM ====================
   if (processedChunks.length > 0) {
     const chunksByDocument = new Map<string, any[]>();
     
@@ -660,8 +815,8 @@ async function handleCorpusQuery(
       
       const pageEntries = Array.from(pageGroups.entries())
         .sort((a, b) => {
-          if (useKeywordSearch) {
-            return a[0] - b[0];
+          if (useKeywordSearch || followUpDetection?.pageFilter) {
+            return a[0] - b[0]; // Sort by page number
           } else {
             const maxSimA = Math.max(...a[1].map(c => c.similarity || 0));
             const maxSimB = Math.max(...b[1].map(c => c.similarity || 0));
@@ -721,7 +876,7 @@ async function handleCorpusQuery(
   const isArabic = responseLanguage === 'ar';
   
   let keywordSearchInstructions = '';
-  if (useKeywordSearch) {
+  if (useKeywordSearch || followUpDetection?.pageFilter) {
     keywordSearchInstructions = isArabic
       ? `\n\n🔑 **وضع البحث بالكلمات المفتاحية:**
    - النتائج تحتوي على تطابقات دقيقة للكلمات المطلوبة
@@ -907,7 +1062,7 @@ ${contextSection}
   return modelUsed;
 }
 
-// ✅ NEW: GET endpoint for metadata (optional - for debugging)
+// ✅ GET endpoint for metadata (debugging)
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
@@ -930,7 +1085,6 @@ export async function GET(req: NextRequest) {
       strategy: cachedContext.strategy,
       confidence: cachedContext.confidence,
       age: Math.round((Date.now() - cachedContext.timestamp) / 1000),
-      // Don't send actual chunks (too large), just metadata
       chunks: cachedContext.chunks.map(c => ({
         page_number: c.page_number,
         similarity: c.similarity,
