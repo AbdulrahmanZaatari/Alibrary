@@ -922,22 +922,30 @@ ${keywordSearchInstructions}${contextualPromptAddition}${customPrompt ? `\n**Add
   const geminiResult = await generateResponse(fullPrompt, preferredModel);
   const geminiStream = geminiResult.stream;
   const modelUsed = geminiResult.modelUsed;
-  
+
   console.log(`✅ Response generated using: ${modelUsed}`);
-  
-  for await (const chunk of geminiStream) {
-    const text = chunk.text();
-    if (text) {
-      await writer.write(encoder.encode(text));
+
+  try {
+    for await (const chunk of geminiStream) {
+      const text = chunk.text();
+      if (text) {
+        await writer.write(encoder.encode(text));
+      }
     }
+  } catch (streamError) {
+    console.error('❌ Error during response streaming:', streamError);
+    const errorMsg = responseLanguage === 'ar'
+      ? '⚠️ حدث خطأ أثناء إنشاء الإجابة. يرجى المحاولة مرة أخرى لاحقاً.'
+      : '⚠️ An error occurred while generating the response. Please try again later.';
+    await writer.write(encoder.encode(`\n\n${errorMsg}`));
   }
-  
+
   if (sessionId) {
     updateSessionTimestamp(sessionId);
   }
-  
+
   console.log('✅ Response complete');
-  
+
   return modelUsed;
 }
 
