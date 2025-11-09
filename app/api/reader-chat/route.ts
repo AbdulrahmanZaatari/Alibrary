@@ -11,7 +11,7 @@ import {
   getSessionContexts
 } from '@/lib/db';
 import { analyzeQuery } from '@/lib/queryProcessor';
-import { retrieveSmartContext } from '@/lib/smartRetrieval';
+import { retrieveSmartContext, detectFollowUpWithAI } from '@/lib/smartRetrieval';
 import { createClient } from '@supabase/supabase-js';
 import { 
   isComplexQuery, 
@@ -185,15 +185,26 @@ export async function POST(req: NextRequest) {
         console.log(`📜 Loaded ${history.length} previous messages`);
       }
 
+      // ✅ STEP 1.5: AI-POWERED FOLLOW-UP DETECTION
+      const conversationHistory = history.map(msg => ({
+        role: msg.role,
+        content: msg.content
+      }));
+
+      const followUpDetection = await detectFollowUpWithAI(userMessage, conversationHistory);
+
+      console.log(`🔍 Reader Mode Follow-up Analysis:`, {
+        isFollowUp: followUpDetection.isFollowUp,
+        confidence: followUpDetection.confidence,
+        reason: followUpDetection.reason,
+        needsRetrieval: followUpDetection.needsNewRetrieval
+      });
+
       // ✅ STEP 2: Analyze conversation context (every 3 messages)
       if (sessionId && history.length > 0 && history.length % 3 === 0) {
         console.log('🧠 Analyzing reader chat context...');
         
         const queryLanguage = detectQueryLanguage(userMessage);
-        const conversationHistory = history.map(msg => ({
-          role: msg.role,
-          content: msg.content
-        }));
 
         try {
           const context = await analyzeConversationContext(conversationHistory, queryLanguage);
@@ -234,10 +245,6 @@ export async function POST(req: NextRequest) {
         
         try {
           const queryLanguage = detectQueryLanguage(userMessage);
-          const conversationHistory = history.map(msg => ({
-            role: msg.role,
-            content: msg.content
-          }));
 
           const summaryResult = await generateContextSummary(conversationHistory, queryLanguage);
           
@@ -273,7 +280,8 @@ export async function POST(req: NextRequest) {
           bookPage,
           preferredModel,
           useKeywordSearch ? false : useReranking,
-          useKeywordSearch
+          useKeywordSearch,
+          followUpDetection
         );
       } 
       else if (sessionId) {
@@ -321,7 +329,8 @@ async function handleCorpusQuery(
   bookPage?: number,
   preferredModel?: string,
   useReranking: boolean = true,
-  useKeywordSearch: boolean = false
+  useKeywordSearch: boolean = false,
+  followUpDetection?: { isFollowUp: boolean; confidence: number; reason: string; needsNewRetrieval: boolean }
 ) {
   let conversationContextString = '';
   let contextualPromptAddition = '';
@@ -407,13 +416,24 @@ async function handleCorpusQuery(
   
   const contextParts: string[] = [];
 
+  // ✅ Perform query analysis
   const queryAnalysis = await analyzeQuery(query, documentLanguage);
+  
+  // ✅ ADD follow-up info to query analysis
+  if (followUpDetection) {
+    queryAnalysis.isFollowUp = followUpDetection.isFollowUp;
+    queryAnalysis.followUpConfidence = followUpDetection.confidence;
+    queryAnalysis.needsNewRetrieval = followUpDetection.needsNewRetrieval;
+  }
+
   console.log('🔍 Query Analysis:', {
     original: queryAnalysis.originalQuery,
     translated: queryAnalysis.translatedQuery,
     type: queryAnalysis.queryType,
     keywords: queryAnalysis.keywords,
-    isMultiDoc: queryAnalysis.isMultiDocumentQuery
+    isMultiDoc: queryAnalysis.isMultiDocumentQuery,
+    isFollowUp: queryAnalysis.isFollowUp,
+    needsRetrieval: queryAnalysis.needsNewRetrieval
   });
 
   if (extractedText) {
@@ -423,21 +443,41 @@ async function handleCorpusQuery(
     contextParts.push(`${extractLabel}\n${extractedText}`);
   }
 
-  console.log('🔄 Starting smart retrieval...');
-  const { chunks, strategy, confidence } = await retrieveSmartContext(
-    queryAnalysis, 
-    documentIds, 
-    useReranking, 
-    useKeywordSearch
-  );
-  
-  console.log(`📊 Retrieval Results:
+  // ✅ SMART RETRIEVAL DECISION
+  let retrievedContext = '';
+  let processedChunks: any[] = [];
+
+  if (queryAnalysis.needsNewRetrieval || !queryAnalysis.isFollowUp) {
+    console.log('📚 Performing new retrieval for reader mode...');
+    
+    const { chunks, strategy, confidence } = await retrieveSmartContext(
+      queryAnalysis, 
+      documentIds, 
+      useReranking, 
+      useKeywordSearch
+    );
+    
+    console.log(`📊 Retrieval Results:
    - Strategy: ${strategy}
    - Chunks found: ${chunks.length}
    - Confidence: ${(confidence * 100).toFixed(1)}%
    - Keyword Search: ${useKeywordSearch ? 'enabled' : 'disabled'}`);
 
-  const processedChunks = chunks;
+    processedChunks = chunks;
+  } else {
+    console.log('💬 Follow-up detected - reusing conversation context');
+    
+    // Use previous context from history
+    if (history && history.length > 0) {
+      retrievedContext = history
+        .filter(msg => msg.role === 'assistant')
+        .slice(-2)
+        .map(msg => msg.content)
+        .join('\n\n---\n\n');
+      
+      contextParts.push(`**${responseLanguage === 'ar' ? 'السياق السابق' : 'Previous Context'}:**\n\n${retrievedContext}`);
+    }
+  }
 
   if (processedChunks.length > 0) {
     const chunksByDocument = new Map<string, any[]>();
@@ -473,16 +513,14 @@ async function handleCorpusQuery(
       const pageEntries = Array.from(pageGroups.entries())
         .sort((a, b) => {
           if (useKeywordSearch) {
-            // Sort by page number for keyword search
             return a[0] - b[0];
           } else {
-            // Sort by similarity for regular search
             const maxSimA = Math.max(...a[1].map(c => c.similarity || 0));
             const maxSimB = Math.max(...b[1].map(c => c.similarity || 0));
             return maxSimB - maxSimA;
           }
         })
-        .slice(0, useKeywordSearch ? 50 : 10); // More pages for keyword search
+        .slice(0, useKeywordSearch ? 50 : 10);
       
       const pagesText = pageEntries
         .map(([pageNum, pageChunks]) => {
@@ -520,49 +558,30 @@ async function handleCorpusQuery(
 
     if (documentIds.length > 1 && queryAnalysis.isMultiDocumentQuery) {
       const comparisonInstruction = isArabic
-        ? '\n\n⚠️ **تعليمات مهمة:** هذا سؤال مقارن. قارن وحلل المعلومات من جميع الوثائق المقدمة. أشر بوضوح إلى أوجه التشابه والاختلاف والجوانب الفريدة لكل وثيقة.'
-        : '\n\n⚠️ **Important Instructions:** This is a comparative question. Compare and analyze information from ALL provided documents. Clearly indicate similarities, differences, and unique aspects of each document.';
+        ? '\n\n⚠️ **تعليمات مهمة:** هذا سؤال مقارن. قارن وحلل المعلومات من جميع الوثائق المقدمة.'
+        : '\n\n⚠️ **Important Instructions:** This is a comparative question. Compare and analyze information from ALL provided documents.';
       contextParts.push(comparisonInstruction);
     }
 
-    const docPageMap = new Map<string, number[]>();
-    processedChunks.forEach(chunk => {
-      if (!docPageMap.has(chunk.document_id)) {
-        docPageMap.set(chunk.document_id, []);
-      }
-      if (!docPageMap.get(chunk.document_id)!.includes(chunk.page_number)) {
-        docPageMap.get(chunk.document_id)!.push(chunk.page_number);
-      }
-    });
-    
     const pageListNote = isArabic
-      ? `\n\n⚠️ **ملاحظة مهمة:** أجب فقط استنادًا إلى الصفحات المتاحة في السياق أعلاه. لا تذكر أي صفحات أخرى.`
-      : `\n\n⚠️ **Important Note:** Answer only based on the available pages in the context above. Do not reference any other pages.`;
+      ? `\n\n⚠️ **ملاحظة مهمة:** أجب فقط استنادًا إلى الصفحات المتاحة في السياق أعلاه.`
+      : `\n\n⚠️ **Important Note:** Answer only based on the available pages in the context above.`;
     
     contextParts.push(pageListNote);
-  } else {
-    console.warn('⚠️ No relevant chunks found');
   }
 
   const isArabic = responseLanguage === 'ar';
   
-  // ✅ ADD KEYWORD SEARCH INSTRUCTIONS TO SYSTEM PROMPT
   let keywordSearchInstructions = '';
   if (useKeywordSearch) {
     keywordSearchInstructions = isArabic
       ? `\n\n🔑 **وضع البحث بالكلمات المفتاحية:**
    - النتائج تحتوي على تطابقات دقيقة للكلمات المطلوبة
    - **اذكر جميع الاستخدامات الموجودة** مرتبة حسب رقم الصفحة
-   - ضع رقم الصفحة لكل استخدام
-   - قدم سياقاً موجزاً وتحليلاً لكل تطابق
-   - اجمع الاستخدامات المتشابهة معاً إن أمكن
    - **لا تلخص - اذكر كل ما وجدته**\n`
       : `\n\n🔑 **KEYWORD SEARCH MODE:**
    - Results contain EXACT MATCHES for the search terms
    - **List ALL occurrences found** in chronological order (by page)
-   - Include page number for each occurrence
-   - Provide brief context and analysis for each match
-   - Group similar usages together if applicable
    - **Do not summarize - list everything found**\n`;
   }
   
@@ -571,82 +590,20 @@ async function handleCorpusQuery(
 
 📋 **القواعد الأساسية:**
 
-1. **الوعي بالمحادثة:**
-   - **تذكر ما نوقش سابقاً** في هذه المحادثة
-   - عند سؤالك عن محادثات سابقة، ارجع إلى السياق أدناه
-   - اربط الأسئلة الجديدة بالمواضيع السابقة عند الصلة
-
-2. **الأولوية للسياق المقدم:**
-   - إذا كانت الإجابة موجودة في المقاطع أدناه، استخدمها وأشر إلى رقم الصفحة والوثيقة
-   - اقتبس المعلومات بدقة من السياق
-
-3. **دمج المعرفة العامة بثقة:**
-   - **استخدم معرفتك العامة بحرية** لتقديم إجابات مفيدة وشاملة
-   - عند تحليل الأسلوب الأدبي أو المقارنة، استخدم ما هو متاح في النص ثم أضف من معرفتك
-   - ضع علامات واضحة:
-     * **[من النص - صفحة X]** للمعلومات من السياق
-     * **[من المعرفة العامة]** للمعلومات الخارجية
-   - **لا تقل "لا يمكنني" أو "يحتاج المزيد من المعلومات"** - قدم أفضل إجابة ممكنة
-
-4. **أجب على جميع الأسئلة بثقة:**
-   - قدم إجابات مباشرة ومفيدة
-   - إذا لم يكن السياق كافياً، استخدم معرفتك لتكملة الإجابة
-   - **تجنب الإجابات الاعتذارية أو المترددة**
-
-5. **تحليل الأسلوب الأدبي - نهج عملي:**
-   - حلل العناصر المتاحة في النص (السرد، اللغة، المواضيع، الأسلوب)
-   - قارن بكتّاب مشهورين بناءً على هذه العناصر
-   - قدم أمثلة محددة من النص المتاح
-   - أضف من معرفتك عن الكتّاب المشابهين
-   - **كن حاسماً في استنتاجاتك**
-
-6. **تنسيق Markdown:**
-   - استخدم **النص الغامق** للتأكيد
-   - استخدم القوائم النقطية والمرقمة
-   - استخدم > للاقتباسات من النص
-
-${isMultilingual ? '7. **تعدد اللغات:** قد تحتوي المقاطع على نصوص بالإنجليزية، ترجمها حسب الحاجة\n' : ''}
+1. **الوعي بالمحادثة:** تذكر ما نوقش سابقاً
+2. **الأولوية للسياق المقدم:** استخدم المقاطع أدناه
+3. **دمج المعرفة العامة بثقة:** استخدم معرفتك بحرية
+4. **أجب على جميع الأسئلة بثقة:** تجنب الإجابات الاعتذارية
 
 ${keywordSearchInstructions}${contextualPromptAddition}${customPrompt ? `\n**تعليمات إضافية:**\n${customPrompt}\n` : ''}`
-    : `You are an accurate and specialized research assistant with conversational memory. Use Markdown formatting in your responses.
+    : `You are an accurate and specialized research assistant with conversational memory. Use Markdown formatting.
 
 📋 **Core Guidelines:**
 
-1. **Conversation Awareness:**
-   - **Remember what was discussed previously** in this conversation
-   - When asked about previous exchanges, refer to the context below
-   - Connect new questions to prior topics when relevant
-
-2. **Prioritize Provided Context:**
-   - Use passages below and cite page numbers when available
-   - Quote information accurately from context
-
-3. **Integrate General Knowledge Confidently:**
-   - **Use your general knowledge freely** to provide helpful, comprehensive answers
-   - When analyzing literary style or making comparisons, use available text then add from your knowledge
-   - Use clear markers:
-     * **[From Text - Page X]** for context information
-     * **[From General Knowledge]** for external information
-   - **Never say "I cannot" or "I need more information"** - provide the best answer possible
-
-4. **Answer ALL Questions Confidently:**
-   - Provide direct, helpful answers
-   - If context is insufficient, use your knowledge to complete the answer
-   - **Avoid apologetic or hesitant responses**
-
-5. **Literary Style Analysis - Practical Approach:**
-   - Analyze available elements in text (narrative, language, themes, style)
-   - Compare to famous writers based on these elements
-   - Provide specific examples from available text
-   - Add from your knowledge about similar writers
-   - **Be decisive in your conclusions**
-
-6. **Markdown Formatting:**
-   - Use **bold** for emphasis
-   - Use bullet and numbered lists
-   - Use > for quotes from text
-
-${isMultilingual ? '7. **Multilingual:** Passages may contain Arabic text, translate as needed\n' : ''}
+1. **Conversation Awareness:** Remember what was discussed previously
+2. **Prioritize Provided Context:** Use passages below
+3. **Integrate General Knowledge Confidently:** Use your knowledge freely
+4. **Answer ALL Questions Confidently:** Avoid apologetic responses
 
 ${keywordSearchInstructions}${contextualPromptAddition}${customPrompt ? `\n**Additional Instructions:**\n${customPrompt}\n` : ''}`;
 
@@ -672,7 +629,6 @@ ${keywordSearchInstructions}${contextualPromptAddition}${customPrompt ? `\n**Add
     }
   }
   
-  // ✅ ONLY UPDATE SESSION TIMESTAMP (frontend saves messages)
   if (sessionId) {
     updateSessionTimestamp(sessionId);
   }
@@ -753,7 +709,6 @@ ${contextSection}
     }
   }
   
-  // ✅ ONLY UPDATE SESSION TIMESTAMP (frontend saves messages)
   updateSessionTimestamp(sessionId);
 }
 

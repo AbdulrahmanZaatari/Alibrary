@@ -19,6 +19,10 @@ interface QueryAnalysis {
   queryType: 'narrative' | 'analytical' | 'factual' | 'thematic' | 'comparative';
   keywords: string[];
   isMultiDocumentQuery: boolean;
+  // ✅ NEW: Follow-up detection fields
+  isFollowUp?: boolean;
+  followUpConfidence?: number;
+  needsNewRetrieval?: boolean;
 }
 
 /**
@@ -382,5 +386,9 @@ export async function analyzeQuery(
     queryType: queryType as any,
     keywords,
     isMultiDocumentQuery: isComparative,
+    // ✅ Follow-up fields will be populated by the chat routes
+    isFollowUp: undefined,
+    followUpConfidence: undefined,
+    needsNewRetrieval: undefined,
   };
 }

@@ -9,6 +9,8 @@ import {
   trackGlobalMemory,
   getSessionContexts
 } from '@/lib/db';
+import { analyzeQuery } from '@/lib/queryProcessor';
+import { retrieveSmartContext, detectFollowUpWithAI } from '@/lib/smartRetrieval';
 import { 
   isComplexQuery, 
   performMultiHopReasoning, 
@@ -46,7 +48,9 @@ export async function POST(request: NextRequest) {
         sessionId, 
         documentIds,
         enableMultiHop = false,
-        preferredModel
+        preferredModel,
+        useReranking = true,
+        useKeywordSearch = false
       } = await request.json();
 
       if (!message || !sessionId) {
@@ -61,7 +65,8 @@ export async function POST(request: NextRequest) {
         hasDocuments: documentIds?.length > 0,
         documentCount: documentIds?.length || 0,
         enableMultiHop,
-        preferredModel
+        preferredModel,
+        useKeywordSearch
       });
 
       const db = getDb();
@@ -78,15 +83,26 @@ export async function POST(request: NextRequest) {
       history.reverse();
       console.log(`📜 Loaded ${history.length} previous messages`);
 
+      // ✅ STEP 1.5: AI-POWERED FOLLOW-UP DETECTION
+      const conversationHistory = history.map(msg => ({
+        role: msg.role,
+        content: msg.content
+      }));
+
+      const followUpDetection = await detectFollowUpWithAI(message, conversationHistory);
+
+      console.log(`🔍 Follow-up Analysis:`, {
+        isFollowUp: followUpDetection.isFollowUp,
+        confidence: followUpDetection.confidence,
+        reason: followUpDetection.reason,
+        needsRetrieval: followUpDetection.needsNewRetrieval
+      });
+
       // ✅ STEP 2: Analyze conversation context (every 3 messages)
       if (history.length > 0 && history.length % 3 === 0) {
         console.log('🧠 Analyzing conversation context...');
         
         const queryLanguage = detectQueryLanguage(message);
-        const conversationHistory = history.map(msg => ({
-          role: msg.role,
-          content: msg.content
-        }));
 
         try {
           const context = await analyzeConversationContext(conversationHistory, queryLanguage);
@@ -131,10 +147,6 @@ export async function POST(request: NextRequest) {
         
         try {
           const queryLanguage = detectQueryLanguage(message);
-          const conversationHistory = history.map(msg => ({
-            role: msg.role,
-            content: msg.content
-          }));
 
           const summaryResult = await generateSessionSummary(conversationHistory, queryLanguage);
           
@@ -170,7 +182,10 @@ export async function POST(request: NextRequest) {
             .map(c => c.topic)
             .join(', ');
           
-          contextualPromptAddition = `\n\n📋 **Context Awareness:**\nRecent topics we've discussed: ${recentTopics}\n`;
+          const queryLanguage = detectQueryLanguage(message);
+          contextualPromptAddition = queryLanguage === 'ar'
+            ? `\n\n📋 **الوعي بالسياق:**\nالمواضيع التي ناقشناها مؤخراً: ${recentTopics}\n`
+            : `\n\n📋 **Context Awareness:**\nRecent topics we've discussed: ${recentTopics}\n`;
         }
 
         conversationContextString = history
@@ -200,8 +215,8 @@ export async function POST(request: NextRequest) {
             docLanguages,
             3,
             queryLanguage,
-            false,
-            false
+            useReranking,
+            useKeywordSearch
           );
 
           let conversationPrefix = '';
@@ -233,7 +248,127 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // ==================== STANDARD CONVERSATIONAL CHAT ====================
+      // ==================== DOCUMENT-BASED RETRIEVAL (IF DOCUMENTS PROVIDED) ====================
+      if (documentIds && documentIds.length > 0) {
+        console.log('📚 Documents provided - performing retrieval-based chat');
+        
+        // ✅ Perform query analysis
+        const queryAnalysis = await analyzeQuery(message, queryLanguage);
+        
+        // ✅ ADD follow-up info to query analysis
+        queryAnalysis.isFollowUp = followUpDetection.isFollowUp;
+        queryAnalysis.followUpConfidence = followUpDetection.confidence;
+        queryAnalysis.needsNewRetrieval = followUpDetection.needsNewRetrieval;
+
+        console.log('🔍 Query Analysis:', {
+          original: queryAnalysis.originalQuery,
+          type: queryAnalysis.queryType,
+          keywords: queryAnalysis.keywords,
+          isFollowUp: queryAnalysis.isFollowUp,
+          needsRetrieval: queryAnalysis.needsNewRetrieval
+        });
+
+        // ✅ SMART RETRIEVAL DECISION
+        let retrievedContext = '';
+        
+        if (followUpDetection.needsNewRetrieval || !followUpDetection.isFollowUp) {
+          console.log('📚 Performing new retrieval...');
+          
+          const { chunks, strategy, confidence } = await retrieveSmartContext(
+            queryAnalysis,
+            documentIds,
+            useReranking,
+            useKeywordSearch
+          );
+          
+          console.log(`📊 Retrieval Results:
+   - Strategy: ${strategy}
+   - Chunks: ${chunks.length}
+   - Confidence: ${(confidence * 100).toFixed(1)}%`);
+
+          if (chunks.length > 0) {
+            retrievedContext = chunks
+              .map((chunk, i) => {
+                const pageHeader = queryLanguage === 'ar'
+                  ? `**📄 صفحة ${chunk.page_number}**`
+                  : `**📄 Page ${chunk.page_number}**`;
+                return `${pageHeader}\n${chunk.chunk_text}`;
+              })
+              .join('\n\n---\n\n');
+          }
+        } else {
+          console.log('💬 Follow-up detected - reusing conversation context');
+          
+          // Use last 2 assistant messages as context
+          retrievedContext = history
+            .filter(msg => msg.role === 'assistant')
+            .slice(-2)
+            .map(msg => msg.content)
+            .join('\n\n---\n\n');
+        }
+
+        // Build prompt with retrieved context
+        const contextSection = retrievedContext
+          ? `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**${queryLanguage === 'ar' ? 'السياق المسترجع' : 'Retrieved Context'}:**\n\n${retrievedContext}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`
+          : '';
+
+        const systemPrompt = queryLanguage === 'ar'
+          ? `أنت مساعد بحثي دقيق يتذكر السياق. استخدم تنسيق Markdown.
+
+📋 **القواعد:**
+1. تذكر المحادثة السابقة
+2. استخدم السياق المقدم عند توفره
+3. استخدم معرفتك العامة بثقة
+4. أجب بشكل مباشر ومفيد
+
+${contextualPromptAddition}`
+          : `You are an accurate research assistant with conversation memory. Use Markdown formatting.
+
+📋 **Guidelines:**
+1. Remember previous conversation
+2. Use provided context when available
+3. Use your general knowledge confidently
+4. Answer directly and helpfully
+
+${contextualPromptAddition}`;
+
+        const prompt = conversationContextString
+          ? `${systemPrompt}
+
+**Previous conversation:**
+${conversationContextString}
+
+${contextSection}
+
+**User:** ${message}
+**Assistant:**`
+          : `${systemPrompt}
+
+${contextSection}
+
+**User:** ${message}
+**Assistant:**`;
+
+        const geminiResult = await generateResponse(prompt, preferredModel);
+        const geminiStream = geminiResult.stream;
+        const modelUsed = geminiResult.modelUsed;
+        
+        console.log(`✅ Response generated using: ${modelUsed}`);
+        
+        for await (const chunk of geminiStream) {
+          const text = chunk.text();
+          if (text) {
+            await writer.write(encoder.encode(text));
+          }
+        }
+
+        updateChatSessionTimestamp(sessionId);
+        await writer.close();
+        console.log('✅ Document-based chat response complete');
+        return;
+      }
+
+      // ==================== STANDARD CONVERSATIONAL CHAT (NO DOCUMENTS) ====================
       console.log(enableMultiHop ? '💬 Using standard conversational response (fallback)' : '💬 Using standard conversational response');
 
       const systemPrompt = queryLanguage === 'ar'
@@ -246,38 +381,19 @@ export async function POST(request: NextRequest) {
    - عند سؤالك عن محادثات سابقة، ارجع إلى السياق أدناه
    - اربط الأسئلة الجديدة بالمواضيع السابقة عند الصلة
 
-2. **الأولوية للسياق المقدم:**
-   - إذا كانت الإجابة موجودة في المقاطع أدناه، استخدمها وأشر إلى رقم الصفحة والوثيقة
-   - اقتبس المعلومات بدقة من السياق
-
-3. **دمج المعرفة العامة بثقة:**
+2. **دمج المعرفة العامة بثقة:**
    - **استخدم معرفتك العامة بحرية** لتقديم إجابات مفيدة وشاملة
-   - عند تحليل الأسلوب الأدبي أو المقارنة، استخدم ما هو متاح في النص ثم أضف من معرفتك
-   - ضع علامات واضحة:
-     * **[من النص - صفحة X]** للمعلومات من السياق
-     * **[من المعرفة العامة]** للمعلومات الخارجية
    - **لا تقل "لا يمكنني" أو "يحتاج المزيد من المعلومات"** - قدم أفضل إجابة ممكنة
 
-4. **أجب على جميع الأسئلة بثقة:**
+3. **أجب على جميع الأسئلة بثقة:**
    - قدم إجابات مباشرة ومفيدة
-   - إذا لم يكن السياق كافياً، استخدم معرفتك لتكملة الإجابة
    - **تجنب الإجابات الاعتذارية أو المترددة**
 
-5. **تحليل الأسلوب الأدبي - نهج عملي:**
-   - حلل العناصر المتاحة في النص (السرد، اللغة، المواضيع، الأسلوب)
-   - قارن بكتّاب مشهورين بناءً على هذه العناصر
-   - قدم أمثلة محددة من النص المتاح
-   - أضف من معرفتك عن الكتّاب المشابهين
-   - **كن حاسماً في استنتاجاتك**
-
-6. **تنسيق Markdown:**
+4. **تنسيق Markdown:**
    - استخدم **النص الغامق** للتأكيد
    - استخدم القوائم النقطية والمرقمة
-   - استخدم > للاقتباسات من النص
 
-${contextualPromptAddition}
-${documentIds?.length > 0 ? '### 💡 **ملاحظة:**\nلديك وصول إلى وثائق إضافية. استخدمها عند الحاجة لإثراء إجاباتك.\n\n' : ''}`
-
+${contextualPromptAddition}`
         : `You are an accurate and specialized research assistant with conversational memory. Use Markdown formatting in all your responses.
 
 📋 **Core Guidelines:**
@@ -287,37 +403,19 @@ ${documentIds?.length > 0 ? '### 💡 **ملاحظة:**\nلديك وصول إل�
    - When asked about previous exchanges, refer to the context below
    - Connect new questions to prior topics when relevant
 
-2. **Prioritize Provided Context:**
-   - Use passages below and cite page numbers when available
-   - Quote information accurately from context
-
-3. **Integrate General Knowledge Confidently:**
+2. **Integrate General Knowledge Confidently:**
    - **Use your general knowledge freely** to provide helpful, comprehensive answers
-   - When analyzing literary style or making comparisons, use available text then add from your knowledge
-   - Use clear markers:
-     * **[From Text - Page X]** for context information
-     * **[From General Knowledge]** for external information
    - **Never say "I cannot" or "I need more information"** - provide the best answer possible
 
-4. **Answer ALL Questions Confidently:**
+3. **Answer ALL Questions Confidently:**
    - Provide direct, helpful answers
-   - If context is insufficient, use your knowledge to complete the answer
    - **Avoid apologetic or hesitant responses**
 
-5. **Literary Style Analysis - Practical Approach:**
-   - Analyze available elements in text (narrative, language, themes, style)
-   - Compare to famous writers based on these elements
-   - Provide specific examples from available text
-   - Add from your knowledge about similar writers
-   - **Be decisive in your conclusions**
-
-6. **Markdown Formatting:**
+4. **Markdown Formatting:**
    - Use **bold** for emphasis
    - Use bullet and numbered lists
-   - Use > for quotes from text
 
-${contextualPromptAddition}
-${documentIds?.length > 0 ? '### 💡 **Note:**\nYou have access to additional documents. Use them when needed to enrich your answers.\n\n' : ''}`;
+${contextualPromptAddition}`;
 
       const prompt = conversationContextString
         ? `${systemPrompt}
@@ -338,7 +436,6 @@ ${conversationContextString}
 
       // ✅ Stream response
       let modelUsed: string | undefined;
-      let assistantResponse = '';
       
       try {
         console.log(`🎯 Attempting to use model: ${preferredModel || 'default'}`);
@@ -352,7 +449,6 @@ ${conversationContextString}
         for await (const chunk of geminiStream) {
           const text = chunk.text();
           if (text) {
-            assistantResponse += text;
             await writer.write(encoder.encode(text));
           }
         }
