@@ -40,18 +40,28 @@ interface RetrievalConfig {
   recencyBias: boolean;
 }
 
+// ✅ NEW: Enhanced follow-up context
+interface FollowUpContext {
+  previousQuery?: string;
+  previousKeywords?: string[];
+  previousChunksCount?: number;
+}
+
 /**
- * ✅ AI-POWERED FOLLOW-UP DETECTION
- * Uses Gemini to intelligently determine if a query is a follow-up
+ * ✅ AI-POWERED FOLLOW-UP DETECTION (ENHANCED)
+ * Now detects "more from page X" patterns and extracts original search terms
  */
 export async function detectFollowUpWithAI(
   currentQuery: string,
-  conversationHistory: Array<{ role: string; content: string }>
+  conversationHistory: Array<{ role: string; content: string }>,
+  context?: FollowUpContext
 ): Promise<{
   isFollowUp: boolean;
   confidence: number;
   reason: string;
   needsNewRetrieval: boolean;
+  enhancedKeywords?: string[]; // ✅ NEW: Extracted keywords to reuse
+  pageFilter?: number; // ✅ NEW: Page number filter if specified
 }> {
   if (!conversationHistory || conversationHistory.length === 0) {
     return {
@@ -62,46 +72,93 @@ export async function detectFollowUpWithAI(
     };
   }
 
+  // ✅ QUICK PATTERN DETECTION for "more from page X"
+  const pageFilterPatterns = [
+    /(?:من|from)\s*(?:صفحة|page)\s*(\d+)/i,
+    /(?:صفحة|page)\s*(\d+)\s*(?:وما فوق|and above|onwards?|[+])/i,
+    /(?:من|from)\s*(\d+)/i
+  ];
+
+  let detectedPageFilter: number | undefined;
+  for (const pattern of pageFilterPatterns) {
+    const match = currentQuery.match(pattern);
+    if (match && match[1]) {
+      detectedPageFilter = parseInt(match[1]);
+      console.log(`🔍 Detected page filter: >= ${detectedPageFilter}`);
+      break;
+    }
+  }
+
+  // ✅ Check for "more" patterns
+  const morePatterns = /المزيد|more|additional|continue|أكثر|زيادة/i;
+  const hasMoreRequest = morePatterns.test(currentQuery);
+
+  // If asking for "more" with page filter, definitely a follow-up
+  if (hasMoreRequest && detectedPageFilter && context?.previousKeywords) {
+    return {
+      isFollowUp: true,
+      confidence: 0.98,
+      reason: 'User wants more results from specific page range using same search terms',
+      needsNewRetrieval: true,
+      enhancedKeywords: context.previousKeywords,
+      pageFilter: detectedPageFilter
+    };
+  }
+
   // Build context from last 2 exchanges (4 messages max)
   const recentHistory = conversationHistory.slice(-4);
   const historyText = recentHistory
-    .map((msg) => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
+    .map((msg) => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content.substring(0, 200)}`)
     .join('\n\n');
+
+  const lastUserQuery = recentHistory
+    .slice()
+    .reverse()
+    .find(m => m.role === 'user')?.content;
 
   const prompt = `You are an expert at analyzing conversation flow and query intent.
 
 **Task:** Determine if the current query is a follow-up question to the previous conversation.
 
-**Conversation History:**
+**Previous Conversation:**
 ${historyText}
 
-**Current Query:**
-${currentQuery}
+**Last User Query:** ${lastUserQuery || 'N/A'}
+
+**Current Query:** ${currentQuery}
 
 **Analysis Instructions:**
+
 1. A query is a FOLLOW-UP if it:
-   - References information from previous messages ("هذه", "this", "السابق", "mentioned")
-   - Asks for elaboration/analysis of previous answers ("حلل", "analyze", "اشرح")
+   - Contains words like "المزيد" (more), "أيضاً" (also), "كذلك" (likewise)
+   - References "صفحة" (page) with numbers but doesn't introduce new search terms
+   - Uses pronouns: "هذه" (this), "ذلك" (that), "السابق" (previous)
+   - Asks for elaboration: "حلل" (analyze), "اشرح" (explain), "وضح" (clarify)
    - Continues the same topic without re-establishing context
-   - Uses pronouns referring to previous content
 
 2. A query is NOT a follow-up if it:
-   - Introduces a completely new topic
-   - Provides full context independently
-   - Asks about different aspects unrelated to previous answers
+   - Introduces completely new search keywords
+   - Provides full independent context
    - Could be understood without reading previous messages
 
-3. Determine if NEW RETRIEVAL is needed:
-   - If follow-up asks for analysis/explanation of previous answer → NO retrieval (use existing context)
-   - If follow-up introduces new keywords/aspects → YES retrieval (expand context)
-   - If not a follow-up → YES retrieval (always retrieve for new topics)
+3. NEW RETRIEVAL is needed if:
+   - Follow-up specifies page numbers/ranges → YES (filter existing results)
+   - Follow-up asks for analysis only → NO (use existing context)
+   - Follow-up introduces new aspects → YES (expand search)
+   - Not a follow-up → YES (always retrieve for new topics)
+
+4. EXTRACT KEYWORDS (if follow-up with page filter):
+   - Look at the last user query for original search terms
+   - Extract main keywords that were searched for
+   - These should be reused with the new page filter
 
 **Response Format (JSON only, no markdown):**
 {
   "isFollowUp": true/false,
   "confidence": 0.0-1.0,
   "reason": "brief explanation in English",
-  "needsNewRetrieval": true/false
+  "needsNewRetrieval": true/false,
+  "extractedKeywords": ["keyword1", "keyword2"] or null
 }`;
 
   for (const modelName of FALLBACK_MODELS) {
@@ -110,7 +167,7 @@ ${currentQuery}
         model: modelName,
         generationConfig: {
           temperature: 0.1,
-          maxOutputTokens: 300,
+          maxOutputTokens: 400,
         },
       });
 
@@ -129,8 +186,28 @@ ${currentQuery}
         typeof parsed.reason === 'string' &&
         typeof parsed.needsNewRetrieval === 'boolean'
       ) {
-        console.log(`✅ Follow-up detection (${modelName}):`, parsed);
-        return parsed;
+        const result: any = {
+          isFollowUp: parsed.isFollowUp,
+          confidence: parsed.confidence,
+          reason: parsed.reason,
+          needsNewRetrieval: parsed.needsNewRetrieval
+        };
+
+        // ✅ Add extracted keywords if available
+        if (parsed.extractedKeywords && Array.isArray(parsed.extractedKeywords)) {
+          result.enhancedKeywords = parsed.extractedKeywords;
+        } else if (context?.previousKeywords) {
+          // Fallback to context keywords
+          result.enhancedKeywords = context.previousKeywords;
+        }
+
+        // ✅ Add page filter if detected
+        if (detectedPageFilter) {
+          result.pageFilter = detectedPageFilter;
+        }
+
+        console.log(`✅ Follow-up detection (${modelName}):`, result);
+        return result;
       } else {
         console.warn(`⚠️ Invalid response structure from ${modelName}, trying next model`);
         continue;
@@ -144,24 +221,43 @@ ${currentQuery}
     }
   }
 
-  // ✅ FALLBACK TO HEURISTICS if all AI models fail
-  console.log('⚠️ All AI models failed, using heuristic fallback');
-  return heuristicFollowUpDetection(currentQuery, conversationHistory);
+  // ✅ FALLBACK TO ENHANCED HEURISTICS if all AI models fail
+  console.log('⚠️ All AI models failed, using enhanced heuristic fallback');
+  return heuristicFollowUpDetection(currentQuery, conversationHistory, context, detectedPageFilter);
 }
 
 /**
- * ✅ HEURISTIC FALLBACK (only used if AI fails)
+ * ✅ ENHANCED HEURISTIC FALLBACK
  */
 function heuristicFollowUpDetection(
   query: string,
-  history: Array<{ role: string; content: string }>
+  history: Array<{ role: string; content: string }>,
+  context?: FollowUpContext,
+  pageFilter?: number
 ): {
   isFollowUp: boolean;
   confidence: number;
   reason: string;
   needsNewRetrieval: boolean;
+  enhancedKeywords?: string[];
+  pageFilter?: number;
 } {
   const q = query.toLowerCase();
+
+  // Check for "more" + page patterns
+  const morePatterns = /المزيد|more|additional|أكثر/i;
+  const pagePatterns = /صفحة|page|من|from/i;
+
+  if (morePatterns.test(q) && pagePatterns.test(q) && pageFilter) {
+    return {
+      isFollowUp: true,
+      confidence: 0.95,
+      reason: 'Heuristic: Detected "more from page X" pattern',
+      needsNewRetrieval: true,
+      enhancedKeywords: context?.previousKeywords || [],
+      pageFilter
+    };
+  }
 
   // Strong indicators (explicit references)
   const strongIndicators = [
@@ -215,7 +311,7 @@ function heuristicFollowUpDetection(
           isFollowUp: true,
           confidence: 0.5,
           reason: 'Heuristic: High lexical overlap with previous response',
-          needsNewRetrieval: true, // Might need more context
+          needsNewRetrieval: true,
         };
       }
     }
@@ -235,11 +331,15 @@ function heuristicFollowUpDetection(
  */
 async function exhaustiveKeywordSearch(
   keywords: string[],
-  documentIds: string[]
+  documentIds: string[],
+  pageFilter?: number // ✅ NEW: Optional page filter
 ): Promise<any[]> {
   console.log(`🔍 EXHAUSTIVE KEYWORD SEARCH MODE`);
   console.log(`   Keywords:`, keywords);
   console.log(`   Documents:`, documentIds.length);
+  if (pageFilter) {
+    console.log(`   📄 Page Filter: >= ${pageFilter}`);
+  }
 
   const allResults = new Map<string, any>();
 
@@ -263,11 +363,18 @@ async function exhaustiveKeywordSearch(
   for (const keyword of cleanedKeywords) {
     console.log(`   📍 Searching for: "${keyword}"`);
 
-    const { data, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from('embeddings')
       .select('*')
       .in('document_id', documentIds)
-      .ilike('chunk_text', `%${keyword}%`)
+      .ilike('chunk_text', `%${keyword}%`);
+
+    // ✅ Apply page filter if specified
+    if (pageFilter) {
+      query = query.gte('page_number', pageFilter);
+    }
+
+    const { data, error } = await query
       .order('page_number', { ascending: true })
       .limit(300);
 
@@ -277,7 +384,7 @@ async function exhaustiveKeywordSearch(
     }
 
     if (data && data.length > 0) {
-      console.log(`   ✅ Found ${data.length} matches for "${keyword}"`);
+      console.log(`   ✅ Found ${data.length} matches for "${keyword}"${pageFilter ? ` (page >= ${pageFilter})` : ''}`);
 
       data.forEach((chunk) => {
         const key = `${chunk.id}-${chunk.chunk_text.substring(0, 50)}`;
@@ -304,7 +411,7 @@ async function exhaustiveKeywordSearch(
         }
       });
     } else {
-      console.log(`   ⚠️ No matches found for "${keyword}"`);
+      console.log(`   ⚠️ No matches found for "${keyword}"${pageFilter ? ` (page >= ${pageFilter})` : ''}`);
     }
   }
 
@@ -322,13 +429,18 @@ async function exhaustiveKeywordSearch(
 }
 
 /**
- * ✅ Enhanced retrieve context with keyword-first search
+ * ✅ Enhanced retrieve context with keyword-first search and follow-up awareness
  */
 export async function retrieveSmartContext(
   queryAnalysis: any,
   documentIds: string[],
   useReranking: boolean = true,
-  useKeywordSearch: boolean = false
+  useKeywordSearch: boolean = false,
+  followUpContext?: { // ✅ NEW: Pass follow-up context
+    isFollowUp: boolean;
+    enhancedKeywords?: string[];
+    pageFilter?: number;
+  }
 ): Promise<RetrievalResult> {
   const {
     expandedQuery,
@@ -344,11 +456,29 @@ export async function retrieveSmartContext(
   console.log(`   Reranking: ${useReranking ? 'enabled' : 'disabled'}`);
   console.log(`   Keyword Search: ${useKeywordSearch ? 'enabled' : 'disabled'}`);
 
+  // ✅ Use enhanced keywords from follow-up if available
+  let effectiveKeywords = keywords;
+  let effectivePageFilter: number | undefined;
+
+  if (followUpContext?.isFollowUp && followUpContext.enhancedKeywords) {
+    effectiveKeywords = followUpContext.enhancedKeywords;
+    console.log(`♻️ Using enhanced keywords from follow-up:`, effectiveKeywords);
+  }
+
+  if (followUpContext?.pageFilter) {
+    effectivePageFilter = followUpContext.pageFilter;
+    console.log(`📄 Applying page filter: >= ${effectivePageFilter}`);
+  }
+
   // PRIORITY 0: Keyword-first search
-  if (useKeywordSearch && keywords && keywords.length > 0) {
+  if (useKeywordSearch && effectiveKeywords && effectiveKeywords.length > 0) {
     console.log('🔑 Using KEYWORD-FIRST search strategy');
 
-    const keywordResults = await exhaustiveKeywordSearch(keywords, documentIds);
+    const keywordResults = await exhaustiveKeywordSearch(
+      effectiveKeywords, 
+      documentIds,
+      effectivePageFilter
+    );
 
     if (keywordResults.length > 0) {
       const metadata = buildRetrievalMetadata(
@@ -359,7 +489,9 @@ export async function retrieveSmartContext(
 
       return {
         chunks: keywordResults,
-        strategy: 'keyword_exhaustive',
+        strategy: effectivePageFilter 
+          ? 'keyword_exhaustive_filtered' 
+          : 'keyword_exhaustive',
         confidence: 0.95,
         metadata,
       };
@@ -399,7 +531,7 @@ export async function retrieveSmartContext(
     documentIds,
     originalQuery,
     queryType,
-    keywords,
+    effectiveKeywords,
     useReranking
   );
 }
@@ -593,8 +725,7 @@ async function singleDocumentRetrieval(
   return { chunks, strategy, confidence, metadata };
 }
 
-// ... (rest of the retrieval functions remain the same: narrativeRetrieval, analyticalRetrieval, factualRetrieval, etc.)
-// I'll include them for completeness:
+// ==================== SPECIALIZED RETRIEVAL STRATEGIES ====================
 
 async function narrativeRetrieval(
   embedding: number[],
@@ -939,6 +1070,8 @@ async function hybridRetrieval(
     .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
     .slice(0, useReranking ? 45 : 70);
 }
+
+// ==================== UTILITY FUNCTIONS ====================
 
 async function enrichWithDocumentSpecificContent(
   baseChunks: any[],
