@@ -42,10 +42,40 @@ async function exhaustiveKeywordSearch(
   
   const allResults = new Map<string, any>();
   
+  // ✅ CLEAN & FILTER KEYWORDS
+  const cleanedKeywords = keywords
+    .map(k => k.trim())
+    .filter(k => {
+      // Remove keywords with special characters at start
+      if (/^[*:#\-،]/.test(k)) {
+        console.log(`   ⚠️ Skipping invalid keyword: "${k}"`);
+        return false;
+      }
+      // Remove very short keywords
+      if (k.length < 2) {
+        console.log(`   ⚠️ Skipping short keyword: "${k}"`);
+        return false;
+      }
+      // Remove English-only keywords (we want Arabic)
+      if (/^[a-zA-Z\s:]+$/.test(k)) {
+        console.log(`   ⚠️ Skipping English keyword: "${k}"`);
+        return false;
+      }
+      return true;
+    })
+    // Extract actual Arabic words from complex patterns
+    .map(k => {
+      // Remove prefixes like "* مشتقات: " and keep only the Arabic word
+      const match = k.match(/[\u0600-\u06FF]+/g);
+      return match ? match[0] : k;
+    })
+    // Remove duplicates
+    .filter((k, i, arr) => arr.indexOf(k) === i);
+
+  console.log(`   ✅ Cleaned keywords:`, cleanedKeywords);
+
   // ✅ Search for EACH keyword variant
-  for (const keyword of keywords) {
-    if (keyword.length < 2) continue; // Skip very short keywords
-    
+  for (const keyword of cleanedKeywords) {
     console.log(`   📍 Searching for: "${keyword}"`);
     
     // ✅ Use ILIKE for case-insensitive, Arabic-friendly search
@@ -70,18 +100,22 @@ async function exhaustiveKeywordSearch(
         const key = `${chunk.id}-${chunk.chunk_text.substring(0, 50)}`;
         
         if (!allResults.has(key)) {
+          // ✅ ESCAPE SPECIAL CHARACTERS for regex counting
+          const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          
           allResults.set(key, {
             ...chunk,
             matched_keyword: keyword,
             source: 'exhaustive_keyword',
             similarity: 0.75, // Assign good similarity score
-            keyword_count: (chunk.chunk_text.match(new RegExp(keyword, 'gi')) || []).length
+            keyword_count: (chunk.chunk_text.match(new RegExp(escapedKeyword, 'gi')) || []).length
           });
         } else {
           // If already exists, update keyword count
           const existing = allResults.get(key);
+          const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           existing.keyword_count = (existing.keyword_count || 0) + 
-            (chunk.chunk_text.match(new RegExp(keyword, 'gi')) || []).length;
+            (chunk.chunk_text.match(new RegExp(escapedKeyword, 'gi')) || []).length;
         }
       });
     } else {
@@ -101,7 +135,7 @@ async function exhaustiveKeywordSearch(
       }
       return a.page_number - b.page_number;
     })
-    .slice(0, 150); // Return up to 150 chunks
+    .slice(0, 150); 
 }
 
 /**
