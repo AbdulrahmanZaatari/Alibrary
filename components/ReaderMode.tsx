@@ -1952,20 +1952,7 @@ async function extractPageText() {
                   </select>
                 </div>
 
-                {/* Multi-Hop Reasoning */}
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={enableMultiHop}
-                    onChange={(e) => setEnableMultiHop(e.target.checked)}
-                    className="rounded text-blue-600 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-slate-700">Enable Multi-Hop Reasoning</span>
-                </label>
-              </div>
-            )}
-
-            {/* Keyword-First Search Toggle */}
+                {/* Keyword-First Search Toggle */}
               <div className="flex items-center justify-between p-2 bg-amber-50 rounded border border-amber-200">
                 <div className="flex-1">
                   <div className="flex items-center gap-2">
@@ -2003,6 +1990,21 @@ async function extractPageText() {
                   <p><strong>⚠️ Note:</strong> Bypasses AI embeddings completely</p>
                 </div>
               )}
+
+                {/* Multi-Hop Reasoning */}
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={enableMultiHop}
+                    onChange={(e) => setEnableMultiHop(e.target.checked)}
+                    className="rounded text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-sm text-slate-700">Enable Multi-Hop Reasoning</span>
+                </label>
+              </div>
+            )}
+
+            
 
             {/* Session List */}
             {showSessionList && (
