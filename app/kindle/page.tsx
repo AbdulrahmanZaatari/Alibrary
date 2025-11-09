@@ -1,6 +1,14 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
+
+interface Book {
+  id: string;
+  title: string;
+  author?: string;
+  filename: string;
+  total_pages?: number;
+}
 
 interface Message {
   role: 'user' | 'assistant';
@@ -8,9 +16,9 @@ interface Message {
 }
 
 export default function KindlePage() {
-  const [file, setFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [uploadedBook, setUploadedBook] = useState<{ id: string; title: string } | null>(null);
+  const [books, setBooks] = useState<Book[]>([]);
+  const [loadingBooks, setLoadingBooks] = useState(true);
+  const [selectedBook, setSelectedBook] = useState<Book | null>(null);
   
   const [currentPage, setCurrentPage] = useState(1);
   const [pageText, setPageText] = useState('');
@@ -20,46 +28,40 @@ export default function KindlePage() {
   const [userInput, setUserInput] = useState('');
   const [sending, setSending] = useState(false);
   
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // ==================== FILE UPLOAD ====================
-  async function handleFileUpload() {
-    if (!file) return;
+  // ==================== LOAD BOOKS ON MOUNT ====================
+  useEffect(() => {
+    loadBooks();
+  }, []);
 
-    setUploading(true);
-    const formData = new FormData();
-    formData.append('file', file);
-
+  async function loadBooks() {
+    setLoadingBooks(true);
     try {
-      const res = await fetch('/api/books/upload', {
-        method: 'POST',
-        body: formData
-      });
-
+      const res = await fetch('/api/books');
       const data = await res.json();
-
-      if (data.success) {
-        setUploadedBook({
-          id: data.bookId,
-          title: data.title || file.name
-        });
-        setFile(null);
-        if (fileInputRef.current) fileInputRef.current.value = '';
-      } else {
-        alert('Upload failed: ' + (data.error || 'Unknown error'));
+      
+      if (data.books && Array.isArray(data.books)) {
+        setBooks(data.books);
       }
     } catch (error) {
-      alert('Upload failed. Please try again.');
-      console.error(error);
+      console.error('Failed to load books:', error);
     } finally {
-      setUploading(false);
+      setLoadingBooks(false);
     }
+  }
+
+  // ==================== SELECT BOOK ====================
+  function selectBook(book: Book) {
+    setSelectedBook(book);
+    setCurrentPage(1);
+    setPageText('');
+    setMessages([]);
   }
 
   // ==================== TEXT EXTRACTION ====================
   async function extractText() {
-    if (!uploadedBook) return;
+    if (!selectedBook) return;
 
     setExtracting(true);
     setPageText('🔄 Extracting text from page ' + currentPage + '...');
@@ -69,7 +71,7 @@ export default function KindlePage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          bookId: uploadedBook.id,
+          bookId: selectedBook.id,
           pageNumber: currentPage,
           enableAiCorrection: false
         })
@@ -80,10 +82,10 @@ export default function KindlePage() {
       if (data.success && data.text) {
         setPageText(data.text);
       } else {
-        setPageText('❌ No text found on this page.');
+        setPageText('❌ No text found on this page. The page might be an image.');
       }
     } catch (error) {
-      setPageText('❌ Error extracting text.');
+      setPageText('❌ Error extracting text. Please try again.');
       console.error(error);
     } finally {
       setExtracting(false);
@@ -109,7 +111,7 @@ export default function KindlePage() {
           message: userMessage,
           pageText: pageText || undefined,
           pageNumber: currentPage,
-          bookTitle: uploadedBook?.title
+          bookTitle: selectedBook?.title
         })
       });
 
@@ -150,7 +152,7 @@ export default function KindlePage() {
     } catch (error) {
       setMessages(prev => [...prev, {
         role: 'assistant',
-        content: '❌ Failed to get response. Please try again.'
+        content: '❌ Failed to get response. Please check your internet connection and try again.'
       }]);
       console.error(error);
     } finally {
@@ -184,51 +186,89 @@ export default function KindlePage() {
         📚 Islamic Research - Kindle Mode
       </h1>
 
-      {/* ==================== UPLOAD SECTION ==================== */}
-      {!uploadedBook ? (
-        <div style={{
-          border: '2px dashed #ccc',
-          padding: '20px',
-          textAlign: 'center',
-          borderRadius: '8px',
-          background: '#f9f9f9'
-        }}>
-          <h2 style={{ fontSize: '16px', marginBottom: '15px' }}>📂 Upload PDF from Kindle</h2>
-          
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf"
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-            style={{
-              display: 'block',
-              margin: '10px auto',
-              padding: '8px',
-              fontSize: '14px'
-            }}
-          />
+      {/* ==================== BOOK SELECTION ==================== */}
+      {!selectedBook ? (
+        <div>
+          <h2 style={{ fontSize: '16px', marginBottom: '12px' }}>
+            Select a Book from Your Library:
+          </h2>
 
-          {file && (
-            <div style={{ margin: '10px 0', fontSize: '13px', color: '#666' }}>
-              Selected: <strong>{file.name}</strong> ({(file.size / 1024 / 1024).toFixed(2)} MB)
+          {loadingBooks ? (
+            <div style={{
+              textAlign: 'center',
+              padding: '40px',
+              color: '#666'
+            }}>
+              <div>⏳ Loading your books...</div>
+            </div>
+          ) : books.length === 0 ? (
+            <div style={{
+              border: '2px dashed #ccc',
+              padding: '30px',
+              textAlign: 'center',
+              borderRadius: '8px',
+              background: '#f9f9f9'
+            }}>
+              <div style={{ fontSize: '16px', marginBottom: '10px' }}>📚</div>
+              <div style={{ color: '#666', marginBottom: '15px' }}>
+                No books in your library yet.
+              </div>
+              <div style={{ fontSize: '13px', color: '#999' }}>
+                Upload books from your desktop at:<br />
+                <strong>{typeof window !== 'undefined' ? window.location.origin : ''}</strong>
+              </div>
+            </div>
+          ) : (
+            <div>
+              {books.map(book => (
+                <button
+                  key={book.id}
+                  onClick={() => selectBook(book)}
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    margin: '8px 0',
+                    padding: '12px',
+                    textAlign: 'left',
+                    border: '1px solid #ccc',
+                    background: '#f9f9f9',
+                    borderRadius: '5px',
+                    cursor: 'pointer',
+                    fontSize: '14px'
+                  }}
+                >
+                  <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>
+                    📖 {book.title}
+                  </div>
+                  {book.author && (
+                    <div style={{ fontSize: '12px', color: '#666' }}>
+                      {book.author}
+                    </div>
+                  )}
+                  {book.total_pages && (
+                    <div style={{ fontSize: '12px', color: '#999', marginTop: '4px' }}>
+                      {book.total_pages} pages
+                    </div>
+                  )}
+                </button>
+              ))}
             </div>
           )}
 
           <button
-            onClick={handleFileUpload}
-            disabled={!file || uploading}
+            onClick={loadBooks}
             style={{
-              padding: '10px 20px',
-              fontSize: '14px',
-              border: 'none',
+              marginTop: '15px',
+              padding: '10px 15px',
+              fontSize: '13px',
+              border: '1px solid #ccc',
+              background: 'white',
               borderRadius: '5px',
-              background: !file || uploading ? '#ccc' : '#4CAF50',
-              color: 'white',
-              cursor: !file || uploading ? 'not-allowed' : 'pointer',
-              marginTop: '10px'
+              cursor: 'pointer',
+              width: '100%'
             }}
           >
-            {uploading ? '⏳ Uploading...' : '📤 Upload PDF'}
+            🔄 Refresh Book List
           </button>
         </div>
       ) : (
@@ -241,13 +281,19 @@ export default function KindlePage() {
             marginBottom: '15px',
             border: '1px solid #ddd'
           }}>
-            <strong style={{ fontSize: '15px' }}>📖 {uploadedBook.title}</strong>
+            <strong style={{ fontSize: '15px' }}>📖 {selectedBook.title}</strong>
+            {selectedBook.author && (
+              <div style={{ fontSize: '12px', color: '#666', marginTop: '3px' }}>
+                by {selectedBook.author}
+              </div>
+            )}
             <div style={{ fontSize: '12px', color: '#666', marginTop: '5px' }}>
               Page {currentPage}
+              {selectedBook.total_pages && ` of ${selectedBook.total_pages}`}
             </div>
             <button
               onClick={() => {
-                setUploadedBook(null);
+                setSelectedBook(null);
                 setPageText('');
                 setMessages([]);
                 setCurrentPage(1);
@@ -262,7 +308,7 @@ export default function KindlePage() {
                 cursor: 'pointer'
               }}
             >
-              ← Upload Different Book
+              ← Back to Library
             </button>
           </div>
 
@@ -282,7 +328,8 @@ export default function KindlePage() {
                 border: '1px solid #ccc',
                 background: currentPage <= 1 ? '#f5f5f5' : 'white',
                 cursor: currentPage <= 1 ? 'not-allowed' : 'pointer',
-                borderRadius: '4px'
+                borderRadius: '4px',
+                opacity: currentPage <= 1 ? 0.5 : 1
               }}
             >
               ← Previous
@@ -308,6 +355,7 @@ export default function KindlePage() {
 
             <button
               onClick={() => setCurrentPage(currentPage + 1)}
+              disabled={selectedBook.total_pages ? currentPage >= selectedBook.total_pages : false}
               style={{
                 flex: 1,
                 padding: '10px',
@@ -315,7 +363,8 @@ export default function KindlePage() {
                 border: '1px solid #ccc',
                 background: 'white',
                 cursor: 'pointer',
-                borderRadius: '4px'
+                borderRadius: '4px',
+                opacity: (selectedBook.total_pages && currentPage >= selectedBook.total_pages) ? 0.5 : 1
               }}
             >
               Next →
@@ -353,7 +402,7 @@ export default function KindlePage() {
               borderBottom: '1px solid #ddd',
               paddingBottom: '8px'
             }}>
-              💬 Chat with Gemini
+              💬 Chat with Gemini AI
             </h3>
 
             {/* Messages */}
@@ -370,7 +419,10 @@ export default function KindlePage() {
                   padding: '40px 20px',
                   fontSize: '13px'
                 }}>
-                  No messages yet. Start a conversation with Gemini!
+                  No messages yet. Start a conversation!<br />
+                  <span style={{ fontSize: '11px', marginTop: '5px', display: 'block' }}>
+                    💡 Extract page text first for better context
+                  </span>
                 </div>
               ) : (
                 messages.map((msg, i) => (
@@ -397,7 +449,7 @@ export default function KindlePage() {
                       lineHeight: '1.5',
                       whiteSpace: 'pre-wrap'
                     }}>
-                      {msg.content}
+                      {msg.content || '...'}
                     </div>
                   </div>
                 ))
@@ -421,7 +473,8 @@ export default function KindlePage() {
                   fontSize: '14px',
                   fontFamily: 'inherit',
                   resize: 'vertical',
-                  minHeight: '60px'
+                  minHeight: '60px',
+                  background: sending ? '#f5f5f5' : 'white'
                 }}
                 rows={2}
               />
@@ -455,12 +508,12 @@ export default function KindlePage() {
             fontSize: '12px',
             lineHeight: '1.5'
           }}>
-            <strong>💡 Tips:</strong>
+            <strong>💡 Quick Tips:</strong>
             <ul style={{ margin: '5px 0 0 0', paddingLeft: '20px' }}>
-              <li>Extract page text first for better context</li>
-              <li>Use Previous/Next to navigate pages</li>
+              <li>Extract page text for AI to understand context</li>
+              <li>Navigate with Previous/Next buttons</li>
               <li>Press Enter to send messages quickly</li>
-              <li>Chat works without page context too!</li>
+              <li>AI works without page text too (general questions)</li>
             </ul>
           </div>
         </div>
