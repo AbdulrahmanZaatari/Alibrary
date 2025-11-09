@@ -1004,31 +1004,45 @@ async function extractPageText() {
 
     const decoder = new TextDecoder();
     let fullResponse = '';
-    let lastUpdate = Date.now();
-    const UPDATE_INTERVAL = 50;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    console.log('📖 Starting to read stream...');
 
-      const chunk = decoder.decode(value, { stream: true });
-      fullResponse += chunk;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) {
+          console.log('✅ Stream reading complete. Total text:', fullResponse.length, 'chars');
+          break;
+        }
 
-      const now = Date.now();
-      if (now - lastUpdate > UPDATE_INTERVAL) {
+        const chunk = decoder.decode(value, { stream: true });
+        fullResponse += chunk;
+        
+        // ✅ Update streaming content in real-time
         setStreamingContent(fullResponse);
-        lastUpdate = now;
       }
+      
+      // ✅ Final update to ensure everything is captured
+      setStreamingContent(fullResponse);
+      
+      // ✅ Small delay to ensure last render
+      await new Promise(resolve => setTimeout(resolve, 50));
+      
+      // ✅ Add to messages and clear streaming
+      setIsStreaming(false);
+      setChatMessages(prev => [...prev, { role: 'assistant', content: fullResponse }]);
+      setStreamingContent('');
+      
+      console.log('✅ Chat response received and displayed');
+      
+    } catch (streamError) {
+      console.error('❌ Stream reading error:', streamError);
+      setIsStreaming(false);
+      setStreamingContent('');
+      throw streamError;
     }
-
-    setStreamingContent(fullResponse);
-    
-    setIsStreaming(false);
-    setChatMessages(prev => [...prev, { role: 'assistant', content: fullResponse }]);
-    setStreamingContent('');
-
-    console.log('✅ Chat response received');
-    
+        
     
     try {
       await fetch('/api/reader-chat/messages', {
@@ -1412,9 +1426,15 @@ async function extractPageText() {
 
     useEffect(() => {
       setDisplayedContent(content);
+      console.log('🔄 StreamingMessage updated, length:', content.length);
     }, [content]);
 
-    if (!displayedContent) return null;
+    if (!displayedContent) { 
+      console.log('⚠️ StreamingMessage: No content to display');
+      return null;
+    }
+
+    console.log('✅ Rendering StreamingMessage with', displayedContent.length, 'chars');
 
     return (
       <div className="flex justify-start">
@@ -2063,7 +2083,7 @@ async function extractPageText() {
               ref={chatContainerRef}
               className="flex-1 overflow-y-auto p-4 space-y-4"
             >
-              {chatMessages.length === 0 ? (
+              {chatMessages.length === 0 && !isStreaming ? (
                 <div className="flex items-center justify-center h-full text-slate-500 text-center">
                   <div>
                     <Sparkles className="mx-auto mb-2 text-slate-400" size={32} />
@@ -2076,10 +2096,17 @@ async function extractPageText() {
               ) : (
                 <>
                   {chatMessages.map((msg, idx) => (
-                    <MessageBubble key={idx} msg={msg} />
+                    <MessageBubble key={`msg-${idx}`} msg={msg} />
                   ))}
                   {isStreaming && streamingContent && (
                     <StreamingMessage content={streamingContent} />
+                  )}
+                  {/* ✅ DEBUG: Show if streaming but no content */}
+                  {isStreaming && !streamingContent && (
+                    <div className="flex items-center gap-2 text-sm text-blue-600">
+                      <Loader2 className="animate-spin" size={16} />
+                      <span>Receiving response...</span>
+                    </div>
                   )}
                   <div ref={messagesEndRef} />
                 </>
@@ -2088,15 +2115,15 @@ async function extractPageText() {
 
             {/* Input Area */}
             <div className="p-4 border-t border-slate-200 bg-white">
-              {chatLoading && !isStreaming && (
+              {(chatLoading || isStreaming) && (
                 <div className="mb-2 flex items-center gap-2 text-sm text-blue-600">
                   <Loader2 className="animate-spin" size={16} />
-                  Processing...
+                  {isStreaming ? 'Receiving response...' : 'Processing...'}
                 </div>
               )}
               <ChatInput 
                 onSend={sendChatMessage} 
-                disabled={chatLoading}
+                disabled={chatLoading || isStreaming}
               />
             </div>
           </div>
