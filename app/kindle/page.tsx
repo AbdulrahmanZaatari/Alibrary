@@ -18,6 +18,7 @@ interface Message {
 export default function KindlePage() {
   const [books, setBooks] = useState<Book[]>([]);
   const [loadingBooks, setLoadingBooks] = useState(true);
+  const [loadError, setLoadError] = useState<string>('');
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
   
   const [currentPage, setCurrentPage] = useState(1);
@@ -37,15 +38,49 @@ export default function KindlePage() {
 
   async function loadBooks() {
     setLoadingBooks(true);
+    setLoadError('');
+    
     try {
-      const res = await fetch('/api/books');
+      console.log('📚 Fetching books from /api/books...');
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+      
+      const res = await fetch('/api/books', {
+        signal: controller.signal,
+        headers: {
+          'Accept': 'application/json'
+        }
+      });
+      
+      clearTimeout(timeoutId);
+      
+      console.log('📚 Response status:', res.status);
+      
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+      
       const data = await res.json();
+      console.log('📚 Received data:', data);
       
       if (data.books && Array.isArray(data.books)) {
         setBooks(data.books);
+        console.log(`✅ Loaded ${data.books.length} books`);
+      } else {
+        console.warn('⚠️ Invalid response format:', data);
+        setBooks([]);
       }
-    } catch (error) {
-      console.error('Failed to load books:', error);
+    } catch (error: any) {
+      console.error('❌ Failed to load books:', error);
+      
+      if (error.name === 'AbortError') {
+        setLoadError('Request timed out. Please check your connection and try again.');
+      } else if (error.message) {
+        setLoadError(`Error: ${error.message}`);
+      } else {
+        setLoadError('Failed to load books. Please try again.');
+      }
     } finally {
       setLoadingBooks(false);
     }
@@ -67,6 +102,9 @@ export default function KindlePage() {
     setPageText('🔄 Extracting text from page ' + currentPage + '...');
 
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+      
       const res = await fetch('/api/books/extract-page', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -74,8 +112,11 @@ export default function KindlePage() {
           bookId: selectedBook.id,
           pageNumber: currentPage,
           enableAiCorrection: false
-        })
+        }),
+        signal: controller.signal
       });
+
+      clearTimeout(timeoutId);
 
       const data = await res.json();
 
@@ -84,8 +125,12 @@ export default function KindlePage() {
       } else {
         setPageText('❌ No text found on this page. The page might be an image.');
       }
-    } catch (error) {
-      setPageText('❌ Error extracting text. Please try again.');
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        setPageText('❌ Request timed out. Please try again.');
+      } else {
+        setPageText('❌ Error extracting text. Please try again.');
+      }
       console.error(error);
     } finally {
       setExtracting(false);
@@ -199,7 +244,39 @@ export default function KindlePage() {
               padding: '40px',
               color: '#666'
             }}>
-              <div>⏳ Loading your books...</div>
+              <div style={{ fontSize: '24px', marginBottom: '10px' }}>⏳</div>
+              <div>Loading your books...</div>
+              <div style={{ fontSize: '12px', color: '#999', marginTop: '10px' }}>
+                This may take a few moments
+              </div>
+            </div>
+          ) : loadError ? (
+            <div style={{
+              border: '2px solid #f44336',
+              padding: '20px',
+              textAlign: 'center',
+              borderRadius: '8px',
+              background: '#ffebee',
+              marginBottom: '15px'
+            }}>
+              <div style={{ fontSize: '16px', marginBottom: '10px', color: '#c62828' }}>⚠️ Error</div>
+              <div style={{ color: '#666', marginBottom: '15px', fontSize: '13px' }}>
+                {loadError}
+              </div>
+              <button
+                onClick={loadBooks}
+                style={{
+                  padding: '10px 20px',
+                  fontSize: '14px',
+                  border: 'none',
+                  background: '#2196F3',
+                  color: 'white',
+                  borderRadius: '5px',
+                  cursor: 'pointer'
+                }}
+              >
+                🔄 Try Again
+              </button>
             </div>
           ) : books.length === 0 ? (
             <div style={{
@@ -220,6 +297,16 @@ export default function KindlePage() {
             </div>
           ) : (
             <div>
+              <div style={{ 
+                marginBottom: '10px', 
+                fontSize: '13px', 
+                color: '#666',
+                padding: '8px',
+                background: '#e8f5e9',
+                borderRadius: '4px'
+              }}>
+                ✅ Found {books.length} book{books.length !== 1 ? 's' : ''}
+              </div>
               {books.map(book => (
                 <button
                   key={book.id}
@@ -242,7 +329,7 @@ export default function KindlePage() {
                   </div>
                   {book.author && (
                     <div style={{ fontSize: '12px', color: '#666' }}>
-                      {book.author}
+                      by {book.author}
                     </div>
                   )}
                   {book.total_pages && (
@@ -257,18 +344,20 @@ export default function KindlePage() {
 
           <button
             onClick={loadBooks}
+            disabled={loadingBooks}
             style={{
               marginTop: '15px',
               padding: '10px 15px',
               fontSize: '13px',
               border: '1px solid #ccc',
-              background: 'white',
+              background: loadingBooks ? '#f5f5f5' : 'white',
               borderRadius: '5px',
-              cursor: 'pointer',
-              width: '100%'
+              cursor: loadingBooks ? 'not-allowed' : 'pointer',
+              width: '100%',
+              opacity: loadingBooks ? 0.6 : 1
             }}
           >
-            🔄 Refresh Book List
+            {loadingBooks ? '⏳ Loading...' : '🔄 Refresh Book List'}
           </button>
         </div>
       ) : (
@@ -332,7 +421,7 @@ export default function KindlePage() {
                 opacity: currentPage <= 1 ? 0.5 : 1
               }}
             >
-              ← Previous
+              ← Prev
             </button>
 
             <button
@@ -350,7 +439,7 @@ export default function KindlePage() {
                 fontWeight: 'bold'
               }}
             >
-              {extracting ? '⏳ Extracting...' : '📄 Extract Page Text'}
+              {extracting ? '⏳ Extracting...' : '📄 Extract Text'}
             </button>
 
             <button
@@ -463,7 +552,7 @@ export default function KindlePage() {
                 value={userInput}
                 onChange={(e) => setUserInput(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder="Type your message... (Press Enter to send)"
+                placeholder="Type your message..."
                 disabled={sending}
                 style={{
                   flex: 1,
@@ -510,10 +599,9 @@ export default function KindlePage() {
           }}>
             <strong>💡 Quick Tips:</strong>
             <ul style={{ margin: '5px 0 0 0', paddingLeft: '20px' }}>
-              <li>Extract page text for AI to understand context</li>
-              <li>Navigate with Previous/Next buttons</li>
-              <li>Press Enter to send messages quickly</li>
-              <li>AI works without page text too (general questions)</li>
+              <li>Extract page text for AI context</li>
+              <li>Use Prev/Next to navigate</li>
+              <li>Press Enter to send quickly</li>
             </ul>
           </div>
         </div>
