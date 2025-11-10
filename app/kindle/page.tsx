@@ -41,15 +41,17 @@ export default function KindlePage() {
     setLoadError('');
     
     try {
-      console.log('📚 Fetching books from /api/books...');
+      console.log('📚 Fetching books from Supabase...');
       
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+      const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 second timeout
       
-      const res = await fetch('/api/books', {
+      // Use Supabase endpoint instead of SQLite
+      const res = await fetch('/api/books/list-supabase', {
         signal: controller.signal,
         headers: {
-          'Accept': 'application/json'
+          'Accept': 'application/json',
+          'Cache-Control': 'no-cache'
         }
       });
       
@@ -58,28 +60,30 @@ export default function KindlePage() {
       console.log('📚 Response status:', res.status);
       
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        const errorText = await res.text();
+        throw new Error(`HTTP ${res.status}: ${errorText}`);
       }
       
       const data = await res.json();
       console.log('📚 Received data:', data);
       
-      if (data.books && Array.isArray(data.books)) {
+      if (data.success && data.books && Array.isArray(data.books)) {
         setBooks(data.books);
-        console.log(`✅ Loaded ${data.books.length} books`);
+        console.log(`✅ Loaded ${data.books.length} books from Supabase`);
       } else {
         console.warn('⚠️ Invalid response format:', data);
+        setLoadError(data.error || 'Invalid response from server');
         setBooks([]);
       }
     } catch (error: any) {
       console.error('❌ Failed to load books:', error);
       
       if (error.name === 'AbortError') {
-        setLoadError('Request timed out. Please check your connection and try again.');
+        setLoadError('Request timed out. Your connection might be slow. Please try again.');
       } else if (error.message) {
         setLoadError(`Error: ${error.message}`);
       } else {
-        setLoadError('Failed to load books. Please try again.');
+        setLoadError('Failed to load books. Please check your internet connection.');
       }
     } finally {
       setLoadingBooks(false);
@@ -245,9 +249,9 @@ export default function KindlePage() {
               color: '#666'
             }}>
               <div style={{ fontSize: '24px', marginBottom: '10px' }}>⏳</div>
-              <div>Loading your books...</div>
+              <div>Loading your books from cloud...</div>
               <div style={{ fontSize: '12px', color: '#999', marginTop: '10px' }}>
-                This may take a few moments
+                This may take up to 20 seconds
               </div>
             </div>
           ) : loadError ? (
@@ -260,7 +264,7 @@ export default function KindlePage() {
               marginBottom: '15px'
             }}>
               <div style={{ fontSize: '16px', marginBottom: '10px', color: '#c62828' }}>⚠️ Error</div>
-              <div style={{ color: '#666', marginBottom: '15px', fontSize: '13px' }}>
+              <div style={{ color: '#666', marginBottom: '15px', fontSize: '13px', whiteSpace: 'pre-wrap' }}>
                 {loadError}
               </div>
               <button
@@ -294,6 +298,21 @@ export default function KindlePage() {
                 Upload books from your desktop at:<br />
                 <strong>{typeof window !== 'undefined' ? window.location.origin : ''}</strong>
               </div>
+              <button
+                onClick={loadBooks}
+                style={{
+                  marginTop: '15px',
+                  padding: '10px 15px',
+                  fontSize: '13px',
+                  border: '1px solid #2196F3',
+                  background: 'white',
+                  color: '#2196F3',
+                  borderRadius: '5px',
+                  cursor: 'pointer'
+                }}
+              >
+                🔄 Refresh
+              </button>
             </div>
           ) : (
             <div>
@@ -305,7 +324,7 @@ export default function KindlePage() {
                 background: '#e8f5e9',
                 borderRadius: '4px'
               }}>
-                ✅ Found {books.length} book{books.length !== 1 ? 's' : ''}
+                ✅ Found {books.length} book{books.length !== 1 ? 's' : ''} in cloud storage
               </div>
               {books.map(book => (
                 <button
