@@ -3,6 +3,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useSwipeable } from 'react-swipeable';
 import { Document, Page, pdfjs } from 'react-pdf';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { 
   ChevronLeft, 
   ChevronRight, 
@@ -14,10 +16,13 @@ import {
   Loader2,
   FileText,
   Sparkles,
-  Menu
+  Menu,
+  Settings,
+  Copy,
+  Check,
+  BookOpen
 } from 'lucide-react';
 
-// Remove CSS imports - handle styling directly
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 interface Message {
@@ -26,13 +31,17 @@ interface Message {
   timestamp: Date;
 }
 
-interface ChatSession {
+interface CorpusDocument {
   id: string;
-  bookId: string;
-  bookTitle: string;
-  messages: Message[];
-  createdAt: Date;
-  lastUpdated: Date;
+  display_name: string;
+  is_selected: number;
+}
+
+interface CustomPrompt {
+  id: string;
+  name: string;
+  template: string;
+  category: string;
 }
 
 interface MobileReaderModeProps {
@@ -41,85 +50,43 @@ interface MobileReaderModeProps {
 }
 
 export default function MobileReaderMode({ selectedBook, onClose }: MobileReaderModeProps) {
+  // PDF State
   const [numPages, setNumPages] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [zoom, setZoom] = useState(1);
   const [showControls, setShowControls] = useState(true);
-  const [showChat, setShowChat] = useState(false);
-  const [extractedText, setExtractedText] = useState('');
-  const [extracting, setExtracting] = useState(false);
+  
+  // UI State
+  const [showChat, setShowChat] = useState(true); // ✅ Chat always visible on mobile
+  const [showSettings, setShowSettings] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   
-  // Chat state
+  // Text Extraction
+  const [extractedText, setExtractedText] = useState('');
+  const [extracting, setExtracting] = useState(false);
+  const [copied, setCopied] = useState(false);
+  
+  // Chat State
   const [messages, setMessages] = useState<Message[]>([]);
   const [userInput, setUserInput] = useState('');
   const [sending, setSending] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<'gemini-2.0-flash-exp' | 'gemini-exp-1206'>('gemini-2.0-flash-exp');
+  const [streamingContent, setStreamingContent] = useState('');
+  const [isStreaming, setIsStreaming] = useState(false);
   
-  // Session management
-  const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [currentSessionId, setCurrentSessionId] = useState<string>('');
-  const [showSessions, setShowSessions] = useState(false);
+  // Settings State
+  const [selectedModel, setSelectedModel] = useState('gemini-2.5-flash');
+  const [selectedCorpus, setSelectedCorpus] = useState<string[]>([]);
+  const [corpusDocuments, setCorpusDocuments] = useState<CorpusDocument[]>([]);
+  const [customPrompts, setCustomPrompts] = useState<CustomPrompt[]>([]);
+  const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
+  const [useReranking, setUseReranking] = useState(true);
+  const [useKeywordSearch, setUseKeywordSearch] = useState(false);
   
   const containerRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const hideControlsTimeout = useRef<NodeJS.Timeout | null>(null);
 
-  // Load sessions from localStorage on mount
-  useEffect(() => {
-    const savedSessions = localStorage.getItem('readerSessions');
-    if (savedSessions) {
-      try {
-        const parsed = JSON.parse(savedSessions);
-        setSessions(parsed.map((s: any) => ({
-          ...s,
-          createdAt: new Date(s.createdAt),
-          lastUpdated: new Date(s.lastUpdated),
-          messages: s.messages.map((m: any) => ({
-            ...m,
-            timestamp: new Date(m.timestamp)
-          }))
-        })));
-      } catch (error) {
-        console.error('Failed to load sessions:', error);
-      }
-    }
-
-    const bookSessionId = `session-${selectedBook.id}-${Date.now()}`;
-    setCurrentSessionId(bookSessionId);
-  }, [selectedBook.id]);
-
-  // Save sessions to localStorage
-  useEffect(() => {
-    if (sessions.length > 0) {
-      localStorage.setItem('readerSessions', JSON.stringify(sessions));
-    }
-  }, [sessions]);
-
-  // Update current session
-  useEffect(() => {
-    if (currentSessionId && messages.length > 0) {
-      setSessions(prev => {
-        const existing = prev.find(s => s.id === currentSessionId);
-        if (existing) {
-          return prev.map(s => 
-            s.id === currentSessionId 
-              ? { ...s, messages, lastUpdated: new Date() }
-              : s
-          );
-        } else {
-          return [...prev, {
-            id: currentSessionId,
-            bookId: selectedBook.id,
-            bookTitle: selectedBook.title,
-            messages,
-            createdAt: new Date(),
-            lastUpdated: new Date()
-          }];
-        }
-      });
-    }
-  }, [messages, currentSessionId, selectedBook.id, selectedBook.title]);
+  // ==================== EFFECTS ====================
 
   // Detect mobile
   useEffect(() => {
@@ -131,7 +98,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
-  // Auto-hide controls on mobile
+  // Auto-hide controls
   useEffect(() => {
     if (!isMobile) return;
 
@@ -153,7 +120,63 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
   // Auto-scroll chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, streamingContent]);
+
+  // Load corpus documents
+  useEffect(() => {
+    fetchCorpusDocuments();
+    fetchCustomPrompts();
+  }, []);
+
+  // ==================== API FUNCTIONS ====================
+
+  async function fetchCorpusDocuments() {
+    try {
+      const res = await fetch('/api/documents');
+      if (!res.ok) return;
+      
+      const data = await res.json();
+      setCorpusDocuments(data.documents || []);
+      setSelectedCorpus(
+        (data.documents || [])
+          .filter((d: CorpusDocument) => d.is_selected === 1)
+          .map((d: CorpusDocument) => d.id)
+      );
+    } catch (error) {
+      console.error('Error fetching corpus:', error);
+    }
+  }
+
+  async function fetchCustomPrompts() {
+    try {
+      const res = await fetch('/api/prompts');
+      const data = await res.json();
+      setCustomPrompts(data.prompts || []);
+    } catch (error) {
+      console.error('Error fetching prompts:', error);
+    }
+  }
+
+  async function toggleCorpusDocument(docId: string) {
+    try {
+      const isSelected = selectedCorpus.includes(docId);
+      await fetch('/api/documents/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: docId, selected: !isSelected }),
+      });
+      
+      if (isSelected) {
+        setSelectedCorpus(prev => prev.filter(id => id !== docId));
+      } else {
+        setSelectedCorpus(prev => [...prev, docId]);
+      }
+    } catch (error) {
+      console.error('Error toggling corpus doc:', error);
+    }
+  }
+
+  // ==================== PDF FUNCTIONS ====================
 
   function onDocumentLoadSuccess({ numPages }: { numPages: number }) {
     setNumPages(numPages);
@@ -175,7 +198,6 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     }
   }, [currentPage]);
 
-  // Swipe handlers
   const swipeHandlers = useSwipeable({
     onSwipedLeft: () => goToNextPage(),
     onSwipedRight: () => goToPreviousPage(),
@@ -185,7 +207,8 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     delta: 50,
   });
 
-  // Extract text
+  // ==================== TEXT EXTRACTION ====================
+
   const extractPageText = async () => {
     setExtracting(true);
     try {
@@ -195,7 +218,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
         body: JSON.stringify({
           bookId: selectedBook.id,
           pageNumber: currentPage,
-          enableAiCorrection: false
+          enableAiCorrection: true
         })
       });
 
@@ -213,7 +236,18 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     }
   };
 
-  // Send message
+  const copyToClipboard = async () => {
+    try {
+      await navigator.clipboard.writeText(extractedText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      console.error('Copy failed:', error);
+    }
+  };
+
+  // ==================== CHAT FUNCTIONS ====================
+
   const sendMessage = async () => {
     if (!userInput.trim()) return;
 
@@ -226,18 +260,26 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     setMessages(prev => [...prev, userMessage]);
     setUserInput('');
     setSending(true);
+    setIsStreaming(true);
+    setStreamingContent('');
 
     try {
-      const res = await fetch('/api/chat', {
+      const res = await fetch('/api/reader-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: userInput,
-          documentIds: [selectedBook.id],
+          documentIds: selectedCorpus,
+          bookId: selectedBook.id,
           bookTitle: selectedBook.title,
           bookPage: currentPage,
           extractedText: extractedText || undefined,
           preferredModel: selectedModel,
+          customPrompt: selectedPromptId 
+            ? customPrompts.find(p => p.id === selectedPromptId)?.template 
+            : '',
+          useReranking: useKeywordSearch ? false : useReranking,
+          useKeywordSearch: useKeywordSearch,
           conversationHistory: messages.slice(-6).map(m => ({
             role: m.role,
             content: m.content
@@ -251,32 +293,26 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
       const decoder = new TextDecoder();
       let assistantContent = '';
 
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: '',
-        timestamp: new Date()
-      }]);
-
       while (reader) {
         const { done, value } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
         assistantContent += chunk;
-
-        setMessages(prev => {
-          const newMessages = [...prev];
-          newMessages[newMessages.length - 1] = {
-            role: 'assistant',
-            content: assistantContent,
-            timestamp: new Date()
-          };
-          return newMessages;
-        });
+        setStreamingContent(assistantContent);
       }
+
+      setIsStreaming(false);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: assistantContent,
+        timestamp: new Date()
+      }]);
+      setStreamingContent('');
 
     } catch (error) {
       console.error('Chat error:', error);
+      setIsStreaming(false);
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: '❌ Failed to get response. Please try again.',
@@ -294,26 +330,6 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     }
   };
 
-  const loadSession = (session: ChatSession) => {
-    setMessages(session.messages);
-    setCurrentSessionId(session.id);
-    setShowSessions(false);
-  };
-
-  const createNewSession = () => {
-    const newSessionId = `session-${selectedBook.id}-${Date.now()}`;
-    setCurrentSessionId(newSessionId);
-    setMessages([]);
-    setShowSessions(false);
-  };
-
-  const deleteSession = (sessionId: string) => {
-    setSessions(prev => prev.filter(s => s.id !== sessionId));
-    if (currentSessionId === sessionId) {
-      createNewSession();
-    }
-  };
-
   const calculateZoom = () => {
     if (!containerRef.current) return 1;
     const width = containerRef.current.clientWidth;
@@ -327,102 +343,63 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // ==================== RENDER ====================
+
   return (
-    <div className="fixed inset-0 bg-gray-900 z-50 flex flex-col">
-      {/* Header */}
-      <div 
-        className={`absolute top-0 left-0 right-0 bg-gradient-to-b from-black/80 to-transparent z-10 transition-transform duration-300 ${
-          showControls ? 'translate-y-0' : '-translate-y-full'
-        }`}
-      >
-        <div className="flex items-center justify-between p-3 sm:p-4 text-white">
+    <div className="h-screen flex flex-col md:flex-row bg-gray-50">
+      {/* 📖 LEFT SIDE - PDF VIEWER */}
+      <div className="flex-1 flex flex-col bg-white border-r">
+        {/* Header */}
+        <div className="flex items-center justify-between p-3 border-b bg-gradient-to-r from-blue-50 to-purple-50">
           <button
             onClick={onClose}
-            className="flex items-center gap-2 hover:bg-white/10 px-3 py-2 rounded-lg transition-colors"
+            className="flex items-center gap-2 px-3 py-2 hover:bg-white rounded-lg transition-colors"
           >
             <X size={20} />
             <span className="hidden sm:inline">Close</span>
           </button>
           
           <div className="flex-1 text-center px-4">
-            <h2 className="font-semibold text-xs sm:text-base truncate">{selectedBook.title}</h2>
-            <p className="text-xs text-gray-300">
+            <h2 className="font-semibold text-sm truncate">{selectedBook.title}</h2>
+            <p className="text-xs text-gray-500">
               Page {currentPage} of {numPages}
             </p>
           </div>
 
           <button
-            onClick={() => {
-              setShowChat(!showChat);
-              setShowSessions(false);
-            }}
-            className="flex items-center gap-2 hover:bg-white/10 px-3 py-2 rounded-lg transition-colors"
+            onClick={() => setShowSettings(!showSettings)}
+            className={`p-2 rounded-lg transition-colors ${
+              showSettings ? 'bg-blue-100 text-blue-600' : 'hover:bg-white'
+            }`}
           >
-            <MessageSquare size={20} />
-            <span className="hidden sm:inline">Chat</span>
+            <Settings size={20} />
           </button>
         </div>
-      </div>
 
-      {/* PDF Viewer */}
-      <div
-        {...swipeHandlers}
-        ref={containerRef}
-        onClick={() => setShowControls(!showControls)}
-        className="flex-1 overflow-auto flex items-center justify-center bg-gray-800"
-        style={{ touchAction: 'pan-y pinch-zoom' }}
-      >
-        <Document
-          file={`/api/books/${selectedBook.id}/pdf`}
-          onLoadSuccess={onDocumentLoadSuccess}
-          loading={
-            <div className="flex items-center justify-center h-full text-white">
-              <Loader2 className="animate-spin" size={48} />
-            </div>
-          }
-          error={
-            <div className="flex items-center justify-center h-full text-white">
-              <p>Failed to load PDF</p>
-            </div>
-          }
-        >
-          <Page
-            pageNumber={currentPage}
-            scale={zoom}
-            renderTextLayer={false}
-            renderAnnotationLayer={false}
-            className="shadow-2xl"
-          />
-        </Document>
-      </div>
-
-      {/* Bottom Controls */}
-      <div 
-        className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent z-10 transition-transform duration-300 ${
-          showControls ? 'translate-y-0' : 'translate-y-full'
-        }`}
-      >
-        <div className="flex items-center justify-between p-3 sm:p-4 text-white">
+        {/* Page Navigation */}
+        <div className="flex items-center justify-between p-3 border-b bg-gray-50">
           <button
             onClick={goToPreviousPage}
             disabled={currentPage <= 1}
-            className="flex items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-sm"
+            className="flex items-center gap-1 px-3 py-2 bg-white border rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm"
           >
-            <ChevronLeft size={20} />
-            <span className="hidden sm:inline">Prev</span>
+            <ChevronLeft size={18} />
+            Prev
           </button>
 
-          <div className="flex items-center gap-1 sm:gap-2">
+          <div className="flex items-center gap-2">
             <button
               onClick={() => setZoom(z => Math.max(0.5, z - 0.25))}
-              className="p-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors"
+              className="p-2 bg-white border rounded-lg hover:bg-gray-100"
             >
               <ZoomOut size={18} />
             </button>
-            <span className="text-xs sm:text-sm min-w-[50px] text-center">{Math.round(zoom * 100)}%</span>
+            <span className="text-sm min-w-[60px] text-center font-medium">
+              {Math.round(zoom * 100)}%
+            </span>
             <button
               onClick={() => setZoom(z => Math.min(3, z + 0.25))}
-              className="p-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors"
+              className="p-2 bg-white border rounded-lg hover:bg-gray-100"
             >
               <ZoomIn size={18} />
             </button>
@@ -431,207 +408,288 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
           <button
             onClick={goToNextPage}
             disabled={currentPage >= numPages}
-            className="flex items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-sm"
+            className="flex items-center gap-1 px-3 py-2 bg-white border rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm"
           >
-            <span className="hidden sm:inline">Next</span>
-            <ChevronRight size={20} />
+            Next
+            <ChevronRight size={18} />
           </button>
         </div>
 
+        {/* Extract Text Button */}
+        <div className="p-3 border-b bg-white">
+          <button
+            onClick={extractPageText}
+            disabled={extracting}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 text-sm font-medium transition-colors"
+          >
+            {extracting ? (
+              <>
+                <Loader2 size={16} className="animate-spin" />
+                Extracting...
+              </>
+            ) : (
+              <>
+                <FileText size={16} />
+                Extract Page Text
+              </>
+            )}
+          </button>
+
+          {extractedText && (
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-medium text-gray-600">Extracted Text:</span>
+                <button
+                  onClick={copyToClipboard}
+                  className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded transition-colors"
+                >
+                  {copied ? <Check size={14} /> : <Copy size={14} />}
+                  {copied ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm max-h-40 overflow-auto">
+                <p className="whitespace-pre-wrap text-gray-700 leading-relaxed">
+                  {extractedText}
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* PDF Viewer */}
+        <div
+          {...swipeHandlers}
+          ref={containerRef}
+          onClick={() => setShowControls(!showControls)}
+          className="flex-1 overflow-auto bg-gray-100 p-4"
+          style={{ touchAction: 'pan-y pinch-zoom' }}
+        >
+          <Document
+            file={`/api/books/${selectedBook.id}/pdf`}
+            onLoadSuccess={onDocumentLoadSuccess}
+            loading={
+              <div className="flex items-center justify-center h-full">
+                <Loader2 className="animate-spin text-blue-600" size={48} />
+              </div>
+            }
+            error={
+              <div className="flex items-center justify-center h-full text-red-600">
+                <p>Failed to load PDF</p>
+              </div>
+            }
+          >
+            <div className="flex justify-center">
+              <Page
+                pageNumber={currentPage}
+                scale={zoom}
+                renderTextLayer={false}
+                renderAnnotationLayer={false}
+                className="shadow-2xl"
+              />
+            </div>
+          </Document>
+        </div>
+
         {isMobile && currentPage === 1 && (
-          <div className="text-center pb-2 text-white/60 text-xs swipe-hint">
+          <div className="p-2 text-center text-gray-500 text-xs border-t bg-white">
             ← Swipe to navigate →
           </div>
         )}
       </div>
 
-      {/* Chat Panel */}
-      <div
-        className={`fixed top-0 right-0 bottom-0 w-full sm:w-[420px] bg-white dark:bg-gray-900 shadow-2xl transform transition-transform duration-300 z-20 ${
-          showChat ? 'translate-x-0' : 'translate-x-full'
-        }`}
-      >
-        <div className="flex flex-col h-full">
-          {/* Chat Header */}
-          <div className="flex items-center justify-between p-4 border-b dark:border-gray-700 bg-gradient-to-r from-blue-500 to-purple-600 text-white">
-            <div className="flex items-center gap-2">
-              <Sparkles size={20} />
-              <h3 className="font-semibold">AI Assistant</h3>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setShowSessions(!showSessions)}
-                className="p-2 hover:bg-white/20 rounded-lg transition-colors"
-                title="Sessions"
+      {/* 💬 RIGHT SIDE - AI CHAT PANEL */}
+      <div className="w-full md:w-[420px] flex flex-col bg-white border-l">
+        {/* Chat Header */}
+        <div className="flex items-center justify-between p-4 border-b bg-gradient-to-r from-blue-600 to-purple-600 text-white">
+          <div className="flex items-center gap-2">
+            <Sparkles size={20} />
+            <h3 className="font-semibold">AI Assistant</h3>
+          </div>
+        </div>
+
+        {/* Settings Panel */}
+        {showSettings && (
+          <div className="p-4 border-b bg-gray-50 max-h-96 overflow-y-auto">
+            {/* Model Selection */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                AI Model
+              </label>
+              <select
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                style={{ fontSize: '16px' }}
               >
-                <Menu size={18} />
-              </button>
-              <button
-                onClick={() => setShowChat(false)}
-                className="p-2 hover:bg-white/20 rounded-lg transition-colors"
-              >
-                <X size={20} />
-              </button>
+                <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash lite</option>
+                <option value="gemini-2.0-flash">Gemini 2/0 flash</option>
+                                <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash lite</option>
+                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+              </select>
             </div>
-          </div>
 
-          {/* Model Selection */}
-          <div className="p-3 border-b dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
-            <select
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value as any)}
-              className="w-full px-3 py-2 text-sm border rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
-              style={{ fontSize: '16px' }}
-            >
-              <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash (Fast)</option>
-              <option value="gemini-exp-1206">Gemini Exp 1206 (Advanced)</option>
-            </select>
-          </div>
-
-          {/* Extract Button */}
-          <div className="p-3 border-b dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
-            <button
-              onClick={extractPageText}
-              disabled={extracting}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-sm font-medium transition-colors"
-            >
-              {extracting ? (
-                <>
-                  <Loader2 size={16} className="animate-spin" />
-                  Extracting...
-                </>
-              ) : (
-                <>
-                  <FileText size={16} />
-                  Extract Page {currentPage}
-                </>
-              )}
-            </button>
-
-            {extractedText && (
-              <div className="mt-2 p-3 bg-white dark:bg-gray-700 rounded-lg text-xs max-h-32 overflow-auto border dark:border-gray-600">
-                <p className="whitespace-pre-wrap">{extractedText}</p>
+            {/* Corpus Selection */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Reference Documents ({selectedCorpus.length})
+              </label>
+              <div className="max-h-32 overflow-y-auto border rounded-lg p-2 bg-white">
+                {corpusDocuments.map((doc) => (
+                  <label key={doc.id} className="flex items-center gap-2 p-1 hover:bg-gray-50 rounded cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selectedCorpus.includes(doc.id)}
+                      onChange={() => toggleCorpusDocument(doc.id)}
+                      className="rounded text-blue-600"
+                    />
+                    <span className="text-xs">{doc.display_name}</span>
+                  </label>
+                ))}
               </div>
-            )}
-          </div>
+            </div>
 
-          {/* Sessions Panel */}
-          {showSessions && (
-            <div className="absolute inset-0 bg-white dark:bg-gray-900 z-10 flex flex-col">
-              <div className="flex items-center justify-between p-4 border-b dark:border-gray-700">
-                <h3 className="font-semibold dark:text-white">Chat Sessions</h3>
-                <button 
-                  onClick={() => setShowSessions(false)} 
-                  className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg"
-                >
-                  <X size={20} />
-                </button>
-              </div>
+            {/* Custom Prompt */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Prompt Template
+              </label>
+              <select
+                value={selectedPromptId || ''}
+                onChange={(e) => setSelectedPromptId(e.target.value || null)}
+                className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                style={{ fontSize: '16px' }}
+              >
+                <option value="">Default</option>
+                {customPrompts.map((prompt) => (
+                  <option key={prompt.id} value={prompt.id}>
+                    {prompt.name}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-              <div className="flex-1 overflow-auto p-4">
+            {/* Search Options */}
+            <div className="space-y-2">
+              <label className="flex items-center justify-between p-2 bg-purple-50 rounded border">
+                <span className="text-xs font-medium">AI Reranking</span>
                 <button
-                  onClick={createNewSession}
-                  className="w-full mb-3 px-4 py-3 bg-gradient-to-r from-blue-500 to-purple-600 text-white rounded-lg hover:from-blue-600 hover:to-purple-700 font-medium transition-all"
+                  onClick={() => setUseReranking(!useReranking)}
+                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                    useReranking ? 'bg-purple-600' : 'bg-gray-300'
+                  }`}
                 >
-                  + New Session
+                  <span
+                    className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                      useReranking ? 'translate-x-5' : 'translate-x-1'
+                    }`}
+                  />
                 </button>
+              </label>
 
-                {sessions
-                  .filter(s => s.bookId === selectedBook.id)
-                  .sort((a, b) => b.lastUpdated.getTime() - a.lastUpdated.getTime())
-                  .map(session => (
-                    <div
-                      key={session.id}
-                      className={`mb-2 p-3 rounded-lg border cursor-pointer transition-colors ${
-                        session.id === currentSessionId
-                          ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
-                          : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'
-                      }`}
-                      onClick={() => loadSession(session)}
-                    >
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <p className="text-sm font-medium dark:text-white">
-                            {session.messages.length} messages
-                          </p>
-                          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                            {session.lastUpdated.toLocaleDateString()} {session.lastUpdated.toLocaleTimeString()}
-                          </p>
-                        </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteSession(session.id);
-                          }}
-                          className="p-1 hover:bg-red-100 dark:hover:bg-red-900/20 rounded text-red-600"
-                        >
-                          <X size={16} />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-
-                {sessions.filter(s => s.bookId === selectedBook.id).length === 0 && (
-                  <p className="text-center text-gray-500 dark:text-gray-400 text-sm mt-8">
-                    No sessions yet. Start chatting to create one!
-                  </p>
-                )}
-              </div>
+              <label className="flex items-center justify-between p-2 bg-amber-50 rounded border">
+                <span className="text-xs font-medium">Keyword Search</span>
+                <button
+                  onClick={() => setUseKeywordSearch(!useKeywordSearch)}
+                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                    useKeywordSearch ? 'bg-amber-600' : 'bg-gray-300'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                      useKeywordSearch ? 'translate-x-5' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </label>
             </div>
-          )}
+          </div>
+        )}
 
-          {/* Messages */}
-          <div className="flex-1 overflow-auto p-4 space-y-4">
-            {messages.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full text-center text-gray-500 dark:text-gray-400">
-                <MessageSquare size={48} className="mb-4 opacity-50" />
-                <p className="text-sm">Start a conversation with AI</p>
-                <p className="text-xs mt-2">Extract page text for better context</p>
-              </div>
-            ) : (
-              messages.map((msg, i) => (
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50">
+          {messages.length === 0 && !isStreaming ? (
+            <div className="flex flex-col items-center justify-center h-full text-center text-gray-500">
+              <MessageSquare size={48} className="mb-4 opacity-50" />
+              <p className="text-sm">Ask me anything about this book!</p>
+              <p className="text-xs mt-2">Extract page text for better context</p>
+            </div>
+          ) : (
+            <>
+              {messages.map((msg, i) => (
                 <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[85%] rounded-lg px-4 py-2 ${
                     msg.role === 'user' 
-                      ? 'bg-blue-500 text-white' 
-                      : 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-white'
+                      ? 'bg-blue-600 text-white' 
+                      : 'bg-white border shadow-sm'
                   }`}>
-                    <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                    {msg.role === 'assistant' ? (
+                      <div className="prose prose-sm max-w-none">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {msg.content}
+                        </ReactMarkdown>
+                      </div>
+                    ) : (
+                      <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                    )}
                     <p className="text-xs opacity-70 mt-1">
                       {msg.timestamp.toLocaleTimeString()}
                     </p>
                   </div>
                 </div>
-              ))
-            )}
-            <div ref={chatEndRef} />
-          </div>
+              ))}
+              
+              {isStreaming && streamingContent && (
+                <div className="flex justify-start">
+                  <div className="max-w-[85%] rounded-lg px-4 py-2 bg-white border shadow-sm">
+                    <div className="prose prose-sm max-w-none">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {streamingContent}
+                      </ReactMarkdown>
+                    </div>
+                    <div className="mt-2">
+                      <Loader2 className="animate-spin text-blue-600" size={14} />
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              <div ref={chatEndRef} />
+            </>
+          )}
+        </div>
 
-          {/* Input */}
-          <div className="p-4 border-t dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
-            <div className="flex gap-2">
-              <textarea
-                value={userInput}
-                onChange={(e) => setUserInput(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder="Ask about this page..."
-                disabled={sending}
-                className="flex-1 px-4 py-2 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white resize-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
-                rows={2}
-                style={{ fontSize: '16px' }}
-              />
-              <button
-                onClick={sendMessage}
-                disabled={sending || !userInput.trim()}
-                className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
-              >
-                {sending ? (
-                  <Loader2 size={20} className="animate-spin" />
-                ) : (
-                  <Send size={20} />
-                )}
-              </button>
+        {/* Input */}
+        <div className="p-4 border-t bg-white">
+          {(sending || isStreaming) && (
+            <div className="mb-2 flex items-center gap-2 text-sm text-blue-600">
+              <Loader2 className="animate-spin" size={16} />
+              {isStreaming ? 'Receiving...' : 'Sending...'}
             </div>
+          )}
+          
+          <div className="flex gap-2">
+            <textarea
+              value={userInput}
+              onChange={(e) => setUserInput(e.target.value)}
+              onKeyPress={handleKeyPress}
+              placeholder="Ask about this page..."
+              disabled={sending || isStreaming}
+              className="flex-1 px-4 py-2 border rounded-lg resize-none focus:ring-2 focus:ring-blue-500 text-sm"
+              rows={2}
+              style={{ fontSize: '16px' }}
+            />
+            <button
+              onClick={sendMessage}
+              disabled={sending || isStreaming || !userInput.trim()}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
+            >
+              {sending || isStreaming ? (
+                <Loader2 size={20} className="animate-spin" />
+              ) : (
+                <Send size={20} />
+              )}
+            </button>
           </div>
         </div>
       </div>
