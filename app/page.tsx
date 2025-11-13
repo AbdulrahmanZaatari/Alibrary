@@ -29,16 +29,7 @@ export default function Home() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  
-  // Reader state
-  const [selectedBookId, setSelectedBookId] = useState<string | null>(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('reader-book-id');
-    }
-    return null;
-  });
-
-  const [selectedBook, setSelectedBook] = useState<any>(null);
+  const [showMobileReader, setShowMobileReader] = useState(false);
 
   // Detect mobile
   useEffect(() => {
@@ -54,15 +45,6 @@ export default function Home() {
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
-  const handleBookSelect = (bookId: string | null) => {
-    if (bookId) {
-      localStorage.setItem('reader-book-id', bookId);
-    } else {
-      localStorage.removeItem('reader-book-id');
-    }
-    setSelectedBookId(bookId);
-  };
-
   const views = [
     { id: 'reader', label: 'Reader', icon: Book },
     { id: 'chat', label: 'AI Chat', icon: MessageSquare },
@@ -71,14 +53,12 @@ export default function Home() {
     { id: 'metadata', label: 'Metadata', icon: Database },
   ];
 
-  // If mobile reader is active with a book
-  if (selectedBook && isMobile) {
+  // If mobile reader is active
+  if (showMobileReader && isMobile) {
     return (
       <MobileReaderMode
-        selectedBook={selectedBook}
         onClose={() => {
-          setSelectedBook(null);
-          setSelectedBookId(null);
+          setShowMobileReader(false);
         }}
       />
     );
@@ -247,18 +227,12 @@ export default function Home() {
                 <div className="space-y-3">
                   <button
                     onClick={() => {
-                      // Demo: Set a book (you'd load from your API)
-                      setSelectedBook({
-                        id: 'demo-book-1',
-                        title: 'Demo Book',
-                        author: 'Author Name',
-                        total_pages: 100
-                      });
+                      setShowMobileReader(true);
                     }}
                     className="w-full p-4 bg-white rounded-xl border border-gray-200 hover:border-emerald-500 transition-colors text-left"
                   >
-                    <div className="font-semibold">Demo Book Title</div>
-                    <div className="text-sm text-gray-500 mt-1">Tap to open in mobile reader</div>
+                    <div className="font-semibold">Open Book Reader</div>
+                    <div className="text-sm text-gray-500 mt-1">Tap to open mobile reader with your library</div>
                   </button>
                 </div>
               </div>
