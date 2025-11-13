@@ -13,11 +13,11 @@ import {
   Send,
   Loader2,
   FileText,
-  Sparkles
+  Sparkles,
+  Menu
 } from 'lucide-react';
-import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
-import 'react-pdf/dist/esm/Page/TextLayer.css';
 
+// Remove CSS imports - handle styling directly
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 interface Message {
@@ -54,7 +54,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
   const [messages, setMessages] = useState<Message[]>([]);
   const [userInput, setUserInput] = useState('');
   const [sending, setSending] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<'gemini-2.5-flash' | 'gemini-2.5-pro'>('gemini-2.5-flash');
+  const [selectedModel, setSelectedModel] = useState<'gemini-2.0-flash-exp' | 'gemini-exp-1206'>('gemini-2.0-flash-exp');
   
   // Session management
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -69,31 +69,34 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
   useEffect(() => {
     const savedSessions = localStorage.getItem('readerSessions');
     if (savedSessions) {
-      const parsed = JSON.parse(savedSessions);
-      setSessions(parsed.map((s: any) => ({
-        ...s,
-        createdAt: new Date(s.createdAt),
-        lastUpdated: new Date(s.lastUpdated),
-        messages: s.messages.map((m: any) => ({
-          ...m,
-          timestamp: new Date(m.timestamp)
-        }))
-      })));
+      try {
+        const parsed = JSON.parse(savedSessions);
+        setSessions(parsed.map((s: any) => ({
+          ...s,
+          createdAt: new Date(s.createdAt),
+          lastUpdated: new Date(s.lastUpdated),
+          messages: s.messages.map((m: any) => ({
+            ...m,
+            timestamp: new Date(m.timestamp)
+          }))
+        })));
+      } catch (error) {
+        console.error('Failed to load sessions:', error);
+      }
     }
 
-    // Create or load session for current book
     const bookSessionId = `session-${selectedBook.id}-${Date.now()}`;
     setCurrentSessionId(bookSessionId);
   }, [selectedBook.id]);
 
-  // Save sessions to localStorage whenever they change
+  // Save sessions to localStorage
   useEffect(() => {
     if (sessions.length > 0) {
       localStorage.setItem('readerSessions', JSON.stringify(sessions));
     }
   }, [sessions]);
 
-  // Update current session when messages change
+  // Update current session
   useEffect(() => {
     if (currentSessionId && messages.length > 0) {
       setSessions(prev => {
@@ -147,7 +150,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     };
   }, [currentPage, showControls, isMobile]);
 
-  // Auto-scroll chat to bottom
+  // Auto-scroll chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -160,7 +163,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     if (currentPage < numPages) {
       setCurrentPage(prev => prev + 1);
       setShowControls(true);
-      setExtractedText(''); // Clear extracted text when changing pages
+      setExtractedText('');
     }
   }, [currentPage, numPages]);
 
@@ -182,7 +185,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     delta: 50,
   });
 
-  // Extract text from current page
+  // Extract text
   const extractPageText = async () => {
     setExtracting(true);
     try {
@@ -210,7 +213,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     }
   };
 
-  // Send message to Gemini
+  // Send message
   const sendMessage = async () => {
     if (!userInput.trim()) return;
 
@@ -225,13 +228,12 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     setSending(true);
 
     try {
-      const res = await fetch('/api/reader-chat', {
+      const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: userInput,
           documentIds: [selectedBook.id],
-          bookId: selectedBook.id,
           bookTitle: selectedBook.title,
           bookPage: currentPage,
           extractedText: extractedText || undefined,
@@ -243,15 +245,12 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
         })
       });
 
-      if (!res.ok) {
-        throw new Error('Failed to get response');
-      }
+      if (!res.ok) throw new Error('Failed to get response');
 
       const reader = res.body?.getReader();
       const decoder = new TextDecoder();
       let assistantContent = '';
 
-      // Add empty assistant message
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: '',
@@ -265,7 +264,6 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
         const chunk = decoder.decode(value, { stream: true });
         assistantContent += chunk;
 
-        // Update last message
         setMessages(prev => {
           const newMessages = [...prev];
           newMessages[newMessages.length - 1] = {
@@ -296,14 +294,12 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     }
   };
 
-  // Load a session
   const loadSession = (session: ChatSession) => {
     setMessages(session.messages);
     setCurrentSessionId(session.id);
     setShowSessions(false);
   };
 
-  // Create new session
   const createNewSession = () => {
     const newSessionId = `session-${selectedBook.id}-${Date.now()}`;
     setCurrentSessionId(newSessionId);
@@ -311,7 +307,6 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     setShowSessions(false);
   };
 
-  // Delete session
   const deleteSession = (sessionId: string) => {
     setSessions(prev => prev.filter(s => s.id !== sessionId));
     if (currentSessionId === sessionId) {
@@ -319,7 +314,6 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
     }
   };
 
-  // Calculate zoom based on viewport
   const calculateZoom = () => {
     if (!containerRef.current) return 1;
     const width = containerRef.current.clientWidth;
@@ -383,7 +377,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
           onLoadSuccess={onDocumentLoadSuccess}
           loading={
             <div className="flex items-center justify-center h-full text-white">
-              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white"></div>
+              <Loader2 className="animate-spin" size={48} />
             </div>
           }
           error={
@@ -395,7 +389,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
           <Page
             pageNumber={currentPage}
             scale={zoom}
-            renderTextLayer={true}
+            renderTextLayer={false}
             renderAnnotationLayer={false}
             className="shadow-2xl"
           />
@@ -409,17 +403,15 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
         }`}
       >
         <div className="flex items-center justify-between p-3 sm:p-4 text-white">
-          {/* Previous Button */}
           <button
             onClick={goToPreviousPage}
             disabled={currentPage <= 1}
-            className="flex items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-sm sm:text-base"
+            className="flex items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-sm"
           >
             <ChevronLeft size={20} />
             <span className="hidden sm:inline">Prev</span>
           </button>
 
-          {/* Zoom Controls */}
           <div className="flex items-center gap-1 sm:gap-2">
             <button
               onClick={() => setZoom(z => Math.max(0.5, z - 0.25))}
@@ -436,18 +428,16 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
             </button>
           </div>
 
-          {/* Next Button */}
           <button
             onClick={goToNextPage}
             disabled={currentPage >= numPages}
-            className="flex items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-sm sm:text-base"
+            className="flex items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors text-sm"
           >
             <span className="hidden sm:inline">Next</span>
             <ChevronRight size={20} />
           </button>
         </div>
 
-        {/* Swipe Hint (Mobile Only) */}
         {isMobile && currentPage === 1 && (
           <div className="text-center pb-2 text-white/60 text-xs swipe-hint">
             ← Swipe to navigate →
@@ -455,7 +445,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
         )}
       </div>
 
-      {/* Chat Panel (Slide from right) */}
+      {/* Chat Panel */}
       <div
         className={`fixed top-0 right-0 bottom-0 w-full sm:w-[420px] bg-white dark:bg-gray-900 shadow-2xl transform transition-transform duration-300 z-20 ${
           showChat ? 'translate-x-0' : 'translate-x-full'
@@ -463,7 +453,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
       >
         <div className="flex flex-col h-full">
           {/* Chat Header */}
-          <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 bg-gradient-to-r from-blue-500 to-purple-600 text-white">
+          <div className="flex items-center justify-between p-4 border-b dark:border-gray-700 bg-gradient-to-r from-blue-500 to-purple-600 text-white">
             <div className="flex items-center gap-2">
               <Sparkles size={20} />
               <h3 className="font-semibold">AI Assistant</h3>
@@ -472,9 +462,9 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
               <button
                 onClick={() => setShowSessions(!showSessions)}
                 className="p-2 hover:bg-white/20 rounded-lg transition-colors"
-                title="View sessions"
+                title="Sessions"
               >
-                <FileText size={18} />
+                <Menu size={18} />
               </button>
               <button
                 onClick={() => setShowChat(false)}
@@ -486,26 +476,24 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
           </div>
 
           {/* Model Selection */}
-          <div className="p-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
-            <label className="text-xs font-medium text-gray-700 dark:text-gray-300 block mb-2">
-              AI Model:
-            </label>
+          <div className="p-3 border-b dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
             <select
               value={selectedModel}
               onChange={(e) => setSelectedModel(e.target.value as any)}
-              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full px-3 py-2 text-sm border rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
+              style={{ fontSize: '16px' }}
             >
-              <option value="gemini-2.5-flash">Gemini 2.5 Flash (Fast)</option>
-              <option value="gemini-2.5-pro">Gemini 2.5 Pro (Advanced)</option>
+              <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash (Fast)</option>
+              <option value="gemini-exp-1206">Gemini Exp 1206 (Advanced)</option>
             </select>
           </div>
 
-          {/* Extract Text Button */}
-          <div className="p-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
+          {/* Extract Button */}
+          <div className="p-3 border-b dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
             <button
               onClick={extractPageText}
               disabled={extracting}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors text-sm font-medium"
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-sm font-medium transition-colors"
             >
               {extracting ? (
                 <>
@@ -515,27 +503,25 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
               ) : (
                 <>
                   <FileText size={16} />
-                  Extract Page {currentPage} Text
+                  Extract Page {currentPage}
                 </>
               )}
             </button>
 
             {extractedText && (
-              <div className="mt-2 p-3 bg-white dark:bg-gray-700 rounded-lg text-xs max-h-32 overflow-auto border border-gray-200 dark:border-gray-600">
-                <p className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
-                  {extractedText}
-                </p>
+              <div className="mt-2 p-3 bg-white dark:bg-gray-700 rounded-lg text-xs max-h-32 overflow-auto border dark:border-gray-600">
+                <p className="whitespace-pre-wrap">{extractedText}</p>
               </div>
             )}
           </div>
 
-          {/* Sessions Panel (Overlay) */}
+          {/* Sessions Panel */}
           {showSessions && (
             <div className="absolute inset-0 bg-white dark:bg-gray-900 z-10 flex flex-col">
-              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
-                <h3 className="font-semibold text-gray-900 dark:text-white">Chat Sessions</h3>
-                <button
-                  onClick={() => setShowSessions(false)}
+              <div className="flex items-center justify-between p-4 border-b dark:border-gray-700">
+                <h3 className="font-semibold dark:text-white">Chat Sessions</h3>
+                <button 
+                  onClick={() => setShowSessions(false)} 
                   className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg"
                 >
                   <X size={20} />
@@ -545,7 +531,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
               <div className="flex-1 overflow-auto p-4">
                 <button
                   onClick={createNewSession}
-                  className="w-full mb-3 px-4 py-3 bg-gradient-to-r from-blue-500 to-purple-600 text-white rounded-lg hover:from-blue-600 hover:to-purple-700 transition-all font-medium"
+                  className="w-full mb-3 px-4 py-3 bg-gradient-to-r from-blue-500 to-purple-600 text-white rounded-lg hover:from-blue-600 hover:to-purple-700 font-medium transition-all"
                 >
                   + New Session
                 </button>
@@ -565,7 +551,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
                     >
                       <div className="flex items-start justify-between">
                         <div className="flex-1">
-                          <p className="text-sm font-medium text-gray-900 dark:text-white">
+                          <p className="text-sm font-medium dark:text-white">
                             {session.messages.length} messages
                           </p>
                           <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
@@ -604,17 +590,12 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
               </div>
             ) : (
               messages.map((msg, i) => (
-                <div
-                  key={i}
-                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
-                  <div
-                    className={`max-w-[85%] rounded-lg px-4 py-2 ${
-                      msg.role === 'user'
-                        ? 'bg-blue-500 text-white'
-                        : 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-white'
-                    }`}
-                  >
+                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] rounded-lg px-4 py-2 ${
+                    msg.role === 'user' 
+                      ? 'bg-blue-500 text-white' 
+                      : 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-white'
+                  }`}>
                     <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                     <p className="text-xs opacity-70 mt-1">
                       {msg.timestamp.toLocaleTimeString()}
@@ -627,7 +608,7 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
           </div>
 
           {/* Input */}
-          <div className="p-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
+          <div className="p-4 border-t dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
             <div className="flex gap-2">
               <textarea
                 value={userInput}
@@ -635,9 +616,9 @@ export default function MobileReaderMode({ selectedBook, onClose }: MobileReader
                 onKeyPress={handleKeyPress}
                 placeholder="Ask about this page..."
                 disabled={sending}
-                className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white resize-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
+                className="flex-1 px-4 py-2 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white resize-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
                 rows={2}
-                style={{ fontSize: '16px' }} // Prevent zoom on iOS
+                style={{ fontSize: '16px' }}
               />
               <button
                 onClick={sendMessage}
