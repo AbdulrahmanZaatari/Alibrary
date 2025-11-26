@@ -2,12 +2,13 @@
 
 import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
+import LoginPage from '@/components/LoginPage';
 import CorpusManager from '@/components/CorpusManager';
 import PromptLibrary from '@/components/PromptLibrary';
 import ChatPanel from '@/components/ChatPanel';
 import HistoryPanel from '@/components/HistoryPanel';
 import MetadataManager from '@/components/MetaDataManager';
-import { Book, MessageSquare, Clock, Sparkles, FileText, Database, Loader2, Menu, X } from 'lucide-react';
+import { Book, MessageSquare, Clock, Sparkles, FileText, Database, Loader2, Menu, X, LogOut } from 'lucide-react';
 
 const MobileReaderMode = dynamic(() => import('@/components/MobileReaderMode'), {
   ssr: false,
@@ -24,6 +25,7 @@ const MobileReaderMode = dynamic(() => import('@/components/MobileReaderMode'), 
 type ViewMode = 'reader' | 'chat' | 'prompts' | 'history' | 'metadata';
 
 export default function Home() {
+  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [selectedDocuments, setSelectedDocuments] = useState<string[]>([]);
   const [currentView, setCurrentView] = useState<ViewMode>('reader');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -31,13 +33,32 @@ export default function Home() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showMobileReader, setShowMobileReader] = useState(false);
 
+  async function checkAuth() {
+    try {
+      const res = await fetch('/api/auth');
+      const data = await res.json();
+      setAuthenticated(data.authenticated);
+    } catch (error) {
+      setAuthenticated(false);
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      setAuthenticated(false);
+    } catch (error) {
+      console.error('Logout error:', error);
+    }
+  }
+
   // Detect mobile
   useEffect(() => {
     const checkMobile = () => {
       const mobile = window.innerWidth < 768;
       setIsMobile(mobile);
       if (mobile) {
-        setSidebarCollapsed(true); // Auto-collapse sidebar on mobile
+        setSidebarCollapsed(true);
       }
     };
     checkMobile();
@@ -52,6 +73,23 @@ export default function Home() {
     { id: 'history', label: 'History', icon: Clock },
     { id: 'metadata', label: 'Metadata', icon: Database },
   ];
+
+  // Show loading while checking auth
+  if (authenticated === null) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="animate-spin mx-auto mb-4 text-emerald-600" size={48} />
+          <p className="text-gray-600">Verifying authentication...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show login page if not authenticated
+  if (!authenticated) {
+    return <LoginPage onLoginSuccess={() => setAuthenticated(true)} />;
+  }
 
   // If mobile reader is active
   if (showMobileReader && isMobile) {
@@ -164,15 +202,27 @@ export default function Home() {
               ))}
             </div>
 
-            {/* Corpus Status (Only show for Chat view on desktop) */}
-            {currentView === 'chat' && !isMobile && (
-              <div className="flex items-center gap-2 px-4 py-2 bg-emerald-50 rounded-lg border border-emerald-200">
-                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
-                <span className="text-sm font-medium text-emerald-700">
-                  {selectedDocuments.length} {selectedDocuments.length === 1 ? 'book' : 'books'}
-                </span>
-              </div>
-            )}
+            {/* Corpus Status & Logout */}
+            <div className="flex items-center gap-2">
+              {currentView === 'chat' && !isMobile && (
+                <div className="flex items-center gap-2 px-4 py-2 bg-emerald-50 rounded-lg border border-emerald-200">
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
+                  <span className="text-sm font-medium text-emerald-700">
+                    {selectedDocuments.length} {selectedDocuments.length === 1 ? 'book' : 'books'}
+                  </span>
+                </div>
+              )}
+              
+              {/* Logout Button */}
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                title="Logout"
+              >
+                <LogOut size={18} />
+                {!isMobile && <span>Logout</span>}
+              </button>
+            </div>
           </div>
 
           {/* Mobile Corpus Status (Below nav bar) */}
@@ -204,7 +254,6 @@ export default function Home() {
                   Select a book from your library to start reading with AI assistance
                 </p>
                 
-                {/* Book selection UI would go here */}
                 <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
                   <p className="text-center text-gray-500">
                     Your existing ReaderMode component can be integrated here.<br />
@@ -223,7 +272,6 @@ export default function Home() {
                   Select a book to open the mobile-optimized reader with swipe navigation
                 </p>
                 
-                {/* Simplified book selection for mobile */}
                 <div className="space-y-3">
                   <button
                     onClick={() => {

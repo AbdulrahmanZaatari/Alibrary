@@ -1,41 +1,80 @@
-# Dependencies
-/node_modules
-/.pnp
-.pnp.js
-
-# Testing
-/coverage
-
-# Next.js
-/.next/
-/out/
-
-# Production
-/build
-/dist
-
-# Misc
-.DS_Store
-*.pem
-
-# Debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# Local env files
+# ============================================
+# SECURITY - Environment Variables
+# ============================================
 .env
 .env.local
 .env*.local
 .env.development.local
 .env.test.local
 .env.production.local
+.env.production
 
+# ============================================
+# SECURITY - Authentication & Sensitive Files
+# ============================================
+# Password generation scripts (contains plain-text passwords)
+/scripts/generate-password.js
+/scripts/generate-password.ts
+/scripts/*.password.*
+
+# Any files containing credentials
+*credentials*
+*secrets*
+*.key
+*.pem
+
+# ============================================
+# Dependencies
+# ============================================
+/node_modules
+/.pnp
+.pnp.js
+/package-lock.json
+/yarn.lock
+/pnpm-lock.yaml
+
+# ============================================
+# Testing
+# ============================================
+/coverage
+*.test.local.*
+
+# ============================================
+# Next.js
+# ============================================
+/.next/
+/out/
+.next
+
+# ============================================
+# Production
+# ============================================
+/build
+/dist
+
+# ============================================
+# Misc
+# ============================================
+.DS_Store
+*.pem
+
+# ============================================
+# Debug
+# ============================================
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ============================================
 # Vercel
+# ============================================
 .vercel
+.vercel.json
 
+# ============================================
 # TypeScript
+# ============================================
 *.tsbuildinfo
 next-env.d.ts
 
@@ -45,7 +84,9 @@ next-env.d.ts
 !types/**/*.d.ts
 !global.d.ts
 
+# ============================================
 # Database (SQLite - user-specific)
+# ============================================
 /data/
 data.db
 data.db-shm
@@ -54,39 +95,54 @@ data.db-wal
 *.db-shm
 *.db-wal
 
+# ============================================
 # Backups
+# ============================================
 /data/backups/
 /backups/
 
+# ============================================
 # Uploads (PDFs and documents)
+# ============================================
 /uploads/
 /public/uploads/
 
+# ============================================
 # IDE
+# ============================================
 .vscode/
 .idea/
 *.swp
 *.swo
 *.swn
+.vscode/settings.json
 
+# ============================================
 # OS
+# ============================================
 .DS_Store
 Thumbs.db
 desktop.ini
 
+# ============================================
 # Logs
+# ============================================
 *.log
 logs/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# ============================================
 # Temporary files
+# ============================================
 .tmp/
 temp/
 *.tmp
 
+# ============================================
 # Python (if using any Python tools)
+# ============================================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -94,8 +150,19 @@ __pycache__/
 venv/
 env/
 
+# ============================================
 # Railway
+# ============================================
 .railway/
 
+# ============================================
 # Supabase (local)
+# ============================================
 .supabase/
+
+# ============================================
+# Local Development
+# ============================================
+.cache/
+.turbo/
+.parcel-cache/
