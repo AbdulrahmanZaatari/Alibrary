@@ -7,8 +7,20 @@ import PromptLibrary from '@/components/PromptLibrary';
 import ChatPanel from '@/components/ChatPanel';
 import HistoryPanel from '@/components/HistoryPanel';
 import MetadataManager from '@/components/MetaDataManager';
-import ReaderMode from '@/components/ReaderMode'; // ✅ ADD THIS
 import { Book, MessageSquare, Clock, Sparkles, FileText, Database, Loader2, Menu, X, LogOut } from 'lucide-react';
+
+// ✅ Disable SSR for ReaderMode (PDF.js requires browser APIs)
+const ReaderMode = dynamic(() => import('@/components/ReaderMode'), {
+  ssr: false,
+  loading: () => (
+    <div className="h-full flex items-center justify-center">
+      <div className="text-center">
+        <Loader2 className="animate-spin mx-auto mb-4 text-emerald-600" size={48} />
+        <p className="text-gray-600">Loading reader...</p>
+      </div>
+    </div>
+  )
+});
 
 const MobileReaderMode = dynamic(() => import('@/components/MobileReaderMode'), {
   ssr: false,
@@ -211,7 +223,7 @@ export default function Home() {
 
         {/* Content Area */}
         <div className="flex-1 overflow-hidden">
-          {/* ✅ DESKTOP READER: Render ReaderMode */}
+          {/* ✅ DESKTOP READER: Dynamically loaded */}
           {currentView === 'reader' && !isMobile && (
             <ReaderMode />
           )}
