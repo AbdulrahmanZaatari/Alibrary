@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
-import LoginPage from '@/components/LoginPage';
 import CorpusManager from '@/components/CorpusManager';
 import PromptLibrary from '@/components/PromptLibrary';
 import ChatPanel from '@/components/ChatPanel';
@@ -25,7 +24,6 @@ const MobileReaderMode = dynamic(() => import('@/components/MobileReaderMode'), 
 type ViewMode = 'reader' | 'chat' | 'prompts' | 'history' | 'metadata';
 
 export default function Home() {
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [selectedDocuments, setSelectedDocuments] = useState<string[]>([]);
   const [currentView, setCurrentView] = useState<ViewMode>('reader');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -33,20 +31,11 @@ export default function Home() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showMobileReader, setShowMobileReader] = useState(false);
 
-  async function checkAuth() {
-    try {
-      const res = await fetch('/api/auth');
-      const data = await res.json();
-      setAuthenticated(data.authenticated);
-    } catch (error) {
-      setAuthenticated(false);
-    }
-  }
-
   async function handleLogout() {
     try {
       await fetch('/api/auth/logout', { method: 'POST' });
-      setAuthenticated(false);
+      // Redirect to login (middleware will handle it)
+      window.location.href = '/login';
     } catch (error) {
       console.error('Logout error:', error);
     }
@@ -73,23 +62,6 @@ export default function Home() {
     { id: 'history', label: 'History', icon: Clock },
     { id: 'metadata', label: 'Metadata', icon: Database },
   ];
-
-  // Show loading while checking auth
-  if (authenticated === null) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <Loader2 className="animate-spin mx-auto mb-4 text-emerald-600" size={48} />
-          <p className="text-gray-600">Verifying authentication...</p>
-        </div>
-      </div>
-    );
-  }
-
-  // Show login page if not authenticated
-  if (!authenticated) {
-    return <LoginPage onLoginSuccess={() => setAuthenticated(true)} />;
-  }
 
   // If mobile reader is active
   if (showMobileReader && isMobile) {
