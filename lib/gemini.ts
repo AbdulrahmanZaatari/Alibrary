@@ -107,17 +107,18 @@ export const chunkText = (
   console.log('📦 Starting text chunking...');
   console.log(`   Original text length: ${text.length} characters`);
 
-  // ✅ Step 1: Clean and normalize text
+  // ✅ Step 1: Clean and normalize text - PRESERVE ARABIC DIACRITICAL MARKS
+  // NOTE: We NO LONGER normalize أ/إ/آ→ا or ى→ي or ة→ه because:
+  // 1. AI correction has already fixed OCR errors
+  // 2. These characters have distinct meanings in Arabic
+  // 3. Normalization destroys the semantic value
   const cleanText = text
     .replace(/\s+/g, ' ')
-    .replace(/[-_]+\s*\d+\s*[-_]+/g, '')
-    .replace(/صفحة\s*\d+/g, '')
-    .replace(/Page\s*\d+/gi, '')
-    .replace(/[_-]{3,}/g, '')
-    .replace(/[أإآ]/g, 'ا')
-    .replace(/[ىئ]/g, 'ي')
-    .replace(/ة/g, 'ه')
-    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[-_]+\s*\d+\s*[-_]+/g, '')  // Remove page markers
+    .replace(/صفحة\s*\d+/g, '')            // Remove Arabic page numbers
+    .replace(/Page\s*\d+/gi, '')           // Remove English page numbers
+    .replace(/[_-]{3,}/g, '')              // Remove separator lines
+    .replace(/\n{3,}/g, '\n\n')            // Normalize multiple newlines
     .trim();
 
   console.log(`   Cleaned text length: ${cleanText.length} characters`);

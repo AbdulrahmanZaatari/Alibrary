@@ -4,6 +4,7 @@ import mupdf from 'mupdf';
 import { updateDocumentEmbeddingStatus, updateDocument } from './db';
 import { addChunksToVectorStore, VectorChunk } from './vectorStore';
 import { extractTextWithGeminiVision } from './ocrExtractor';
+import { extractTextWithOcrSpace, isOcrSpaceAvailable } from './ocrSpaceApi';
 import { chunkText } from './gemini';
 import { cleanPdfText, hasTransliterationIssues } from './transliterationMapper';
 import { correctArabicWithAI, hasArabicCorruption } from './arabicTextCleaner';
@@ -172,19 +173,21 @@ async function processPage(
     console.log(`🌐 [STEP 2] Page ${pageNum + 1}: Detected language: ${language.toUpperCase()}`);
 
     // ✅ STEP 3: Smart extraction strategy
-    // For Arabic: Try mupdf first + AI correction. Only OCR if mupdf fails or text is too short.
+    // For Arabic: ALWAYS use OCR.space for best quality
+    // For English: Use mupdf unless it fails or text is too short
     let finalText = rawText;
     let extractionMethod: 'mupdf' | 'ocr' = 'mupdf';
     let usedOcr = false;
     
-    // Only force OCR if: mupdf failed OR text is very short (< 50 chars)
-    // For Arabic with good mupdf extraction, we'll use AI correction instead
-    const needsOcr = mupdfFailed || rawText.length < 50;
+    // Force OCR if: Arabic detected OR mupdf failed OR text is very short
+    const needsOcr = language === 'ar' || mupdfFailed || rawText.length < 50;
     
     if (needsOcr) {
-      const reason = mupdfFailed 
-        ? '❌ mupdf failed' 
-        : '📏 Text too short';
+      const reason = language === 'ar'
+        ? '🌙 Arabic detected - using OCR.space'
+        : mupdfFailed 
+          ? '❌ mupdf failed' 
+          : '📏 Text too short';
       
       console.log(`   📸 [STEP 3] OCR REQUIRED: ${reason}`);
       
@@ -203,9 +206,44 @@ async function processPage(
         const imageBuffer = Buffer.from(pixmap.asPNG());
         
         console.log(`   📦 PNG size: ${(imageBuffer.length / 1024).toFixed(1)} KB`);
-        console.log(`   🔄 Sending to Gemini Vision API...`);
         
-        const ocrText = await extractTextWithGeminiVision(imageBuffer);
+        let ocrText = '';
+        let ocrSource = '';
+        
+        // ✅ For Arabic: Try OCR.space first (25k free/month), then fall back to Gemma
+        if (language === 'ar' && isOcrSpaceAvailable()) {
+          console.log(`   🌐 [ARABIC] Trying OCR.space API...`);
+          const ocrSpaceResult = await extractTextWithOcrSpace(imageBuffer, 'ara');
+          
+          if (ocrSpaceResult.success && ocrSpaceResult.text.length > 20) {
+            ocrText = ocrSpaceResult.text;
+            ocrSource = 'OCR.space';
+            console.log(`   ✅ OCR.space success: ${ocrText.length} chars`);
+            
+            // ✅ Apply Gemma AI correction to OCR.space output
+            console.log(`   🤖 Applying Gemma AI correction to OCR.space text...`);
+            try {
+              const correctionResult = await correctArabicOcrWithAI(ocrText);
+              if (correctionResult.correctedText && correctionResult.correctedText.length > 20) {
+                console.log(`   ✅ AI correction applied (${correctionResult.modelUsed}): ${correctionResult.corrections.length} fixes`);
+                ocrText = correctionResult.correctedText;
+                ocrSource = 'OCR.space + Gemma AI';
+              }
+            } catch {
+              console.warn(`   ⚠️ AI correction failed, using raw OCR.space text`);
+            }
+          } else {
+            console.log(`   ⚠️ OCR.space failed/insufficient, falling back to Gemma Vision...`);
+          }
+        }
+        
+        // Fallback to Gemma Vision if OCR.space failed or not Arabic
+        if (!ocrText || ocrText.length < 20) {
+          console.log(`   🔄 Using Gemma Vision API for OCR...`);
+          ocrText = await extractTextWithGeminiVision(imageBuffer);
+          ocrSource = 'Gemma Vision';
+        }
+        
         doc.destroy();
         
         if (ocrText && ocrText.length > 20) {
@@ -216,7 +254,7 @@ async function processPage(
           // ✅ Re-detect language after OCR (in case mupdf was wrong)
           language = detectLanguage(ocrText);
           
-          console.log(`   ✅ OCR success: ${ocrText.length} chars (re-detected: ${language})`);
+          console.log(`   ✅ OCR success (${ocrSource}): ${ocrText.length} chars (re-detected: ${language})`);
           console.log(`   📝 OCR preview: "${ocrText.substring(0, 100)}..."`);
         } else {
           console.warn(`   ⚠️ OCR returned insufficient text (${ocrText?.length || 0} chars)`);

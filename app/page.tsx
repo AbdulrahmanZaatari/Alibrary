@@ -7,7 +7,8 @@ import PromptLibrary from '@/components/PromptLibrary';
 import ChatPanel from '@/components/ChatPanel';
 import HistoryPanel from '@/components/HistoryPanel';
 import MetadataManager from '@/components/MetaDataManager';
-import { Book, MessageSquare, Clock, Sparkles, FileText, Database, Loader2, Menu, X, LogOut } from 'lucide-react';
+import { Book, MessageSquare, Clock, Sparkles, FileText, Database, Loader2, Menu, X, LogOut, FlaskConical } from 'lucide-react';
+import GemmaTestPanel from '@/components/GemmaTestPanel';
 
 // ✅ Disable SSR for ReaderMode (PDF.js requires browser APIs)
 const ReaderMode = dynamic(() => import('@/components/ReaderMode'), {
@@ -34,7 +35,7 @@ const MobileReaderMode = dynamic(() => import('@/components/MobileReaderMode'), 
   )
 });
 
-type ViewMode = 'reader' | 'chat' | 'prompts' | 'history' | 'metadata';
+type ViewMode = 'reader' | 'chat' | 'prompts' | 'history' | 'metadata' | 'gemma-test';
 
 export default function Home() {
   const [selectedDocuments, setSelectedDocuments] = useState<string[]>([]);
@@ -73,6 +74,7 @@ export default function Home() {
     { id: 'prompts', label: 'Prompts', icon: Sparkles },
     { id: 'history', label: 'History', icon: Clock },
     { id: 'metadata', label: 'Metadata', icon: Database },
+    { id: 'gemma-test', label: 'Gemma Test', icon: FlaskConical },
   ];
 
   // If mobile reader is active
@@ -263,6 +265,9 @@ export default function Home() {
           )}
           {currentView === 'metadata' && (
             <MetadataManager />
+          )}
+          {currentView === 'gemma-test' && (
+            <GemmaTestPanel />
           )}
         </div>
       </div>

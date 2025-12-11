@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cleanArabicPdfText, hasArabicCorruption } from '@/lib/arabicTextCleaner';
 import { cleanPdfText } from '@/lib/transliterationMapper';
 import { extractTextWithGeminiVision } from '@/lib/ocrExtractor';
+import { extractTextWithOcrSpace, isOcrSpaceAvailable } from '@/lib/ocrSpaceApi';
+import { correctArabicOcrWithAI } from '@/lib/arabicOcrCorrection';
 import { getBookById } from '@/lib/db';
 import { getBookBuffer } from '@/lib/supabaseStorage';
 import mupdf from 'mupdf';
@@ -56,7 +58,7 @@ export async function POST(request: NextRequest) {
 
     console.log(`   🌐 Detected: ${isArabic ? 'Arabic' : 'English'}`);
 
-    // ✅ STEP 5: For Arabic - ALWAYS force OCR
+    // ✅ STEP 5: For Arabic - ALWAYS force OCR (OCR.space first, then Gemma fallback)
     if (isArabic) {
       console.log(`   📸 Arabic detected - forcing OCR`);
       
@@ -69,7 +71,38 @@ export async function POST(request: NextRequest) {
           false
         );
         const imageBuffer = Buffer.from(pixmap.asPNG());
-        const ocrText = await extractTextWithGeminiVision(imageBuffer);
+        
+        let ocrText = '';
+        
+        // Try OCR.space first for Arabic
+        if (isOcrSpaceAvailable()) {
+          console.log(`   🌐 Trying OCR.space API for Arabic...`);
+          const ocrSpaceResult = await extractTextWithOcrSpace(imageBuffer, 'ara');
+          if (ocrSpaceResult.success && ocrSpaceResult.text.length > 20) {
+            ocrText = ocrSpaceResult.text;
+            console.log(`   ✅ OCR.space success: ${ocrText.length} chars`);
+            
+            // ✅ Apply Gemma AI correction to OCR.space output
+            console.log(`   🤖 Applying Gemma AI correction...`);
+            try {
+              const correctionResult = await correctArabicOcrWithAI(ocrText);
+              if (correctionResult.correctedText && correctionResult.correctedText.length > 20) {
+                console.log(`   ✅ AI correction applied: ${correctionResult.corrections.length} fixes`);
+                ocrText = correctionResult.correctedText;
+              }
+            } catch {
+              console.warn(`   ⚠️ AI correction failed, using raw OCR.space text`);
+            }
+          } else {
+            console.log(`   ⚠️ OCR.space failed, falling back to Gemma...`);
+          }
+        }
+        
+        // Fallback to Gemma Vision
+        if (!ocrText || ocrText.length < 20) {
+          ocrText = await extractTextWithGeminiVision(imageBuffer);
+        }
+        
         doc.destroy();
         
         if (ocrText && ocrText.length > 20) {
