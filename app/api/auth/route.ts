@@ -1,3 +1,4 @@
+// app/api/auth/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
 import { SignJWT, jwtVerify } from 'jose';
@@ -21,8 +22,18 @@ export async function POST(request: NextRequest) {
   try {
     const { username, password } = await request.json();
 
+    console.log('🔐 Login attempt:');
+    console.log('   Username provided:', username);
+    console.log('   Expected username:', VALID_CREDENTIALS.username);
+    console.log('   Username match:', username === VALID_CREDENTIALS.username);
+    console.log('   Password length:', password?.length);
+    console.log('   Hash from env:', VALID_CREDENTIALS.passwordHash);
+    console.log('   Hash length:', VALID_CREDENTIALS.passwordHash?.length);
+    console.log('   Hash starts with $2b$:', VALID_CREDENTIALS.passwordHash?.startsWith('$2b$'));
+
     // Validate credentials
     if (username !== VALID_CREDENTIALS.username) {
+      console.log('❌ Username mismatch');
       return NextResponse.json(
         { error: 'Invalid credentials' },
         { status: 401 }
@@ -30,13 +41,17 @@ export async function POST(request: NextRequest) {
     }
 
     const isValid = await bcrypt.compare(password, VALID_CREDENTIALS.passwordHash);
+    console.log('   Bcrypt compare result:', isValid);
 
     if (!isValid) {
+      console.log('❌ Password validation failed');
       return NextResponse.json(
         { error: 'Invalid credentials' },
         { status: 401 }
       );
     }
+
+    console.log('✅ Login successful');
 
     // Create JWT token (valid for 7 days)
     const token = await new SignJWT({ username })

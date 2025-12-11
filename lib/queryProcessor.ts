@@ -3,6 +3,8 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 const FALLBACK_MODELS = [
+  'gemma-3-27b-it',
+  'gemma-3-12b-it',
   'gemini-2.0-flash', 
   'gemini-2.0-flash-lite',
   'gemini-2.0-flash-exp',

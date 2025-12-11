@@ -8,6 +8,8 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // ✅ Model hierarchy for fallback (best to worst)
 const CHAT_MODELS = [
+  'gemma-3-27b-it',
+  'gemma-3-12b-it',
   'gemini-2.5-pro',
   'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
@@ -16,6 +18,8 @@ const CHAT_MODELS = [
 
 
 const RERANK_MODELS = [
+  'gemma-3-27b-it',
+  'gemma-3-12b-it',
   'gemini-2.5-flash-lite',
   'gemini-2.0-flash',
   'gemini-2.0-flash-lite'

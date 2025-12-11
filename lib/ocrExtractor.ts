@@ -12,6 +12,8 @@ const safetySettings = [
 
 // Define the model priority list for fallback
 const FALLBACK_MODELS = [
+    'gemma-3-27b-it',
+    'gemma-3-12b-it',
     'gemini-2.0-flash', 
     'gemini-2.0-flash-lite',
     'gemini-2.0-flash-exp',

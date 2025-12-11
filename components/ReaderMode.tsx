@@ -165,6 +165,8 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [useKeywordSearch, setUseKeywordSearch] = useState(false);
 
   const AVAILABLE_MODELS = [
+    { id: 'gemma-3-27b-it', name: 'Gemma 3 27B It (Top Tier)', tier: 'premium' },
+    { id: 'gemma-3-12b-it', name: 'Gemma 3 12B It', tier: 'standard' },
     { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Best Quality)', tier: 'premium' },
     { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Fast & Smart)', tier: 'premium' },
     { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', tier: 'standard' },
