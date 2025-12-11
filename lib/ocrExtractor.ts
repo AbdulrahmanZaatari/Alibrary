@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI, HarmBlockThreshold, HarmCategory } from '@google/generative-ai';
-import { Buffer } from 'buffer'; // Required for Buffer type if not running in pure Node environment
+import { Buffer } from 'buffer';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
@@ -10,26 +10,21 @@ const safetySettings = [
   { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
 ];
 
-// Define the model priority list for fallback
-const FALLBACK_MODELS = [
-    'gemma-3-27b-it',
-    'gemma-3-12b-it',
-    'gemini-2.0-flash', 
-    'gemini-2.0-flash-lite',
-    'gemini-2.0-flash-exp',
-    'gemini-2.5-flash-lite',
-    'gemini-2.5-flash',
-    'gemini-2.5-pro',  
+// Gemma models for OCR (high RPD limits)
+const OCR_MODELS = [
+    'gemma-3-27b-it',        // 14,000 RPD - Best quality
+    'gemma-3-12b-it',        // 14,000 RPD - Fallback
+    'gemini-2.5-flash',      // 500 RPD - Last resort
 ];
 
-
+/**
+ * Main OCR function using Gemma vision models
+ */
 export async function extractTextWithGeminiVision(imageBuffer: Buffer | Uint8Array): Promise<string> {
-  // Use the maxRetries constant for clarity
   const MAX_RETRIES = 2; 
   
   const buffer = Buffer.isBuffer(imageBuffer) ? imageBuffer : Buffer.from(imageBuffer);
   
-  // ✅ SIMPLIFIED PROMPT: Matches Streamlit exactly
   const prompt = `Extract ALL text EXACTLY as it appears.
 - Preserve formatting
 - Keep original language
@@ -41,14 +36,14 @@ Text:`;
   const imagePart = {
     inlineData: {
       data: buffer.toString('base64'),
-      mimeType: 'image/png', // Assumes PNG, adjust if other types are expected
+      mimeType: 'image/png',
     },
   };
 
-  // --- Model Fallback Loop (Outer Loop) ---
-  for (const model of FALLBACK_MODELS) {
+  // --- Model Fallback Loop ---
+  for (const model of OCR_MODELS) {
     
-    // --- Retry Loop (Inner Loop) ---
+    // --- Retry Loop ---
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       
       try {
@@ -71,23 +66,19 @@ Text:`;
           return text;
         } else {
           console.warn(`⚠️ OCR returned insufficient text (${text.length} chars) using ${model}.`);
-          // Continue to retry if text is insufficient
         }
       } catch (error) {
         const errorMessage = (error as Error).message.toLowerCase();
         
-        // Check for Quota/Rate Limit Errors
         const isQuotaError = errorMessage.includes('quota') || 
                              errorMessage.includes('rate limit') ||
                              errorMessage.includes('resource exhausted');
 
         if (isQuotaError) {
             console.warn(`⚠️ Quota error on model ${model} (attempt ${attempt}): ${errorMessage}. Switching to next model...`);
-            // Break the inner retry loop immediately to try the next model
             break; 
         }
 
-        // Handle general retries (for non-quota errors like networking issues)
         console.error(`❌ OCR attempt ${attempt} failed for ${model}:`, errorMessage);
         
         if (attempt < MAX_RETRIES) {
@@ -95,7 +86,6 @@ Text:`;
           console.log(`⏳ Retrying current model ${model} in ${delay}ms...`);
           await new Promise(resolve => setTimeout(resolve, delay));
         }
-        // If maxRetries is reached, the inner loop finishes, and the outer loop moves to the next model.
       }
     }
   }

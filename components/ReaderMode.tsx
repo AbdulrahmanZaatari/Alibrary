@@ -119,6 +119,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [loadingCitation, setLoadingCitation] = useState(false);
   const [showCitationDialog, setShowCitationDialog] = useState(false);
   const [isFixingSpelling, setIsFixingSpelling] = useState(false);
+  const [textCopied, setTextCopied] = useState(false); // ✅ Copy feedback state
 
   // AI Chat State
   const [showChat, setShowChat] = useState(false);
@@ -274,7 +275,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     const container = document.getElementById('pdf-container');
     if (!container) return;
 
-    const handleTextSelection = () => {
+    const handleTextSelection = async () => {
       const selection = window.getSelection();
       const selectedText = selection?.toString().trim();
 
@@ -307,6 +308,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
         const containerRect = pdfContainer.getBoundingClientRect();
 
         if (rect) {
+          // Set text directly without AI correction
           setSelectedTextForCitation(selectedText);
           setSelectedTextForComment(selectedText);
           
@@ -430,7 +432,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
 
       if (e.ctrlKey && e.key === 'b') {
         e.preventDefault();
-        addBookmark();
+        toggleBookmark();
       }
       if (e.ctrlKey && e.key === 'e') {
         e.preventDefault();
@@ -1066,8 +1068,22 @@ async function extractPageText() {
 
     if (isNewSession) {
       try {
-        const words = userMessage.trim().split(/\s+/).slice(0, 5).join(' ');
-        const autoName = words.length > 40 ? words.substring(0, 40) + '...' : words;
+        // Try AI-generated name first (like ChatPanel)
+        const nameRes = await fetch('/api/chat/generate-name', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ firstMessage: userMessage })
+        });
+        
+        let autoName: string;
+        if (nameRes.ok) {
+          const nameData = await nameRes.json();
+          autoName = nameData.name || userMessage.split(/\s+/).slice(0, 5).join(' ');
+        } else {
+          // Fallback to first 5 words
+          const words = userMessage.split(/\s+/).slice(0, 5).join(' ');
+          autoName = words.length > 40 ? words.substring(0, 40) + '...' : words;
+        }
         
         await renameSession(sessionId, autoName);
         
@@ -1109,26 +1125,35 @@ async function extractPageText() {
     }
   }
 
-  async function addBookmark() {
+  async function toggleBookmark() {
     if (!selectedBook) return;
 
-    const note = prompt('Add a note for this bookmark (optional):');
+    // Check if page is already bookmarked
+    const existingBookmark = bookmarks.find(b => b.page_number === currentPage);
 
     try {
-      await fetch('/api/bookmarks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          bookId: selectedBook.id,
-          pageNumber: currentPage,
-          note: note || '',
-        }),
-      });
+      if (existingBookmark) {
+        // Remove bookmark
+        await fetch('/api/bookmarks', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: existingBookmark.id }),
+        });
+      } else {
+        // Add bookmark
+        await fetch('/api/bookmarks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            bookId: selectedBook.id,
+            pageNumber: currentPage,
+            note: '',
+          }),
+        });
+      }
       loadBookmarks();
-      alert('✅ Bookmark added!');
     } catch (error) {
-      console.error('Error adding bookmark:', error);
-      alert('Failed to add bookmark');
+      console.error('Error toggling bookmark:', error);
     }
   }
 
@@ -1644,6 +1669,15 @@ async function extractPageText() {
                   <span className="text-xs text-slate-500">
                     / {numPages || 0}
                   </span>
+                  {/* 🔖 BOOKMARK INDICATOR */}
+                  {bookmarks.some(b => b.page_number === currentPage) && (
+                    <span title="This page is bookmarked">
+                      <Bookmark 
+                        size={18} 
+                        className="text-yellow-500 fill-yellow-500" 
+                      />
+                    </span>
+                  )}
                 </div>
 
                 <button
@@ -1702,13 +1736,19 @@ async function extractPageText() {
                   {extracting ? <Loader2 size={18} className="animate-spin" /> : <FileText size={18} />}
                 </button>
 
-                {/* Add Bookmark */}
+                {/* Toggle Bookmark */}
                 <button
-                  onClick={addBookmark}
-                  className="p-2 hover:bg-slate-100 rounded transition-colors"
-                  title="Add Bookmark (Ctrl+B)"
+                  onClick={toggleBookmark}
+                  className={`p-2 rounded transition-colors ${
+                    bookmarks.some(b => b.page_number === currentPage) 
+                      ? 'bg-yellow-100 text-yellow-600' 
+                      : 'hover:bg-slate-100'
+                  }`}
+                  title={bookmarks.some(b => b.page_number === currentPage) ? "Remove Bookmark" : "Add Bookmark (Ctrl+B)"}
                 >
-                  <BookmarkPlus size={18} />
+                  {bookmarks.some(b => b.page_number === currentPage) 
+                    ? <Bookmark size={18} className="fill-yellow-500" /> 
+                    : <BookmarkPlus size={18} />}
                 </button>
 
                 {/* View Bookmarks */}
@@ -1838,7 +1878,10 @@ async function extractPageText() {
               </div>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => setShowChatSettings(!showChatSettings)}
+                  onClick={() => {
+                    setShowChatSettings(!showChatSettings);
+                    if (!showChatSettings) setShowSessionList(false);
+                  }}
                   className={`p-2 rounded-lg transition-colors ${
                     showChatSettings 
                       ? 'bg-blue-100 text-blue-600'  
@@ -1849,8 +1892,15 @@ async function extractPageText() {
                   <Settings size={18} />
                 </button>
                 <button
-                  onClick={() => setShowSessionList(!showSessionList)}
-                  className="p-2 hover:bg-white rounded-lg transition-colors"
+                  onClick={() => {
+                    setShowSessionList(!showSessionList);
+                    if (!showSessionList) setShowChatSettings(false);
+                  }}
+                  className={`p-2 rounded-lg transition-colors ${
+                    showSessionList 
+                      ? 'bg-blue-100 text-blue-600'  
+                      : 'hover:bg-white'
+                  }`}
                   title="Chat History"
                 >
                   <Clock size={18} />
@@ -2559,19 +2609,20 @@ async function extractPageText() {
         onClick={async () => {
           try {
             await navigator.clipboard.writeText(selectedTextForCitation);
-            const tempDiv = document.createElement('div');
-            tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-[150] bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg';
-            tempDiv.textContent = '✅ Text Copied!';
-            document.body.appendChild(tempDiv);
-            setTimeout(() => document.body.removeChild(tempDiv), 2000);
+            setTextCopied(true);
+            setTimeout(() => setTextCopied(false), 2000);
           } catch (error) {
             console.error('Copy failed:', error);
           }
         }}
-        className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-sm"
+        className={`w-full px-3 py-2 rounded-lg transition-colors flex items-center justify-center gap-2 text-sm ${
+          textCopied 
+            ? 'bg-green-600 text-white' 
+            : 'bg-blue-600 text-white hover:bg-blue-700'
+        }`}
       >
-        <Copy size={16} />
-        Copy Text
+        {textCopied ? <Check size={16} /> : <Copy size={16} />}
+        {textCopied ? 'Copied!' : 'Copy Text'}
       </button>
       {/* Fix Spelling Button */}
       <button

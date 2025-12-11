@@ -30,10 +30,16 @@ export default function CorpusManager({
 
   useEffect(() => {
     fetchDocuments();
-    // Poll for embedding status updates
-    const interval = setInterval(fetchDocuments, 5000);
-    return () => clearInterval(interval);
   }, []);
+
+  // ✅ Smart polling: Only poll when there are documents being processed
+  useEffect(() => {
+    const hasProcessingDocs = documents.some(d => d.embedding_status === 'processing');
+    if (!hasProcessingDocs) return;
+    
+    const interval = setInterval(fetchDocuments, 15000); // 15 seconds instead of 5
+    return () => clearInterval(interval);
+  }, [documents]);
 
   const fetchDocuments = async () => {
     try {

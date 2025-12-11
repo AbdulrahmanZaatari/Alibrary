@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
     }
 
     const db = getDb();
-    const stmt = db.prepare('UPDATE chat_sessions SET name = ?, updated_at = datetime("now") WHERE id = ?');
+    const stmt = db.prepare("UPDATE chat_sessions SET name = ?, updated_at = datetime('now') WHERE id = ?");
     stmt.run(name, sessionId);
 
     return NextResponse.json({ success: true });

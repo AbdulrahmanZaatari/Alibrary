@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Database, Pencil, Check, X, Loader2, BookOpen, AlertCircle, Search, RefreshCw } from 'lucide-react';
+import { Database, Pencil, Check, X, Loader2, BookOpen, AlertCircle, Search, RefreshCw, Sparkles } from 'lucide-react';
 
 interface BookMetadata {
   id: string;
@@ -24,6 +24,7 @@ export default function MetadataManager() {
   const [loading, setLoading] = useState(true);
   const [editingBookId, setEditingBookId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [extractingAI, setExtractingAI] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [metadataForm, setMetadataForm] = useState({
     title: '',
@@ -127,6 +128,55 @@ export default function MetadataManager() {
     }
   }
 
+  async function extractMetadataWithAI() {
+    if (!editingBookId) return;
+
+    const book = books.find(b => b.id === editingBookId);
+    if (!book) return;
+
+    setExtractingAI(true);
+
+    try {
+      const res = await fetch('/api/books/metadata', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookId: editingBookId,
+        }),
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || 'Failed to extract metadata');
+      }
+
+      const data = await res.json();
+      
+      // Update form with extracted metadata (only fill empty fields or let AI override)
+      setMetadataForm(prev => ({
+        title: data.title || prev.title,
+        author: data.author || prev.author,
+        publisher: data.publisher || prev.publisher,
+        year: data.year || prev.year,
+        isbn: data.isbn || prev.isbn,
+        edition: data.edition || prev.edition,
+        language: data.language || prev.language,
+      }));
+
+      // Success notification
+      const tempDiv = document.createElement('div');
+      tempDiv.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-[150] bg-purple-600 text-white px-6 py-3 rounded-lg shadow-xl font-medium';
+      tempDiv.textContent = '✨ AI extracted metadata! Review and save.';
+      document.body.appendChild(tempDiv);
+      setTimeout(() => document.body.removeChild(tempDiv), 3000);
+
+    } catch (error) {
+      console.error('Error extracting metadata:', error);
+      alert(`Failed to extract metadata: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setExtractingAI(false);
+    }
+  }
   const filteredBooks = books.filter(book =>
     book.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
     book.author?.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -239,9 +289,18 @@ export default function MetadataManager() {
                               Editing Book
                             </h3>
                             <div className="flex gap-2">
+                              {/* AI Extract Button */}
+                              <button
+                                onClick={extractMetadataWithAI}
+                                disabled={saving || extractingAI}
+                                className="p-2 bg-purple-600 text-white hover:bg-purple-700 rounded-lg transition-colors disabled:opacity-50 flex items-center gap-1"
+                                title="Extract metadata with AI"
+                              >
+                                {extractingAI ? <Loader2 className="animate-spin" size={18} /> : <Sparkles size={18} />}
+                              </button>
                               <button
                                 onClick={cancelEdit}
-                                disabled={saving}
+                                disabled={saving || extractingAI}
                                 className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
                                 title="Cancel"
                               >
@@ -249,7 +308,7 @@ export default function MetadataManager() {
                               </button>
                               <button
                                 onClick={saveMetadata}
-                                disabled={saving || !metadataForm.title.trim()}
+                                disabled={saving || extractingAI || !metadataForm.title.trim()}
                                 className="p-2 bg-green-600 text-white hover:bg-green-700 rounded-lg transition-colors disabled:opacity-50 flex items-center gap-1"
                                 title="Save"
                               >

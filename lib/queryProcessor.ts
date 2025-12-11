@@ -24,6 +24,110 @@ interface QueryAnalysis {
   isFollowUp?: boolean;
   followUpConfidence?: number;
   needsNewRetrieval?: boolean;
+  // ✅ NEW: Page-specific query analysis
+  pageReference?: {
+    pageNumber: number;
+    isExact: boolean; // true if user wants exactly this page, false if "around page X"
+    context: 'check' | 'search' | 'find' | 'read' | 'general';
+  };
+  // ✅ NEW: Page range filtering (from page X to Y)
+  pageRangeFilter?: {
+    start?: number;
+    end?: number;
+    chapter?: string;
+  };
+}
+
+/**
+ * ✅ NEW: Detect page references in queries
+ * Handles patterns like:
+ * - "in page 6", "on page 6", "page 6"
+ * - "صفحة 6", "في صفحة 6", "من صفحة 6"
+ * - "check page 6", "look at page 6"
+ * - "around page 6", "near page 6"
+ */
+export function detectPageReference(query: string): {
+  pageNumber: number;
+  isExact: boolean;
+  context: 'check' | 'search' | 'find' | 'read' | 'general';
+} | null {
+  // Patterns for exact page references
+  const exactPatterns = [
+    // English patterns
+    /(?:in|on|at|check|look\s*at|see|read|view)\s*page\s*(\d+)/i,
+    /page\s*(\d+)/i,
+    /p\.?\s*(\d+)/i,
+    // Arabic patterns
+    /(?:في|على|من|اقرأ|انظر|تحقق|راجع)\s*(?:صفحة|ص\.?)\s*(\d+)/i,
+    /صفحة\s*(\d+)/i,
+    /ص\.?\s*(\d+)/i,
+    // Mixed patterns
+    /صفحة\s*رقم\s*(\d+)/i,
+    /الصفحة\s*(\d+)/i,
+  ];
+
+  // Patterns for approximate page references
+  const approximatePatterns = [
+    /(?:around|near|about|approximately)\s*page\s*(\d+)/i,
+    /(?:حوالي|قرب|تقريباً)\s*صفحة\s*(\d+)/i,
+  ];
+
+  // Patterns that indicate checking/verifying content
+  const checkPatterns = [
+    /(?:check|verify|confirm|تحقق|تأكد)/i,
+  ];
+
+  // Patterns that indicate searching
+  const searchPatterns = [
+    /(?:search|find|look\s*for|ابحث|جد|أوجد)/i,
+  ];
+
+  // Patterns that indicate reading
+  const readPatterns = [
+    /(?:read|show|display|اقرأ|أظهر)/i,
+  ];
+
+  // Try approximate patterns first (they're more specific)
+  for (const pattern of approximatePatterns) {
+    const match = query.match(pattern);
+    if (match && match[1]) {
+      const pageNum = parseInt(match[1], 10);
+      if (pageNum > 0 && pageNum < 10000) {
+        return {
+          pageNumber: pageNum,
+          isExact: false,
+          context: 'general',
+        };
+      }
+    }
+  }
+
+  // Try exact patterns
+  for (const pattern of exactPatterns) {
+    const match = query.match(pattern);
+    if (match && match[1]) {
+      const pageNum = parseInt(match[1], 10);
+      if (pageNum > 0 && pageNum < 10000) {
+        // Determine context
+        let context: 'check' | 'search' | 'find' | 'read' | 'general' = 'general';
+        if (checkPatterns.some(p => p.test(query))) {
+          context = 'check';
+        } else if (searchPatterns.some(p => p.test(query))) {
+          context = 'search';
+        } else if (readPatterns.some(p => p.test(query))) {
+          context = 'read';
+        }
+
+        return {
+          pageNumber: pageNum,
+          isExact: true,
+          context,
+        };
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -320,6 +424,12 @@ export async function analyzeQuery(
   const queryLang = detectLanguage(query);
   console.log(`   Query language: ${queryLang}, Document language: ${documentLanguage}`);
 
+  // ✅ NEW: Detect page references FIRST
+  const pageReference = detectPageReference(query);
+  if (pageReference) {
+    console.log(`   📄 Page reference detected: Page ${pageReference.pageNumber} (${pageReference.isExact ? 'exact' : 'approximate'}, context: ${pageReference.context})`);
+  }
+
   // Translate if languages don't match
   let translatedQuery: string | undefined;
   let searchQuery = query;
@@ -330,7 +440,7 @@ export async function analyzeQuery(
       translatedQuery = await translateQuery(query, documentLanguage);
       searchQuery = translatedQuery;
       console.log(`   ✅ Translated: "${translatedQuery}"`);
-    } catch (error) {
+    } catch {
       console.error('   ❌ Translation failed, using original query');
       searchQuery = query;
     }
@@ -343,7 +453,7 @@ export async function analyzeQuery(
   let queryType: string;
   try {
     queryType = await classifyQuery(query);
-  } catch (error) {
+  } catch {
     console.error('   ❌ Classification failed, using default: thematic');
     queryType = 'thematic';
   }
@@ -369,7 +479,7 @@ export async function analyzeQuery(
     }
     
     console.log(`   🔑 Keywords: ${keywords.join(', ')}`);
-  } catch (error) {
+  } catch {
     console.error('   ❌ Keyword expansion failed, using direct extraction');
     keywords = documentLanguage === 'ar'
       ? extractArabicKeywords(searchQuery)
@@ -391,5 +501,7 @@ export async function analyzeQuery(
     isFollowUp: undefined,
     followUpConfidence: undefined,
     needsNewRetrieval: undefined,
+    // ✅ NEW: Page reference
+    pageReference: pageReference || undefined,
   };
 }

@@ -4,6 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import { rerankChunks } from './gemini';
 import { retrieveBalancedCorpus, assessRetrievalQuality } from './multiDocRetrieval';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { normalizeArabicForSearch } from './arabicOcrCorrection';
 
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL!,
@@ -160,7 +161,7 @@ ${historyText}
   "confidence": 0.0-1.0,
   "reason": "explanation",
   "needsNewRetrieval": boolean,
-  "extractedKeywords": ["word1", "word2"] or nullexport async function retrieveSmartContext(
+  "extractedKeywords": ["word1", "word2"] or null
 }
 
 **Example:**
@@ -337,6 +338,7 @@ function heuristicFollowUpDetection(
 
 /**
  * ✅ EXHAUSTIVE KEYWORD SEARCH - Bypasses embeddings completely
+ * Enhanced with Arabic normalization for better matching
  */
 async function exhaustiveKeywordSearch(
   keywords: string[],
@@ -369,7 +371,52 @@ async function exhaustiveKeywordSearch(
 
   console.log(`   ✅ Cleaned keywords:`, cleanedKeywords);
 
-  for (const keyword of cleanedKeywords) {
+  // ✅ Generate normalized variants for Arabic keywords
+  const keywordsWithVariants = cleanedKeywords.flatMap((keyword) => {
+    const variants = [keyword];
+    
+    // Check if it's an Arabic keyword
+    if (/[\u0600-\u06FF]/.test(keyword)) {
+      // Add normalized variant
+      const normalized = normalizeArabicForSearch(keyword);
+      if (normalized !== keyword) {
+        variants.push(normalized);
+      }
+      
+      // Add common OCR confusion variants
+      // ى → ي confusion
+      if (keyword.includes('ى')) {
+        variants.push(keyword.replace(/ى/g, 'ي'));
+      }
+      if (keyword.includes('ي') && keyword.endsWith('ي')) {
+        variants.push(keyword.slice(0, -1) + 'ى');
+      }
+      
+      // ة → ه confusion
+      if (keyword.includes('ة')) {
+        variants.push(keyword.replace(/ة/g, 'ه'));
+      }
+      if (keyword.endsWith('ه')) {
+        variants.push(keyword.slice(0, -1) + 'ة');
+      }
+      
+      // أ/إ/آ → ا confusion
+      if (/[أإآ]/.test(keyword)) {
+        variants.push(keyword.replace(/[أإآ]/g, 'ا'));
+      }
+      if (keyword.startsWith('ا')) {
+        variants.push('أ' + keyword.slice(1));
+        variants.push('إ' + keyword.slice(1));
+      }
+    }
+    
+    // Return unique variants
+    return [...new Set(variants)];
+  });
+
+  console.log(`   🔄 Keywords with variants (${keywordsWithVariants.length}):`, keywordsWithVariants.slice(0, 10));
+
+  for (const keyword of keywordsWithVariants) {
     console.log(`   📍 Searching for: "${keyword}"`);
 
     let query = supabaseAdmin
@@ -438,6 +485,73 @@ async function exhaustiveKeywordSearch(
 }
 
 /**
+ * ✅ NEW: Retrieve ALL chunks from a specific page
+ * This ensures nothing is missed when user explicitly mentions a page
+ */
+async function retrievePageSpecificChunks(
+  documentIds: string[],
+  pageNumber: number,
+  isExact: boolean = true
+): Promise<any[]> {
+  console.log(`📄 PAGE-SPECIFIC RETRIEVAL: Page ${pageNumber}${isExact ? ' (exact)' : ' (range)'}`);
+  
+  try {
+    let query = supabaseAdmin
+      .from('embeddings')
+      .select('*')
+      .in('document_id', documentIds);
+
+    if (isExact) {
+      // Get exactly this page and adjacent pages for context
+      query = query
+        .gte('page_number', Math.max(1, pageNumber - 1))
+        .lte('page_number', pageNumber + 1);
+    } else {
+      // Get a range around the page (±2 pages)
+      query = query
+        .gte('page_number', Math.max(1, pageNumber - 2))
+        .lte('page_number', pageNumber + 2);
+    }
+
+    const { data, error } = await query.order('page_number', { ascending: true });
+
+    if (error) {
+      console.error(`❌ Error retrieving page ${pageNumber}:`, error);
+      return [];
+    }
+
+    if (data && data.length > 0) {
+      // Mark chunks with their relevance
+      const markedChunks = data.map(chunk => ({
+        ...chunk,
+        source: 'page_specific',
+        similarity: chunk.page_number === pageNumber ? 0.95 : 0.80,
+        is_target_page: chunk.page_number === pageNumber,
+      }));
+
+      // Sort to prioritize the exact page
+      markedChunks.sort((a, b) => {
+        if (a.page_number === pageNumber && b.page_number !== pageNumber) return -1;
+        if (b.page_number === pageNumber && a.page_number !== pageNumber) return 1;
+        return a.page_number - b.page_number;
+      });
+
+      console.log(`✅ Found ${markedChunks.length} chunks:`);
+      console.log(`   - Page ${pageNumber}: ${markedChunks.filter(c => c.page_number === pageNumber).length} chunks`);
+      console.log(`   - Adjacent pages: ${markedChunks.filter(c => c.page_number !== pageNumber).length} chunks`);
+      
+      return markedChunks;
+    }
+
+    console.warn(`⚠️ No chunks found for page ${pageNumber}`);
+    return [];
+  } catch (error) {
+    console.error(`❌ Exception in page-specific retrieval:`, error);
+    return [];
+  }
+}
+
+/**
  * ✅ Enhanced retrieve context with keyword-first search and follow-up awareness
  */
 export async function retrieveSmartContext(
@@ -457,6 +571,8 @@ export async function retrieveSmartContext(
     keywords,
     isMultiDocumentQuery,
     originalQuery,
+    pageReference, // ✅ Page reference from query analysis
+    pageRangeFilter, // ✅ NEW: Page range filter (from X to Y)
   } = queryAnalysis;
 
   console.log(
@@ -464,6 +580,111 @@ export async function retrieveSmartContext(
   );
   console.log(`   Reranking: ${useReranking ? 'enabled' : 'disabled'}`);
   console.log(`   Keyword Search: ${useKeywordSearch ? 'enabled' : 'disabled'}`);
+
+  // ✅ Helper: Filter chunks by page range
+  const filterByPageRange = (chunks: any[]): any[] => {
+    if (!pageRangeFilter) return chunks;
+    
+    const { start, end } = pageRangeFilter;
+    console.log(`📄 Applying page range filter: ${start || 'start'} to ${end || 'end'}`);
+    
+    return chunks.filter(chunk => {
+      const page = chunk.page_number;
+      if (start && end) return page >= start && page <= end;
+      if (start) return page >= start;
+      if (end) return page <= end;
+      return true;
+    });
+  };
+
+  // ✅ PRIORITY -1: Page-specific retrieval (HIGHEST PRIORITY)
+  // If user explicitly mentions a page number, get ALL content from that page
+  if (pageReference && pageReference.pageNumber) {
+    console.log(`📄 PAGE REFERENCE DETECTED - Using page-specific retrieval`);
+    console.log(`   Target page: ${pageReference.pageNumber}`);
+    console.log(`   Is exact: ${pageReference.isExact}`);
+    console.log(`   Context: ${pageReference.context}`);
+
+    const pageChunks = await retrievePageSpecificChunks(
+      documentIds,
+      pageReference.pageNumber,
+      pageReference.isExact
+    );
+
+    if (pageChunks.length > 0) {
+      // If there are also keywords, also search for keyword matches within the page
+      if (keywords && keywords.length > 0) {
+        console.log(`🔍 Also searching for keywords within page context...`);
+        
+        // Search for keywords but filter to page range
+        const keywordChunks = await exhaustiveKeywordSearch(
+          keywords,
+          documentIds,
+          pageReference.isExact ? pageReference.pageNumber - 1 : pageReference.pageNumber - 2
+        );
+
+        // Filter to only include chunks from the page range
+        const pageRange = pageReference.isExact 
+          ? [pageReference.pageNumber - 1, pageReference.pageNumber, pageReference.pageNumber + 1]
+          : [pageReference.pageNumber - 2, pageReference.pageNumber - 1, pageReference.pageNumber, pageReference.pageNumber + 1, pageReference.pageNumber + 2];
+        
+        const relevantKeywordChunks = keywordChunks.filter(
+          c => pageRange.includes(c.page_number)
+        );
+
+        // Merge, prioritizing keyword matches
+        const mergedMap = new Map<string, any>();
+        
+        // Add all page chunks first
+        for (const chunk of pageChunks) {
+          mergedMap.set(chunk.id, chunk);
+        }
+        
+        // Update with keyword chunks (higher relevance)
+        for (const chunk of relevantKeywordChunks) {
+          if (mergedMap.has(chunk.id)) {
+            const existing = mergedMap.get(chunk.id);
+            existing.similarity = Math.max(existing.similarity || 0, 0.98);
+            existing.matched_keyword = chunk.matched_keyword;
+            existing.source = 'page_specific_keyword_match';
+          } else {
+            mergedMap.set(chunk.id, {
+              ...chunk,
+              source: 'page_specific_keyword_match',
+              similarity: 0.90,
+            });
+          }
+        }
+
+        const mergedChunks = Array.from(mergedMap.values())
+          .sort((a, b) => {
+            // Sort by: target page first, then by similarity
+            if (a.page_number === pageReference.pageNumber && b.page_number !== pageReference.pageNumber) return -1;
+            if (b.page_number === pageReference.pageNumber && a.page_number !== pageReference.pageNumber) return 1;
+            return (b.similarity || 0) - (a.similarity || 0);
+          });
+
+        const metadata = buildRetrievalMetadata(mergedChunks, documentIds, mergedChunks.length);
+        
+        return {
+          chunks: mergedChunks,
+          strategy: 'page_specific_with_keywords',
+          confidence: 0.98,
+          metadata,
+        };
+      }
+
+      // Just page-specific retrieval without keywords
+      const metadata = buildRetrievalMetadata(pageChunks, documentIds, pageChunks.length);
+      
+      return {
+        chunks: pageChunks,
+        strategy: 'page_specific',
+        confidence: 0.95,
+        metadata,
+      };
+    }
+  }
 
   // ✅ Use enhanced keywords from follow-up if available
   let effectiveKeywords = keywords;
@@ -490,17 +711,22 @@ export async function retrieveSmartContext(
     );
 
     if (keywordResults.length > 0) {
+      // Apply page range filter if specified
+      const filteredResults = filterByPageRange(keywordResults);
+      
       const metadata = buildRetrievalMetadata(
-        keywordResults,
+        filteredResults,
         documentIds,
-        keywordResults.length
+        filteredResults.length
       );
 
       return {
-        chunks: keywordResults,
-        strategy: effectivePageFilter 
-          ? 'keyword_exhaustive_filtered' 
-          : 'keyword_exhaustive',
+        chunks: filteredResults,
+        strategy: pageRangeFilter 
+          ? 'keyword_exhaustive_page_range' 
+          : (effectivePageFilter 
+            ? 'keyword_exhaustive_filtered' 
+            : 'keyword_exhaustive'),
         confidence: 0.95,
         metadata,
       };
@@ -514,28 +740,40 @@ export async function retrieveSmartContext(
 
   // PRIORITY 1: Comparative multi-document
   if (isMultiDoc && isMultiDocumentQuery) {
-    return await comparativeMultiDocRetrieval(
+    const result = await comparativeMultiDocRetrieval(
       embedding,
       documentIds,
       originalQuery,
       queryType,
       useReranking
     );
+    // Apply page range filter if specified
+    if (pageRangeFilter) {
+      result.chunks = filterByPageRange(result.chunks);
+      result.strategy = result.strategy + '_page_range';
+    }
+    return result;
   }
 
   // PRIORITY 2: Multi-document comprehensive
   if (isMultiDoc) {
-    return await multiDocumentRetrieval(
+    const result = await multiDocumentRetrieval(
       embedding,
       documentIds,
       originalQuery,
       queryType,
       useReranking
     );
+    // Apply page range filter if specified
+    if (pageRangeFilter) {
+      result.chunks = filterByPageRange(result.chunks);
+      result.strategy = result.strategy + '_page_range';
+    }
+    return result;
   }
 
   // PRIORITY 3: Single document deep retrieval
-  return await singleDocumentRetrieval(
+  const result = await singleDocumentRetrieval(
     embedding,
     documentIds,
     originalQuery,
@@ -543,6 +781,12 @@ export async function retrieveSmartContext(
     effectiveKeywords,
     useReranking
   );
+  // Apply page range filter if specified
+  if (pageRangeFilter) {
+    result.chunks = filterByPageRange(result.chunks);
+    result.strategy = result.strategy + '_page_range';
+  }
+  return result;
 }
 
 /**

@@ -7,6 +7,7 @@ import { extractTextWithGeminiVision } from './ocrExtractor';
 import { chunkText } from './gemini';
 import { cleanPdfText, hasTransliterationIssues } from './transliterationMapper';
 import { correctArabicWithAI, hasArabicCorruption } from './arabicTextCleaner';
+import { correctArabicOcrWithAI, hasArabicOcrIssues } from './arabicOcrCorrection';
 import fs from 'fs';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
@@ -170,20 +171,20 @@ async function processPage(
     let language = detectLanguage(rawText);
     console.log(`🌐 [STEP 2] Page ${pageNum + 1}: Detected language: ${language.toUpperCase()}`);
 
-    // ✅ STEP 3: FORCE OCR FOR ARABIC (always use OCR for better accuracy)
+    // ✅ STEP 3: Smart extraction strategy
+    // For Arabic: Try mupdf first + AI correction. Only OCR if mupdf fails or text is too short.
     let finalText = rawText;
     let extractionMethod: 'mupdf' | 'ocr' = 'mupdf';
     let usedOcr = false;
     
-    // ✅ Force OCR if: Arabic detected OR mupdf failed OR text is short
-    const needsOcr = language === 'ar' || mupdfFailed || rawText.length < 100;
+    // Only force OCR if: mupdf failed OR text is very short (< 50 chars)
+    // For Arabic with good mupdf extraction, we'll use AI correction instead
+    const needsOcr = mupdfFailed || rawText.length < 50;
     
     if (needsOcr) {
-      const reason = language === 'ar' 
-        ? '🔤 ARABIC DETECTED - Forcing OCR for accuracy' 
-        : mupdfFailed 
-          ? '❌ mupdf failed' 
-          : '📏 Text too short';
+      const reason = mupdfFailed 
+        ? '❌ mupdf failed' 
+        : '📏 Text too short';
       
       console.log(`   📸 [STEP 3] OCR REQUIRED: ${reason}`);
       
@@ -245,28 +246,45 @@ async function processPage(
     }
 
     // ✅ STEP 4: Apply AI corrections (only for Arabic)
+    // Toggle: Set DISABLE_AI_OCR_CORRECTION=true to see raw OCR quality
+    const disableAiCorrection = process.env.DISABLE_AI_OCR_CORRECTION === 'true';
     let correctedText = finalText;
     let correctionConfidence = 1.0;
     
-    if (language === 'ar') {
-      console.log(`   🤖 [STEP 4] Applying AI-powered Arabic correction...`);
+    if (disableAiCorrection) {
+      console.log(`   ⚠️ [STEP 4] AI OCR correction DISABLED - using raw OCR output`);
+      correctedText = finalText;
+      correctionConfidence = 0.75;
+    } else if (language === 'ar') {
+      console.log(`   🤖 [STEP 4] Applying enhanced AI-powered Arabic OCR correction...`);
       
       try {
-        correctedText = await correctArabicWithAI(finalText);
+        // ✅ FIRST: Apply specialized OCR correction (using 27B model for best quality)
+        // This specifically targets: ي/ى, أ/ا, ذ/د, ة/ه, ئ/ي confusion
+        const ocrCorrectionResult = await correctArabicOcrWithAI(finalText);
+        const intermediateText = ocrCorrectionResult.correctedText;
+        correctionConfidence = ocrCorrectionResult.confidence;
         
-        if (hasArabicCorruption(correctedText)) {
-          console.log(`   ⚠️ Some corruption remains after correction`);
-          correctionConfidence = 0.85;
+        console.log(`   ✅ OCR correction complete (model: ${ocrCorrectionResult.modelUsed})`);
+        console.log(`   📊 OCR corrections made: ${ocrCorrectionResult.corrections.length}`);
+        
+        // ✅ SECOND: Apply general Arabic cleanup if still has issues
+        if (hasArabicCorruption(intermediateText) || hasArabicOcrIssues(intermediateText)) {
+          console.log(`   🔧 Applying additional Arabic cleanup...`);
+          correctedText = await correctArabicWithAI(intermediateText);
+          correctionConfidence = Math.min(correctionConfidence, 0.90);
         } else {
-          console.log(`   ✅ Arabic text corrected successfully`);
-          correctionConfidence = usedOcr ? 0.98 : 0.90;
+          correctedText = intermediateText;
+          console.log(`   ✅ No additional cleanup needed`);
         }
+        
+        console.log(`   ✅ Arabic text correction complete (confidence: ${(correctionConfidence * 100).toFixed(0)}%)`);
       } catch (aiError) {
         console.error(`   ❌ AI correction failed: ${(aiError as Error).message}`);
         correctedText = finalText;
         correctionConfidence = 0.70;
       }
-    } else {
+    } else if (!disableAiCorrection) {
       // English: Check if transliteration fixes are needed
       const hasTransliteration = hasTransliterationIssues(finalText);
       

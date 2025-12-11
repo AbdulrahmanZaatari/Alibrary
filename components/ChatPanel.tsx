@@ -5,6 +5,30 @@ import { Send, Loader2, Sparkles, BookOpen, FileText, Trash2, Plus, Settings, X,
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+/**
+ * Detect text direction based on content
+ * Returns 'rtl' for Arabic-dominant text, 'ltr' for English-dominant
+ */
+function detectTextDirection(text: string): 'rtl' | 'ltr' {
+  if (!text) return 'ltr';
+  
+  // Count Arabic characters (including extended Arabic)
+  const arabicChars = (text.match(/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/g) || []).length;
+  // Count Latin characters
+  const latinChars = (text.match(/[a-zA-Z]/g) || []).length;
+  
+  // If no significant characters, check for Arabic words
+  if (arabicChars === 0 && latinChars === 0) {
+    return 'ltr';
+  }
+  
+  // Calculate ratio - if Arabic is more than 40%, use RTL
+  const totalSignificant = arabicChars + latinChars;
+  const arabicRatio = arabicChars / totalSignificant;
+  
+  return arabicRatio > 0.4 ? 'rtl' : 'ltr';
+}
+
 interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -39,6 +63,7 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
   const [modelError, setModelError] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
   const [useReranking, setUseReranking] = useState(true);
+  const [useKeywordSearch, setUseKeywordSearch] = useState(false); // ✅ Exhaustive keyword search
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -195,7 +220,8 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
             documentIds: selectedDocuments,
             enableMultiHop,
             preferredModel: selectedModel,
-            useReranking
+            useReranking,
+            useKeywordSearch
           }
         : { 
             message: userMessageContent, 
@@ -203,10 +229,11 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
             documentIds: selectedDocuments.length > 0 ? selectedDocuments : undefined,
             enableMultiHop,
             preferredModel: selectedModel,
-            useReranking
+            useReranking,
+            useKeywordSearch
           };
 
-      console.log('🔄 Sending request:', { endpoint, mode, enableMultiHop, model: selectedModel, hasDocuments: selectedDocuments.length > 0 });
+      console.log('🔄 Sending request:', { endpoint, mode, enableMultiHop, model: selectedModel, useKeywordSearch, hasDocuments: selectedDocuments.length > 0 });
 
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -274,11 +301,25 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
         })
       });
 
-      // Auto-name session based on first prompt
+      // Auto-name session based on first prompt using AI
       if (isNewSession) {
         try {
-          const words = userMessageContent.split(/\s+/).slice(0, 5).join(' ');
-          const autoName = words.length > 40 ? words.substring(0, 40) + '...' : words;
+          // Try AI-generated name first
+          const nameRes = await fetch('/api/chat/generate-name', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ firstMessage: userMessageContent })
+          });
+          
+          let autoName: string;
+          if (nameRes.ok) {
+            const nameData = await nameRes.json();
+            autoName = nameData.name || userMessageContent.split(/\s+/).slice(0, 5).join(' ');
+          } else {
+            // Fallback to first 5 words
+            const words = userMessageContent.split(/\s+/).slice(0, 5).join(' ');
+            autoName = words.length > 40 ? words.substring(0, 40) + '...' : words;
+          }
           
           await fetch('/api/chat/rename-session', {
             method: 'POST',
@@ -464,6 +505,42 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                   {enableMultiHop ? 'ON' : 'OFF'}
                 </button>
               </div>
+
+              {/* Reranking Toggle */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Reranking</label>
+                  <p className="text-xs text-slate-500 mt-0.5">Improve result relevance</p>
+                </div>
+                <button
+                  onClick={() => setUseReranking(!useReranking)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                    useReranking 
+                      ? 'bg-emerald-600 text-white' 
+                      : 'bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  {useReranking ? 'ON' : 'OFF'}
+                </button>
+              </div>
+
+              {/* Exhaustive Keyword Search Toggle */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Exhaustive Keyword Search</label>
+                  <p className="text-xs text-slate-500 mt-0.5">Find all keyword matches</p>
+                </div>
+                <button
+                  onClick={() => setUseKeywordSearch(!useKeywordSearch)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                    useKeywordSearch 
+                      ? 'bg-orange-600 text-white' 
+                      : 'bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  {useKeywordSearch ? 'ON' : 'OFF'}
+                </button>
+              </div>
             </div>
           )}
 
@@ -566,7 +643,8 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                         </div>
                         <div 
                           className="prose prose-sm max-w-none dark:prose-invert"
-                          dir={message.content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
+                          dir={detectTextDirection(message.content)}
+                          style={{ textAlign: detectTextDirection(message.content) === 'rtl' ? 'right' : 'left' }}
                         >
                           <ReactMarkdown
                             remarkPlugins={[remarkGfm]}
@@ -583,43 +661,61 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                               strong: ({ node, ...props }) => (
                                 <strong className="font-bold text-emerald-700" {...props} />
                               ),
-                              ul: ({ node, ...props }) => (
-                                <ul className="list-disc mr-6 ml-6 my-2 space-y-1" {...props} />
-                              ),
-                              ol: ({ node, ...props }) => (
-                                <ol className="list-decimal mr-6 ml-6 my-2 space-y-1" {...props} />
-                              ),
+                              ul: ({ node, ...props }) => {
+                                const dir = detectTextDirection(message.content);
+                                return <ul className={`list-disc ${dir === 'rtl' ? 'mr-6 pr-2' : 'ml-6 pl-2'} my-2 space-y-1`} {...props} />;
+                              },
+                              ol: ({ node, ...props }) => {
+                                const dir = detectTextDirection(message.content);
+                                return <ol className={`list-decimal ${dir === 'rtl' ? 'mr-6 pr-2' : 'ml-6 pl-2'} my-2 space-y-1`} {...props} />;
+                              },
                               li: ({ node, ...props }) => (
                                 <li className="leading-relaxed text-slate-700" {...props} />
                               ),
-                              blockquote: ({ node, ...props }) => (
-                                <blockquote
-                                  className="border-l-4 border-r-4 border-emerald-300 pl-4 pr-4 italic my-2 text-slate-600 bg-emerald-50 py-2 rounded-r"
-                                  {...props}
-                                />
-                              ),
+                              blockquote: ({ node, ...props }) => {
+                                const dir = detectTextDirection(message.content);
+                                return (
+                                  <blockquote
+                                    className={`${dir === 'rtl' ? 'border-r-4 pr-4' : 'border-l-4 pl-4'} border-emerald-300 italic my-2 text-slate-600 bg-emerald-50 py-2 rounded`}
+                                    {...props}
+                                  />
+                                );
+                              },
                               code: ({ node, inline, ...props }: any) =>
                                 inline ? (
                                   <code
                                     className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                                    dir="ltr"
                                     {...props}
                                   />
                                 ) : (
                                   <code
                                     className="block bg-slate-100 text-slate-800 p-3 rounded my-2 text-sm font-mono overflow-x-auto"
+                                    dir="ltr"
                                     {...props}
                                   />
                                 ),
-                              a: ({ node, ...props }) => (
+                              a: ({ ...props }) => (
                                 <a
                                   className="text-emerald-600 hover:text-emerald-800 underline"
                                   {...props}
                                 />
                               ),
-                              p: ({ node, ...props }) => (
-                                <p className="mb-2 leading-relaxed text-slate-700" {...props} />
-                              ),
-                              em: ({ node, ...props }) => (
+                              p: ({ children, ...props }) => {
+                                // Detect direction for each paragraph individually
+                                const paragraphDir = detectTextDirection(String(children || ''));
+                                return (
+                                  <p 
+                                    className="mb-2 leading-relaxed text-slate-700" 
+                                    dir={paragraphDir}
+                                    style={{ textAlign: paragraphDir === 'rtl' ? 'right' : 'left' }}
+                                    {...props}
+                                  >
+                                    {children}
+                                  </p>
+                                );
+                              },
+                              em: ({ ...props }) => (
                                 <em className="italic text-slate-600" {...props} />
                               ),
                             }}

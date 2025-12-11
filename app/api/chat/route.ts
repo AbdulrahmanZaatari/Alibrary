@@ -2,7 +2,6 @@ import { NextRequest } from 'next/server';
 import { generateResponse } from '@/lib/gemini';
 import { 
   getDb, 
-  addChatMessage, 
   updateChatSessionTimestamp,
   trackConversationContext,
   createSessionSummary,
@@ -21,6 +20,16 @@ import {
   generateSessionSummary, 
   extractTopicsFromMessage 
 } from '@/lib/contextAnalyzer';
+import {
+  analyzeQueryIntent,
+  getRetrievalState,
+  saveRetrievalState,
+  updateRetrievalState,
+  generateContinuationInfo,
+  summarizeConversationForQuery,
+  detectContinuationRequest,
+  detectConversationReference
+} from '@/lib/advancedQueryHandler';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -268,11 +277,84 @@ export async function POST(request: NextRequest) {
           needsRetrieval: queryAnalysis.needsNewRetrieval
         });
 
-        // ✅ SMART RETRIEVAL DECISION
+        // ✅ SMART RETRIEVAL DECISION WITH CONTINUATION SUPPORT
         let retrievedContext = '';
+        let continuationInfo: { hasMore: boolean; remainingCount: number; remainingPages: number[]; message: string; messageAr: string } | null = null;
+        const MAX_CHUNKS_TO_SHOW = 15; // Show up to 15 chunks, track remainder
         
-        if (followUpDetection.needsNewRetrieval || !followUpDetection.isFollowUp) {
+        // ✅ Check for continuation request first
+        const isContinuationRequest = detectContinuationRequest(message);
+        
+        if (isContinuationRequest) {
+          const previousState = getRetrievalState(sessionId);
+          if (previousState && previousState.remainingPages.length > 0) {
+            console.log('🔄 CONTINUATION REQUEST - Fetching more results');
+            console.log(`   Previous: ${previousState.resultsShown} shown, ${previousState.remainingPages.length} remaining`);
+            
+            // Fetch more chunks from remaining pages
+            const { chunks } = await retrieveSmartContext(
+              { 
+                ...queryAnalysis,
+                keywords: previousState.lastKeywords,
+                originalQuery: previousState.lastQuery
+              },
+              previousState.documentIds,
+              useReranking,
+              useKeywordSearch
+            );
+            
+            // Filter to only include pages we haven't shown yet
+            const remainingChunks = chunks.filter(c => 
+              previousState.remainingPages.includes(c.page_number)
+            );
+            
+            const chunksToShow = remainingChunks.slice(0, MAX_CHUNKS_TO_SHOW);
+            const stillRemaining = remainingChunks.slice(MAX_CHUNKS_TO_SHOW);
+            
+            if (chunksToShow.length > 0) {
+              retrievedContext = chunksToShow
+                .map(chunk => {
+                  const pageHeader = queryLanguage === 'ar'
+                    ? `**📄 صفحة ${chunk.page_number}**`
+                    : `**📄 Page ${chunk.page_number}**`;
+                  return `${pageHeader}\n${chunk.chunk_text}`;
+                })
+                .join('\n\n---\n\n');
+              
+              // Update state
+              updateRetrievalState(sessionId, chunksToShow.length);
+              
+              if (stillRemaining.length > 0) {
+                const stillRemainingPages = [...new Set(stillRemaining.map(c => c.page_number))];
+                continuationInfo = generateContinuationInfo(
+                  previousState.totalResultsFound,
+                  previousState.resultsShown + chunksToShow.length,
+                  stillRemainingPages
+                );
+              }
+            }
+          }
+        }
+        // ✅ Check for conversation context reference
+        else if (detectConversationReference(message)) {
+          console.log('💬 CONVERSATION CONTEXT REQUEST - Summarizing previous discussion');
+          
+          const summaryContext = await summarizeConversationForQuery(conversationHistory, queryLanguage);
+          
+          retrievedContext = queryLanguage === 'ar'
+            ? `**📋 ملخص محادثتنا السابقة:**\n\n${summaryContext}`
+            : `**📋 Summary of our previous conversation:**\n\n${summaryContext}`;
+        }
+        else if (followUpDetection.needsNewRetrieval || !followUpDetection.isFollowUp) {
           console.log('📚 Performing new retrieval...');
+          
+          // ✅ Get query intent for page range filtering
+          const queryIntent = await analyzeQueryIntent(message, conversationHistory, sessionId);
+          
+          if (queryIntent.pageRange) {
+            console.log(`📄 Page range filter detected:`, queryIntent.pageRange);
+            queryAnalysis.pageRangeFilter = queryIntent.pageRange;
+          }
           
           const { chunks, strategy, confidence } = await retrieveSmartContext(
             queryAnalysis,
@@ -283,18 +365,46 @@ export async function POST(request: NextRequest) {
           
           console.log(`📊 Retrieval Results:
    - Strategy: ${strategy}
-   - Chunks: ${chunks.length}
+   - Total Chunks: ${chunks.length}
    - Confidence: ${(confidence * 100).toFixed(1)}%`);
 
           if (chunks.length > 0) {
-            retrievedContext = chunks
-              .map((chunk, i) => {
+            // Show up to MAX_CHUNKS_TO_SHOW, track the rest for continuation
+            const chunksToShow = chunks.slice(0, MAX_CHUNKS_TO_SHOW);
+            const remainingChunks = chunks.slice(MAX_CHUNKS_TO_SHOW);
+            
+            retrievedContext = chunksToShow
+              .map(chunk => {
                 const pageHeader = queryLanguage === 'ar'
                   ? `**📄 صفحة ${chunk.page_number}**`
                   : `**📄 Page ${chunk.page_number}**`;
                 return `${pageHeader}\n${chunk.chunk_text}`;
               })
               .join('\n\n---\n\n');
+            
+            // Track state for continuation
+            if (remainingChunks.length > 0) {
+              const allPages = chunks.map(c => c.page_number);
+              const remainingPages = [...new Set(remainingChunks.map(c => c.page_number))];
+              
+              saveRetrievalState(
+                sessionId,
+                message,
+                queryAnalysis.keywords || [],
+                chunks.length,
+                chunksToShow.length,
+                documentIds,
+                allPages
+              );
+              
+              continuationInfo = generateContinuationInfo(
+                chunks.length,
+                chunksToShow.length,
+                remainingPages
+              );
+              
+              console.log(`📚 Continuation available: ${remainingChunks.length} more chunks in pages ${remainingPages.slice(0, 5).join(', ')}${remainingPages.length > 5 ? '...' : ''}`);
+            }
           }
         } else {
           console.log('💬 Follow-up detected - reusing conversation context');
@@ -314,6 +424,8 @@ export async function POST(request: NextRequest) {
 
         const systemPrompt = queryLanguage === 'ar'
           ? `أنت مساعد بحثي دقيق يتذكر السياق. استخدم تنسيق Markdown.
+
+⚠️ **مهم جداً: أجب دائماً باللغة العربية فقط.**
 
 📋 **القواعد:**
 1. تذكر المحادثة السابقة
@@ -361,6 +473,14 @@ ${contextSection}
             await writer.write(encoder.encode(text));
           }
         }
+        
+        // ✅ Add continuation info if there are more results
+        if (continuationInfo && continuationInfo.hasMore) {
+          const continuationMessage = queryLanguage === 'ar' 
+            ? continuationInfo.messageAr 
+            : continuationInfo.message;
+          await writer.write(encoder.encode(continuationMessage));
+        }
 
         updateChatSessionTimestamp(sessionId);
         await writer.close();
@@ -373,6 +493,8 @@ ${contextSection}
 
       const systemPrompt = queryLanguage === 'ar'
         ? `أنت مساعد بحثي دقيق ومتخصص يتذكر السياق. استخدم تنسيق Markdown في إجاباتك.
+
+⚠️ **مهم جداً: أجب دائماً باللغة العربية فقط.**
 
 📋 **القواعد الأساسية:**
 
@@ -428,11 +550,11 @@ ${conversationContextString}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 **User:** ${message}
-**Assistant:**`
+**Assistant:**${queryLanguage === 'ar' ? ' (أجب بالعربية فقط)' : ''}`
         : `${systemPrompt}
 
 **User:** ${message}
-**Assistant:**`;
+**Assistant:**${queryLanguage === 'ar' ? ' (أجب بالعربية فقط)' : ''}`;
 
       // ✅ Stream response
       let modelUsed: string | undefined;

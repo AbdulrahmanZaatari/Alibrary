@@ -891,6 +891,8 @@ async function handleCorpusQuery(
   const systemPrompt = isArabic
     ? `أنت مساعد بحثي دقيق ومتخصص يتذكر السياق. استخدم تنسيق Markdown في إجاباتك.
 
+⚠️ **مهم جداً: أجب دائماً باللغة العربية فقط.**
+
 📋 **القواعد الأساسية:**
 
 1. **الوعي بالمحادثة:** تذكر ما نوقش سابقاً
@@ -912,9 +914,12 @@ ${keywordSearchInstructions}${contextualPromptAddition}${customPrompt ? `\n**Add
 
   const userQuery = queryAnalysis?.originalQuery || query;
 
+  // Add language enforcement reminder at the end of prompt
+  const langReminder = isArabic ? ' (أجب بالعربية فقط)' : '';
+
   const fullPrompt = contextParts.length > 0
-    ? `${systemPrompt}${conversationContextString}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n${contextParts.join('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n')}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**${isArabic ? 'سؤال المستخدم' : "User's Question"}:**\n${userQuery}\n\n**${isArabic ? 'إجابتك' : 'Your Answer'}:**`
-    : `${systemPrompt}${conversationContextString}\n\n**${isArabic ? 'سؤال المستخدم' : "User's Question"}:**\n${userQuery}\n\n**${isArabic ? 'إجابتك' : 'Your Answer'}:**`;
+    ? `${systemPrompt}${conversationContextString}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n${contextParts.join('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n')}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**${isArabic ? 'سؤال المستخدم' : "User's Question"}:**\n${userQuery}\n\n**${isArabic ? 'إجابتك' : 'Your Answer'}:**${langReminder}`
+    : `${systemPrompt}${conversationContextString}\n\n**${isArabic ? 'سؤال المستخدم' : "User's Question"}:**\n${userQuery}\n\n**${isArabic ? 'إجابتك' : 'Your Answer'}:**${langReminder}`;
 
   console.log('🤖 Querying Gemini with conversation awareness...');
   console.log(`🎯 Using model: ${preferredModel || 'default fallback'}`);
