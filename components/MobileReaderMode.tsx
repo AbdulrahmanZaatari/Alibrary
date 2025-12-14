@@ -29,7 +29,9 @@ import {
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 const AVAILABLE_MODELS = [
-  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Best)' },
+  { id: 'qwen/qwen3-235b-a22b:free', name: 'Qwen 235B (Free)' },
+  { id: 'gemma-3-27b-it', name: 'Gemma 3 27B It' },
+  { id: 'gemma-3-12b-it', name: 'Gemma 3 12B It' },
   { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Fast)' },
   { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite' },
   { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' }
@@ -58,6 +60,23 @@ interface CorpusDocument {
   id: string;
   display_name: string;
   is_selected: number;
+}
+
+/**
+ * ✅ Smart text direction detection
+ * Returns 'rtl' only if the MAJORITY of the text is Arabic/RTL
+ */
+function detectTextDirection(text: string): 'rtl' | 'ltr' {
+  if (!text) return 'ltr';
+  
+  const arabicChars = (text.match(/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/g) || []).length;
+  const latinChars = (text.match(/[a-zA-Z]/g) || []).length;
+  
+  const totalChars = arabicChars + latinChars;
+  if (totalChars < 10) return 'ltr';
+  
+  const arabicRatio = arabicChars / totalChars;
+  return arabicRatio > 0.6 ? 'rtl' : 'ltr';
 }
 
 interface CustomPrompt {
@@ -125,6 +144,7 @@ export default function MobileReaderMode({ onClose }: MobileReaderModeProps) {
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
   const [useReranking, setUseReranking] = useState(true);
   const [useKeywordSearch, setUseKeywordSearch] = useState(false);
+  const [enableMultiPass, setEnableMultiPass] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
   
@@ -647,6 +667,7 @@ export default function MobileReaderMode({ onClose }: MobileReaderModeProps) {
         extractedText: extractedText || undefined,
         preferredModel: selectedModel,
         customPrompt: selectedPrompt || '',
+        enableMultiPass: enableMultiPass,
         useReranking: useKeywordSearch ? false : useReranking,
         useKeywordSearch: useKeywordSearch,
       }),
@@ -773,9 +794,27 @@ export default function MobileReaderMode({ onClose }: MobileReaderModeProps) {
               </div>
               <div 
                 className="prose prose-sm max-w-none p-3"
-                dir={msg.content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
+                dir={detectTextDirection(msg.content)}
+                style={{ unicodeBidi: 'plaintext' }}
               >
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <ReactMarkdown 
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    p: ({ node, children, ...props }) => (
+                      <p dir="auto" style={{ unicodeBidi: 'plaintext' }} {...props}>{children}</p>
+                    ),
+                    blockquote: ({ node, children, ...props }) => (
+                      <blockquote 
+                        className="border-l-4 border-r-4 border-blue-300 pl-3 pr-3 italic my-2 bg-blue-50 py-2 rounded text-sm"
+                        dir="auto"
+                        style={{ unicodeBidi: 'isolate' }}
+                        {...props}
+                      >
+                        {children}
+                      </blockquote>
+                    ),
+                  }}
+                >
                   {msg.content}
                 </ReactMarkdown>
               </div>
@@ -807,9 +846,27 @@ export default function MobileReaderMode({ onClose }: MobileReaderModeProps) {
           <div className="relative p-3">
             <div 
               className="prose prose-sm max-w-none"
-              dir={content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
+              dir={detectTextDirection(content)}
+              style={{ unicodeBidi: 'plaintext' }}
             >
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              <ReactMarkdown 
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  p: ({ node, children, ...props }) => (
+                    <p dir="auto" style={{ unicodeBidi: 'plaintext' }} {...props}>{children}</p>
+                  ),
+                  blockquote: ({ node, children, ...props }) => (
+                    <blockquote 
+                      className="border-l-4 border-r-4 border-blue-300 pl-3 pr-3 italic my-2 bg-blue-50 py-2 rounded text-sm"
+                      dir="auto"
+                      style={{ unicodeBidi: 'isolate' }}
+                      {...props}
+                    >
+                      {children}
+                    </blockquote>
+                  ),
+                }}
+              >
                 {content}
               </ReactMarkdown>
             </div>
@@ -1079,6 +1136,15 @@ export default function MobileReaderMode({ onClose }: MobileReaderModeProps) {
                   type="checkbox"
                   checked={useKeywordSearch}
                   onChange={(e) => setUseKeywordSearch(e.target.checked)}
+                  className="rounded"
+                />
+              </label>
+              <label className="flex-1 flex items-center justify-between p-2 bg-indigo-50 rounded border text-xs">
+                <span>Multi-Pass</span>
+                <input
+                  type="checkbox"
+                  checked={enableMultiPass}
+                  onChange={(e) => setEnableMultiPass(e.target.checked)}
                   className="rounded"
                 />
               </label>

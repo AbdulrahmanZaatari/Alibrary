@@ -30,6 +30,8 @@ import {
   detectContinuationRequest,
   detectConversationReference
 } from '@/lib/advancedQueryHandler';
+import { performMultiPassGeneration, formatMultiPassResult } from '@/lib/multiPassGeneration';
+import { expandQuery, buildKeywordList } from '@/lib/queryExpansion';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -57,6 +59,8 @@ export async function POST(request: NextRequest) {
         sessionId, 
         documentIds,
         enableMultiHop = false,
+        enableMultiPass = false,
+        multiPassCount = 2,
         preferredModel,
         useReranking = true,
         useKeywordSearch = false
@@ -74,6 +78,7 @@ export async function POST(request: NextRequest) {
         hasDocuments: documentIds?.length > 0,
         documentCount: documentIds?.length || 0,
         enableMultiHop,
+        enableMultiPass,
         preferredModel,
         useKeywordSearch
       });
@@ -257,12 +262,110 @@ export async function POST(request: NextRequest) {
         }
       }
 
+      // ==================== MULTI-PASS GENERATION PATH ====================
+      if (enableMultiPass && documentIds && documentIds.length > 0) {
+        console.log('\n╔═════════════════════════════════════════════════════════════╗');
+        console.log('║ 🔄 MULTI-PASS GENERATION MODE ACTIVATED                     ║');
+        console.log('╠═════════════════════════════════════════════════════════════╣');
+        console.log(`║ 📝 Query: "${message.substring(0, 45)}${message.length > 45 ? '...' : ''}"`);
+        console.log(`║ 🔢 Planned passes: ${multiPassCount}`);
+        console.log(`║ 📚 Documents: ${documentIds.length}`);
+        console.log('╚═════════════════════════════════════════════════════════════╝');
+        
+        try {
+          const startTime = Date.now();
+          
+          const multiPassResult = await performMultiPassGeneration(
+            message,
+            documentIds,
+            queryLanguage,
+            multiPassCount,
+            useReranking,
+            useKeywordSearch,
+            preferredModel
+          );
+
+          const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
+          
+          console.log('\n┌─────────────────────────────────────────────────────────────┐');
+          console.log('│ ✅ MULTI-PASS GENERATION COMPLETE                           │');
+          console.log('└─────────────────────────────────────────────────────────────┘');
+          console.log(`\n📊 MULTI-PASS IMPACT SUMMARY:`);
+          console.log(`   ⏱️  Total time: ${elapsedTime}s`);
+          console.log(`   🔄 Passes completed: ${multiPassResult.passDetails.length}`);
+          console.log(`   📄 Total chunks retrieved: ${multiPassResult.totalChunksUsed}`);
+          console.log(`   🔧 Refinements made: ${multiPassResult.refinementCount}`);
+          console.log(`   🎯 Final confidence: ${multiPassResult.confidence}%`);
+          
+          console.log(`\n📋 PASS-BY-PASS BREAKDOWN:`);
+          multiPassResult.passDetails.forEach((pass) => {
+            console.log(`   Pass ${pass.passNumber}: ${pass.action}`);
+            console.log(`      └─ Chunks: ${pass.chunksRetrieved}`);
+            if (pass.gapsIdentified && pass.gapsIdentified.length > 0) {
+              console.log(`      └─ Gaps found: ${pass.gapsIdentified.length}`);
+              pass.gapsIdentified.forEach(gap => console.log(`         • ${gap.substring(0, 50)}...`));
+            }
+            if (pass.refinements && pass.refinements.length > 0) {
+              console.log(`      └─ Refinement queries: ${pass.refinements.length}`);
+            }
+          });
+          console.log('─────────────────────────────────────────────────────────────\n');
+
+          const formattedResponse = formatMultiPassResult(multiPassResult, queryLanguage, true);
+          await writer.write(encoder.encode(formattedResponse));
+          
+          updateChatSessionTimestamp(sessionId);
+          await writer.close();
+          return;
+
+        } catch (error) {
+          console.error('❌ Multi-pass generation failed, falling back to standard:', error);
+        }
+      }
+
       // ==================== DOCUMENT-BASED RETRIEVAL (IF DOCUMENTS PROVIDED) ====================
       if (documentIds && documentIds.length > 0) {
         console.log('📚 Documents provided - performing retrieval-based chat');
         
+        // ✅ Apply query expansion for Arabic queries (AUTOMATIC)
+        let expandedKeywords: string[] = [];
+        if (queryLanguage === 'ar') {
+          console.log('\n┌─────────────────────────────────────────────────────────────┐');
+          console.log('│ 🔤 ARABIC QUERY EXPANSION (Automatic)                       │');
+          console.log('└─────────────────────────────────────────────────────────────┘');
+          console.log(`📝 Original Query: "${message.substring(0, 80)}${message.length > 80 ? '...' : ''}"`);
+          
+          const expansion = await expandQuery(message, queryLanguage, true);
+          expandedKeywords = buildKeywordList(expansion);
+          
+          console.log(`\n✨ EXPANSION IMPACT:`);
+          console.log(`   📊 Synonyms found: ${expansion.synonyms.length}`);
+          if (expansion.synonyms.length > 0) {
+            console.log(`      → ${expansion.synonyms.slice(0, 5).join('، ')}`);
+          }
+          console.log(`   📊 Related terms: ${expansion.relatedTerms.length}`);
+          if (expansion.relatedTerms.length > 0) {
+            console.log(`      → ${expansion.relatedTerms.slice(0, 5).join('، ')}`);
+          }
+          console.log(`   📊 Spelling variants: ${expansion.variants.length}`);
+          if (expansion.variants.length > 0) {
+            console.log(`      → ${expansion.variants.slice(0, 5).join('، ')}`);
+          }
+          console.log(`   📊 Total keywords for search: ${expandedKeywords.length}`);
+          console.log(`   🎯 Confidence: ${Math.round(expansion.confidence * 100)}%`);
+          console.log('─────────────────────────────────────────────────────────────');
+        }
+        
         // ✅ Perform query analysis
         const queryAnalysis = await analyzeQuery(message, queryLanguage);
+        
+        // ✅ Add expanded keywords to query analysis
+        if (expandedKeywords.length > 0) {
+          queryAnalysis.keywords = [...new Set([
+            ...queryAnalysis.keywords,
+            ...expandedKeywords
+          ])];
+        }
         
         // ✅ ADD follow-up info to query analysis
         queryAnalysis.isFollowUp = followUpDetection.isFollowUp;

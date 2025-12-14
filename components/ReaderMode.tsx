@@ -63,6 +63,28 @@ interface CorpusDocument {
   is_selected: number;
 }
 
+/**
+ * ✅ Smart text direction detection
+ * Returns 'rtl' only if the MAJORITY of the text is Arabic/RTL
+ * This prevents English responses with Arabic quotes from being RTL
+ */
+function detectTextDirection(text: string): 'rtl' | 'ltr' {
+  if (!text) return 'ltr';
+  
+  // Count Arabic characters (includes all Arabic Unicode blocks)
+  const arabicChars = (text.match(/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/g) || []).length;
+  // Count Latin characters
+  const latinChars = (text.match(/[a-zA-Z]/g) || []).length;
+  
+  // If no significant text, default to LTR
+  const totalChars = arabicChars + latinChars;
+  if (totalChars < 10) return 'ltr';
+  
+  // RTL only if Arabic is more than 60% of the directional text
+  const arabicRatio = arabicChars / totalChars;
+  return arabicRatio > 0.6 ? 'rtl' : 'ltr';
+}
+
 interface ReaderModeProps {
   persistedBookId?: string | null;
   onBookSelect?: (bookId: string | null) => void;
@@ -164,11 +186,12 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [usedModel, setUsedModel] = useState<string | null>(null);
   const [useReranking, setUseReranking] = useState(true);
   const [useKeywordSearch, setUseKeywordSearch] = useState(false);
+  const [enableMultiPass, setEnableMultiPass] = useState(false);
 
   const AVAILABLE_MODELS = [
+    { id: 'qwen/qwen3-235b-a22b:free', name: 'Qwen 235B (Free - 50/day)', tier: 'free' },
     { id: 'gemma-3-27b-it', name: 'Gemma 3 27B It (Top Tier)', tier: 'premium' },
     { id: 'gemma-3-12b-it', name: 'Gemma 3 12B It', tier: 'standard' },
-    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Best Quality)', tier: 'premium' },
     { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Fast & Smart)', tier: 'premium' },
     { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', tier: 'standard' },
     { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', tier: 'standard' }
@@ -965,6 +988,7 @@ async function extractPageText() {
       correctSpelling: false, 
       customPrompt: selectedPrompt || '',
       enableMultiHop: enableMultiHop,
+      enableMultiPass: enableMultiPass,
       preferredModel: selectedModel,
       useReranking: useKeywordSearch ? false : useReranking,
       useKeywordSearch: useKeywordSearch,
@@ -1406,31 +1430,43 @@ async function extractPageText() {
               </div>
               <div 
                 className="prose prose-sm max-w-none p-3"
-                dir={msg.content.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
+                dir={detectTextDirection(msg.content)}
+                style={{ unicodeBidi: 'plaintext' }}
               >
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   components={{
-                    h1: ({ node, ...props }) => <h1 className="text-lg font-bold mb-2 mt-3 text-slate-900" {...props} />,
-                    h2: ({ node, ...props }) => <h2 className="text-base font-bold mb-2 mt-2 text-slate-900" {...props} />,
-                    h3: ({ node, ...props }) => <h3 className="text-sm font-bold mb-1 mt-2 text-slate-800" {...props} />,
+                    h1: ({ node, ...props }) => <h1 className="text-lg font-bold mb-2 mt-3 text-slate-900" dir="auto" {...props} />,
+                    h2: ({ node, ...props }) => <h2 className="text-base font-bold mb-2 mt-2 text-slate-900" dir="auto" {...props} />,
+                    h3: ({ node, ...props }) => <h3 className="text-sm font-bold mb-1 mt-2 text-slate-800" dir="auto" {...props} />,
                     strong: ({ node, ...props }) => <strong className="font-bold text-blue-700" {...props} />,
-                    ul: ({ node, ...props }) => <ul className="list-disc mr-5 ml-5 my-2 space-y-1" {...props} />,
-                    ol: ({ node, ...props }) => <ol className="list-decimal mr-5 ml-5 my-2 space-y-1" {...props} />,
-                    li: ({ node, ...props }) => <li className="leading-relaxed text-slate-700 text-sm" {...props} />,
-                    blockquote: ({ node, ...props }) => (
-                      <blockquote className="border-l-4 border-r-4 border-blue-300 pl-3 pr-3 italic my-2 text-slate-600 bg-blue-50 py-2 rounded-r text-sm" {...props} />
+                    ul: ({ node, ...props }) => <ul className="list-disc mr-5 ml-5 my-2 space-y-1" dir="auto" {...props} />,
+                    ol: ({ node, ...props }) => <ol className="list-decimal mr-5 ml-5 my-2 space-y-1" dir="auto" {...props} />,
+                    li: ({ node, ...props }) => <li className="leading-relaxed text-slate-700 text-sm" dir="auto" {...props} />,
+                    blockquote: ({ node, children, ...props }) => (
+                      <blockquote 
+                        className="border-l-4 border-r-4 border-blue-300 pl-3 pr-3 italic my-2 text-slate-600 bg-blue-50 py-2 rounded text-sm"
+                        dir="auto"
+                        style={{ unicodeBidi: 'isolate' }}
+                        {...props}
+                      >
+                        {children}
+                      </blockquote>
                     ),
                     code: (props: any) => {
                       const { inline, ...rest } = props || {};
                       return inline ? (
-                        <code className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-xs font-mono" {...rest} />
+                        <code className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-xs font-mono" dir="ltr" {...rest} />
                       ) : (
-                        <code className="block bg-slate-100 text-slate-800 p-2 rounded my-2 text-xs font-mono overflow-x-auto" {...rest} />
+                        <code className="block bg-slate-100 text-slate-800 p-2 rounded my-2 text-xs font-mono overflow-x-auto" dir="ltr" {...rest} />
                       );
                     },
                     a: ({ node, ...props }) => <a className="text-blue-600 hover:text-blue-800 underline" {...props} />,
-                    p: ({ node, ...props }) => <p className="mb-2 leading-relaxed text-slate-700 text-sm" {...props} />,
+                    p: ({ node, children, ...props }) => (
+                      <p className="mb-2 leading-relaxed text-slate-700 text-sm" dir="auto" style={{ unicodeBidi: 'plaintext' }} {...props}>
+                        {children}
+                      </p>
+                    ),
                     em: ({ node, ...props }) => <em className="italic text-slate-600" {...props} />,
                   }}
                 >
@@ -1469,22 +1505,37 @@ async function extractPageText() {
           <div className="relative">
             <div 
               className="prose prose-sm max-w-none p-3"
-              dir={displayedContent.match(/[\u0600-\u06FF]/) ? 'rtl' : 'ltr'}
+              dir={detectTextDirection(displayedContent)}
+              style={{ unicodeBidi: 'plaintext' }}
             >
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={{
-                  h1: ({ node, ...props }) => <h1 className="text-lg font-bold mb-2 mt-3 text-slate-900" {...props} />,
-                  h2: ({ node, ...props }) => <h2 className="text-base font-bold mb-2 mt-2 text-slate-900" {...props} />,
-                  h3: ({ node, ...props }) => <h3 className="text-sm font-bold mb-1 mt-2 text-slate-800" {...props} />,
+                  h1: ({ node, ...props }) => <h1 className="text-lg font-bold mb-2 mt-3 text-slate-900" dir="auto" {...props} />,
+                  h2: ({ node, ...props }) => <h2 className="text-base font-bold mb-2 mt-2 text-slate-900" dir="auto" {...props} />,
+                  h3: ({ node, ...props }) => <h3 className="text-sm font-bold mb-1 mt-2 text-slate-800" dir="auto" {...props} />,
                   strong: ({ node, ...props }) => <strong className="font-bold text-blue-700" {...props} />,
-                  p: ({ node, ...props }) => <p className="mb-2 leading-relaxed text-slate-700 text-sm" {...props} />,
+                  p: ({ node, children, ...props }) => (
+                    <p className="mb-2 leading-relaxed text-slate-700 text-sm" dir="auto" style={{ unicodeBidi: 'plaintext' }} {...props}>
+                      {children}
+                    </p>
+                  ),
+                  blockquote: ({ node, children, ...props }) => (
+                    <blockquote 
+                      className="border-l-4 border-r-4 border-blue-300 pl-3 pr-3 italic my-2 text-slate-600 bg-blue-50 py-2 rounded text-sm"
+                      dir="auto"
+                      style={{ unicodeBidi: 'isolate' }}
+                      {...props}
+                    >
+                      {children}
+                    </blockquote>
+                  ),
                   code: (props: any) => {
                     const { inline, ...rest } = props || {};
                     return inline ? (
-                      <code className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-xs font-mono" {...rest} />
+                      <code className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-xs font-mono" dir="ltr" {...rest} />
                     ) : (
-                      <code className="block bg-slate-100 text-slate-800 p-2 rounded my-2 text-xs font-mono overflow-x-auto" {...rest} />
+                      <code className="block bg-slate-100 text-slate-800 p-2 rounded my-2 text-xs font-mono overflow-x-auto" dir="ltr" {...rest} />
                     );
                   },
                 }}
@@ -2072,6 +2123,17 @@ async function extractPageText() {
                     className="rounded text-blue-600 focus:ring-blue-500"
                   />
                   <span className="text-sm text-slate-700">Enable Multi-Hop Reasoning</span>
+                </label>
+
+                {/* Multi-Pass Generation */}
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={enableMultiPass}
+                    onChange={(e) => setEnableMultiPass(e.target.checked)}
+                    className="rounded text-purple-600 focus:ring-purple-500"
+                  />
+                  <span className="text-sm text-slate-700">Multi-Pass Generation</span>
                 </label>
               </div>
             )}

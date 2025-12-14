@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { OpenRouter } from '@openrouter/sdk';
 
 if (!process.env.GEMINI_API_KEY) {
   throw new Error('GEMINI_API_KEY not found');
@@ -6,11 +7,20 @@ if (!process.env.GEMINI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+// ✅ Initialize OpenRouter client
+const openRouter = process.env.OPENROUTER_API_KEY 
+  ? new OpenRouter({ apiKey: process.env.OPENROUTER_API_KEY })
+  : null;
+
+// ✅ OpenRouter models (free tier)
+const OPENROUTER_MODELS = [
+  'qwen/qwen3-235b-a22b:free',  // Qwen 235B - 50 free requests/day
+];
+
 // ✅ Model hierarchy for fallback (best to worst)
 const CHAT_MODELS = [
   'gemma-3-27b-it',
   'gemma-3-12b-it',
-  'gemini-2.5-pro',
   'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
   'gemini-2.0-flash'
@@ -32,12 +42,56 @@ export const embedText = async (text: string): Promise<number[]> => {
   return result.embedding.values;
 };
 
+// ✅ Check if model is an OpenRouter model
+const isOpenRouterModel = (model: string): boolean => {
+  return model.includes('/') || OPENROUTER_MODELS.includes(model);
+};
+
+// ✅ Generate response with OpenRouter streaming
+async function* streamOpenRouterResponse(prompt: string, model: string): AsyncIterable<any> {
+  if (!openRouter) {
+    throw new Error('OpenRouter API key not configured');
+  }
+
+  console.log(`🌐 [OpenRouter] Streaming with ${model}...`);
+  
+  const stream = await openRouter.chat.send({
+    model,
+    messages: [
+      { role: 'user', content: prompt }
+    ],
+    stream: true,
+  });
+
+  for await (const chunk of stream) {
+    const content = chunk.choices[0]?.delta?.content;
+    if (content) {
+      // Wrap in Gemini-compatible format
+      yield {
+        text: () => content
+      };
+    }
+  }
+}
+
 // ✅ Generate response with streaming + model fallback
 export const generateResponse = async (
   prompt: string,
   preferredModel?: string
 ): Promise<{ stream: AsyncIterable<any>; modelUsed: string }> => {
-  const modelsToTry = preferredModel 
+  // Handle OpenRouter models first
+  if (preferredModel && isOpenRouterModel(preferredModel)) {
+    try {
+      console.log(`🤖 Using OpenRouter model: ${preferredModel}`);
+      const stream = streamOpenRouterResponse(prompt, preferredModel);
+      return { stream, modelUsed: preferredModel };
+    } catch (error: any) {
+      console.error(`❌ OpenRouter ${preferredModel} failed:`, error.message);
+      // Fall through to Gemini models
+    }
+  }
+
+  const modelsToTry = preferredModel && !isOpenRouterModel(preferredModel)
     ? [preferredModel, ...CHAT_MODELS.filter(m => m !== preferredModel)]
     : CHAT_MODELS;
 

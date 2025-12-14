@@ -1,12 +1,23 @@
 import { NextRequest } from 'next/server';
-import { searchSimilarChunks } from '@/lib/vectorStore';
 import { getDb } from '@/lib/db';
-import { embedText, generateResponse } from '@/lib/gemini';
+import { generateResponse } from '@/lib/gemini';
 import { analyzeQuery } from '@/lib/queryProcessor';
 import { retrieveSmartContext } from '@/lib/smartRetrieval';
+import { performMultiPassGeneration, formatMultiPassResult } from '@/lib/multiPassGeneration';
+import { expandQuery, buildKeywordList } from '@/lib/queryExpansion';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
+
+/**
+ * ✅ Detect query language
+ */
+function detectQueryLanguage(query: string): 'ar' | 'en' {
+  const arabicChars = (query.match(/[\u0600-\u06FF]/g) || []).length;
+  const totalChars = query.replace(/\s/g, '').length;
+  const arabicRatio = arabicChars / totalChars;
+  return arabicRatio > 0.3 ? 'ar' : 'en';
+}
 
 export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
@@ -15,10 +26,22 @@ export async function POST(request: NextRequest) {
 
   (async () => {
     try {
-      const { query, documentIds } = await request.json();
+      const { 
+        query, 
+        documentIds,
+        enableMultiPass = false,
+        multiPassCount = 2,
+        preferredModel,
+        useReranking = true,
+        useKeywordSearch = false
+      } = await request.json();
+
+      const queryLanguage = detectQueryLanguage(query);
 
       console.log('📝 Query:', query);
       console.log('📚 Documents:', documentIds?.length || 0);
+      console.log('🌐 Language:', queryLanguage);
+      console.log('⚙️ Options:', { enableMultiPass, useReranking, useKeywordSearch });
 
       if (!query || !documentIds || documentIds.length === 0) {
         await writer.write(encoder.encode(
@@ -29,11 +52,114 @@ export async function POST(request: NextRequest) {
         return;
       }
 
+      // ==================== MULTI-PASS GENERATION PATH ====================
+      if (enableMultiPass) {
+        console.log('\n╔═══════════════════════════════════════════════════════════════╗');
+        console.log('║ 🔄 MULTI-PASS GENERATION MODE ACTIVATED                       ║');
+        console.log('╠═══════════════════════════════════════════════════════════════╣');
+        console.log(`║ 📝 Query: "${query.substring(0, 45)}${query.length > 45 ? '...' : ''}"`);
+        console.log(`║ 🔢 Planned passes: ${multiPassCount}`);
+        console.log(`║ 📚 Documents: ${documentIds.length}`);
+        console.log('╚═══════════════════════════════════════════════════════════════╝');
+        
+        try {
+          const startTime = Date.now();
+          
+          const multiPassResult = await performMultiPassGeneration(
+            query,
+            documentIds,
+            queryLanguage,
+            multiPassCount,
+            useReranking,
+            useKeywordSearch,
+            preferredModel
+          );
+
+          const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
+          
+          console.log('\n┌─────────────────────────────────────────────────────────────┐');
+          console.log('│ ✅ MULTI-PASS GENERATION COMPLETE                           │');
+          console.log('└─────────────────────────────────────────────────────────────┘');
+          console.log(`\n📊 MULTI-PASS IMPACT SUMMARY:`);
+          console.log(`   ⏱️  Total time: ${elapsedTime}s`);
+          console.log(`   🔄 Passes completed: ${multiPassResult.passDetails.length}`);
+          console.log(`   📄 Total chunks retrieved: ${multiPassResult.totalChunksUsed}`);
+          console.log(`   🔧 Refinements made: ${multiPassResult.refinementCount}`);
+          console.log(`   🎯 Final confidence: ${multiPassResult.confidence}%`);
+          
+          console.log(`\n📋 PASS-BY-PASS BREAKDOWN:`);
+          multiPassResult.passDetails.forEach((pass) => {
+            console.log(`   Pass ${pass.passNumber}: ${pass.action}`);
+            console.log(`      └─ Chunks: ${pass.chunksRetrieved}`);
+            if (pass.gapsIdentified && pass.gapsIdentified.length > 0) {
+              console.log(`      └─ Gaps found: ${pass.gapsIdentified.length}`);
+              pass.gapsIdentified.forEach(gap => console.log(`         • ${gap.substring(0, 50)}...`));
+            }
+            if (pass.refinements && pass.refinements.length > 0) {
+              console.log(`      └─ Refinement queries: ${pass.refinements.length}`);
+            }
+          });
+          console.log('─────────────────────────────────────────────────────────────\n');
+
+          const formattedResponse = formatMultiPassResult(multiPassResult, queryLanguage, true);
+          await writer.write(encoder.encode(formattedResponse));
+          await writer.close();
+          return;
+
+        } catch (error) {
+          console.error('❌ Multi-pass generation failed, falling back to standard:', error);
+        }
+      }
+
+      // ==================== ARABIC QUERY EXPANSION (Automatic) ====================
+      let expandedKeywords: string[] = [];
+      if (queryLanguage === 'ar') {
+        console.log('\n┌─────────────────────────────────────────────────────────────┐');
+        console.log('│ 🔤 ARABIC QUERY EXPANSION (Automatic)                       │');
+        console.log('└─────────────────────────────────────────────────────────────┘');
+        console.log(`📝 Original Query: "${query.substring(0, 80)}${query.length > 80 ? '...' : ''}"`);
+        
+        const expansion = await expandQuery(query, queryLanguage, true);
+        expandedKeywords = buildKeywordList(expansion);
+        
+        console.log(`\n✨ EXPANSION IMPACT:`);
+        console.log(`   📊 Synonyms found: ${expansion.synonyms.length}`);
+        if (expansion.synonyms.length > 0) {
+          console.log(`      → ${expansion.synonyms.slice(0, 5).join('، ')}`);
+        }
+        console.log(`   📊 Related terms: ${expansion.relatedTerms.length}`);
+        if (expansion.relatedTerms.length > 0) {
+          console.log(`      → ${expansion.relatedTerms.slice(0, 5).join('، ')}`);
+        }
+        console.log(`   📊 Spelling variants: ${expansion.variants.length}`);
+        if (expansion.variants.length > 0) {
+          console.log(`      → ${expansion.variants.slice(0, 5).join('، ')}`);
+        }
+        console.log(`   📊 Total keywords for search: ${expandedKeywords.length}`);
+        console.log(`   🎯 Confidence: ${Math.round(expansion.confidence * 100)}%`);
+        console.log('─────────────────────────────────────────────────────────────');
+      }
+
       // ✅ Step 1: Analyze query
-      const queryAnalysis = await analyzeQuery(query, 'ar');
+      const queryAnalysis = await analyzeQuery(query, queryLanguage);
+      
+      // ✅ Add expanded keywords to query analysis
+      if (expandedKeywords.length > 0) {
+        const originalKeywordCount = queryAnalysis.keywords.length;
+        queryAnalysis.keywords = [...new Set([
+          ...queryAnalysis.keywords,
+          ...expandedKeywords
+        ])];
+        console.log(`📊 Keywords enriched: ${originalKeywordCount} → ${queryAnalysis.keywords.length}`);
+      }
       
       // ✅ Step 2: Smart retrieval
-      const { chunks, strategy, confidence } = await retrieveSmartContext(queryAnalysis, documentIds);
+      const { chunks, strategy, confidence } = await retrieveSmartContext(
+        queryAnalysis, 
+        documentIds,
+        useReranking,
+        useKeywordSearch
+      );
 
       console.log(`✅ Retrieved ${chunks.length} chunks using ${strategy} (confidence: ${(confidence * 100).toFixed(1)}%)`);
 

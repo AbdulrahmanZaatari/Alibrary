@@ -65,12 +65,16 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
   const [useReranking, setUseReranking] = useState(true);
   const [useKeywordSearch, setUseKeywordSearch] = useState(false); // ✅ Exhaustive keyword search
   
+  // ✅ NEW: Multi-Pass Generation
+  const [enableMultiPass, setEnableMultiPass] = useState(false);
+  const [multiPassCount, setMultiPassCount] = useState<2 | 3>(2);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const AVAILABLE_MODELS = [
+    { id: 'qwen/qwen3-235b-a22b:free', name: 'Qwen 235B (Free - 50/day)', tier: 'free' },
     { id: 'gemma-3-27b-it', name: 'Gemma 3 27B It (Top Tier)', tier: 'premium' },
     { id: 'gemma-3-12b-it', name: 'Gemma 3 12B It', tier: 'standard' },
-    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Best Quality)', tier: 'premium' },
     { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Fast & Smart)', tier: 'premium' },
     { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', tier: 'standard' },
     { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', tier: 'standard' }
@@ -219,6 +223,8 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
             query: userMessageContent, 
             documentIds: selectedDocuments,
             enableMultiHop,
+            enableMultiPass,
+            multiPassCount,
             preferredModel: selectedModel,
             useReranking,
             useKeywordSearch
@@ -228,12 +234,14 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
             sessionId: currentSession,
             documentIds: selectedDocuments.length > 0 ? selectedDocuments : undefined,
             enableMultiHop,
+            enableMultiPass,
+            multiPassCount,
             preferredModel: selectedModel,
             useReranking,
             useKeywordSearch
           };
 
-      console.log('🔄 Sending request:', { endpoint, mode, enableMultiHop, model: selectedModel, useKeywordSearch, hasDocuments: selectedDocuments.length > 0 });
+      console.log('🔄 Sending request:', { endpoint, mode, enableMultiHop, enableMultiPass, model: selectedModel, useKeywordSearch, hasDocuments: selectedDocuments.length > 0 });
 
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -539,6 +547,24 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                   }`}
                 >
                   {useKeywordSearch ? 'ON' : 'OFF'}
+                </button>
+              </div>
+
+              {/* Multi-Pass Mode Toggle */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Multi-Pass Generation</label>
+                  <p className="text-xs text-slate-500 mt-0.5">Draft → Gap analysis → Refined answer</p>
+                </div>
+                <button
+                  onClick={() => setEnableMultiPass(!enableMultiPass)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                    enableMultiPass 
+                      ? 'bg-purple-600 text-white' 
+                      : 'bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  {enableMultiPass ? 'ON' : 'OFF'}
                 </button>
               </div>
             </div>

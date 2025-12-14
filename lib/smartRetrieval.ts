@@ -21,7 +21,6 @@ const FALLBACK_MODELS = [
   'gemini-2.0-flash-exp',
   'gemini-2.5-flash-lite',
   'gemini-2.5-flash',
-  'gemini-2.5-pro',  
 ];
 
 interface RetrievalResult {
@@ -552,6 +551,64 @@ async function retrievePageSpecificChunks(
 }
 
 /**
+ * ✅ NEW: Retrieve ALL chunks from a page range (e.g., pages 10-18)
+ * This is used when user specifies "page 10 to 18" or similar
+ */
+async function retrievePageRangeChunks(
+  documentIds: string[],
+  pageNumbers: number[]
+): Promise<any[]> {
+  const minPage = Math.min(...pageNumbers);
+  const maxPage = Math.max(...pageNumbers);
+  
+  console.log(`📄 PAGE RANGE RETRIEVAL: Pages ${minPage} to ${maxPage} (${pageNumbers.length} pages)`);
+  
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('embeddings')
+      .select('*')
+      .in('document_id', documentIds)
+      .gte('page_number', minPage)
+      .lte('page_number', maxPage)
+      .order('page_number', { ascending: true });
+
+    if (error) {
+      console.error(`❌ Error retrieving page range ${minPage}-${maxPage}:`, error);
+      return [];
+    }
+
+    if (data && data.length > 0) {
+      // Mark chunks with their source
+      const markedChunks = data.map(chunk => ({
+        ...chunk,
+        source: 'page_range',
+        similarity: 0.95,
+        is_in_range: pageNumbers.includes(chunk.page_number),
+      }));
+
+      // Group by page for logging
+      const pageGroups = new Map<number, number>();
+      for (const chunk of markedChunks) {
+        pageGroups.set(chunk.page_number, (pageGroups.get(chunk.page_number) || 0) + 1);
+      }
+      
+      console.log(`✅ Found ${markedChunks.length} chunks from ${pageGroups.size} pages:`);
+      for (const [page, count] of pageGroups) {
+        console.log(`   - Page ${page}: ${count} chunks`);
+      }
+      
+      return markedChunks;
+    }
+
+    console.warn(`⚠️ No chunks found for page range ${minPage}-${maxPage}`);
+    return [];
+  } catch (error) {
+    console.error(`❌ Exception in page range retrieval:`, error);
+    return [];
+  }
+}
+
+/**
  * ✅ Enhanced retrieve context with keyword-first search and follow-up awareness
  */
 export async function retrieveSmartContext(
@@ -598,8 +655,38 @@ export async function retrieveSmartContext(
   };
 
   // ✅ PRIORITY -1: Page-specific retrieval (HIGHEST PRIORITY)
-  // If user explicitly mentions a page number, get ALL content from that page
+  // If user explicitly mentions a page number or range, get ALL content from those pages
   if (pageReference && pageReference.pageNumber) {
+    // ✅ Handle page RANGE (e.g., "page 10 to 18")
+    if (pageReference.isRange && pageReference.endPageNumber) {
+      console.log(`📄 PAGE RANGE DETECTED - Using range retrieval`);
+      console.log(`   Page range: ${pageReference.pageNumber} to ${pageReference.endPageNumber}`);
+      console.log(`   Context: ${pageReference.context}`);
+      
+      // Build array of all pages in the range
+      const pageRange: number[] = [];
+      for (let p = pageReference.pageNumber; p <= pageReference.endPageNumber; p++) {
+        pageRange.push(p);
+      }
+      
+      // Retrieve chunks from ALL pages in the range
+      const rangeChunks = await retrievePageRangeChunks(documentIds, pageRange);
+      
+      if (rangeChunks.length > 0) {
+        const metadata = buildRetrievalMetadata(rangeChunks, documentIds, rangeChunks.length);
+        
+        console.log(`✅ Found ${rangeChunks.length} chunks from pages ${pageReference.pageNumber}-${pageReference.endPageNumber}`);
+        
+        return {
+          chunks: rangeChunks,
+          strategy: 'page_range_retrieval',
+          confidence: 0.98,
+          metadata,
+        };
+      }
+    }
+    
+    // ✅ Handle single page reference
     console.log(`📄 PAGE REFERENCE DETECTED - Using page-specific retrieval`);
     console.log(`   Target page: ${pageReference.pageNumber}`);
     console.log(`   Is exact: ${pageReference.isExact}`);

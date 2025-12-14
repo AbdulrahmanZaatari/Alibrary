@@ -9,7 +9,20 @@ import { chunkText } from './gemini';
 import { cleanPdfText, hasTransliterationIssues } from './transliterationMapper';
 import { correctArabicWithAI, hasArabicCorruption } from './arabicTextCleaner';
 import { correctArabicOcrWithAI, hasArabicOcrIssues } from './arabicOcrCorrection';
+import { detectChapterBoundary } from './chapterDetector';
 import fs from 'fs';
+
+// ✅ Shared chapter context across pages (used for propagation)
+interface ChapterState {
+  chapterNumber: number | null;
+  storyNumber: number | null;
+  chapterTitle: string | null;
+  storyTitle: string | null;
+  sectionName: string | null;
+  boundaryType: 'chapter' | 'story' | 'part' | 'section' | 'none';
+}
+
+let currentChapterState: ChapterState | null = null;
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
@@ -381,6 +394,43 @@ async function processPage(
     const { dates: extractedDates, context: extractedContext } = extractDatesAndContext(correctedText);
     console.log(`   ✅ Found ${extractedDates.length} date(s)`);
 
+    // ✅ STEP 5.5: Detect chapter/story boundaries
+    console.log(`   📖 [STEP 5.5] Detecting chapter/story boundaries...`);
+    let chapterState: ChapterState | null = currentChapterState;
+    
+    try {
+      const boundary = detectChapterBoundary(correctedText, language);
+      
+      if (boundary.isNewSection) {
+        console.log(`   📚 NEW ${boundary.sectionType?.toUpperCase() || 'SECTION'} DETECTED!`);
+        console.log(`      Number: ${boundary.number || 'N/A'}`);
+        console.log(`      Title: ${boundary.title || 'N/A'}`);
+        
+        // Update the chapter state
+        chapterState = {
+          chapterNumber: boundary.sectionType === 'chapter' ? boundary.number : null,
+          storyNumber: boundary.sectionType === 'story' ? boundary.number : null,
+          chapterTitle: boundary.sectionType === 'chapter' ? boundary.title : null,
+          storyTitle: boundary.sectionType === 'story' ? boundary.title : null,
+          sectionName: boundary.title || null,
+          boundaryType: boundary.sectionType || 'section',
+        };
+        
+        // Update the global chapter state for subsequent pages
+        currentChapterState = chapterState;
+      } else if (currentChapterState) {
+        // Continue with current chapter state
+        chapterState = currentChapterState;
+        console.log(`   📖 Continuing ${currentChapterState.boundaryType}: ${currentChapterState.chapterNumber || currentChapterState.storyNumber || 'Unknown'}`);
+      } else {
+        console.log(`   📖 No chapter/story context yet`);
+      }
+    } catch (chapterErr) {
+      console.warn(`   ⚠️ Chapter detection failed: ${(chapterErr as Error).message}`);
+      // Continue with the existing chapter state if any
+      chapterState = currentChapterState;
+    }
+
     // ✅ STEP 6: Chunk text
     console.log(`   📦 [STEP 6] Chunking text...`);
     const pageChunks = chunkText(correctedText, 1200, 200);
@@ -431,10 +481,24 @@ async function processPage(
         correctionConfidence,
         dates: extractedDates,
         hasDateContext: extractedDates.length > 0,
+        // ✅ Enhanced metadata with chapter/story context
+        chapterNumber: chapterState?.chapterNumber || null,
+        storyTitle: chapterState?.storyTitle || chapterState?.chapterTitle || null,
+        sectionName: chapterState?.sectionName || null,
+        chapterContext: chapterState?.boundaryType !== 'none' 
+          ? `${chapterState?.boundaryType} ${chapterState?.chapterNumber || chapterState?.storyNumber || ''}`.trim()
+          : null,
         metadata: {
           dateContext: extractedContext,
           chunkIndex: i,
           totalChunks: pageChunks.length,
+          // ✅ Additional chapter metadata
+          chapter_number: chapterState?.chapterNumber || undefined,
+          story_number: chapterState?.storyNumber || undefined,
+          chapter_title: chapterState?.chapterTitle || undefined,
+          story_title: chapterState?.storyTitle || undefined,
+          section_name: chapterState?.sectionName || undefined,
+          boundary_type: chapterState?.boundaryType || 'none',
         }
       });
     }
@@ -459,6 +523,9 @@ export async function embedDocumentInBatches(
   pdfPath: string,
   onProgress?: (current: number, total: number) => void
 ) {
+  // ✅ Reset chapter state for new document
+  currentChapterState = null;
+  
   console.log(`\n${'='.repeat(60)}`);
   console.log(`🚀 STARTING DOCUMENT EMBEDDING`);
   console.log(`${'='.repeat(60)}`);

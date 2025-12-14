@@ -12,10 +12,25 @@ export interface VectorChunk {
   correctionConfidence?: number;
   dates?: string[];
   hasDateContext?: boolean;
+  // ✅ NEW: Top-level chapter/story fields for easier access
+  chapterNumber?: number | null;
+  storyTitle?: string | null;
+  sectionName?: string | null;
+  chapterContext?: string | null;
   metadata?: {
     dateContext?: string[];
     chunkIndex?: number;
     totalChunks?: number;
+    // ✅ NEW: Chapter/Story metadata for disambiguation
+    chapter_number?: number;
+    chapter_title?: string;
+    story_number?: number;
+    story_title?: string;
+    section_name?: string;
+    boundary_type?: string;
+    main_characters?: string[];
+    themes?: string[];
+    narrative_context?: string;
     [key: string]: any;
   };
 }

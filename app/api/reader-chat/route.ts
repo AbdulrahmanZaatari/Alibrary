@@ -23,6 +23,9 @@ import {
   generateSessionSummary as generateContextSummary,
   extractTopicsFromMessage
 } from '@/lib/contextAnalyzer';
+import { performMultiPassGeneration, formatMultiPassResult } from '@/lib/multiPassGeneration';
+import { expandQuery, buildKeywordList } from '@/lib/queryExpansion';
+import { detectQueryContext, detectContextConflicts } from '@/lib/literaryPrompts';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -235,6 +238,7 @@ export async function POST(req: NextRequest) {
         aggressiveCorrection = false,
         customPrompt,
         enableMultiHop = false,
+        enableMultiPass = false,
         preferredModel, 
         useReranking = true,
         useKeywordSearch = false,
@@ -250,6 +254,7 @@ export async function POST(req: NextRequest) {
         hasCorpus: documentIds?.length > 0,
         corpusCount: documentIds?.length || 0,
         enableMultiHop,
+        enableMultiPass,
         preferredModel,
         useKeywordSearch,
         hasCachedChunks: !!cachedChunks,
@@ -381,6 +386,7 @@ export async function POST(req: NextRequest) {
           extractedText, 
           customPrompt,
           enableMultiHop,
+          enableMultiPass,
           sessionId,
           history,
           bookTitle,
@@ -442,6 +448,7 @@ async function handleCorpusQuery(
   extractedText?: string,
   customPrompt?: string,
   enableMultiHop: boolean = false,
+  enableMultiPass: boolean = false,
   sessionId?: string,
   history?: Array<{ role: string; content: string }>,
   bookTitle?: string,
@@ -540,8 +547,96 @@ async function handleCorpusQuery(
     }
   }
 
+  // ==================== MULTI-PASS GENERATION PATH ====================
+  if (enableMultiPass) {
+    console.log('\n╔═══════════════════════════════════════════════════════════════╗');
+    console.log('║ 🔄 MULTI-PASS GENERATION MODE (Reader Chat)                   ║');
+    console.log('╠═══════════════════════════════════════════════════════════════╣');
+    console.log(`║ 📝 Query: "${query.substring(0, 45)}${query.length > 45 ? '...' : ''}"`);
+    console.log(`║ 🔢 Planned passes: 2`);
+    console.log(`║ 📚 Documents: ${documentIds.length}`);
+    console.log('╚═══════════════════════════════════════════════════════════════╝');
+    
+    try {
+      const startTime = Date.now();
+      
+      const multiPassResult = await performMultiPassGeneration(
+        query,
+        documentIds,
+        queryLanguage,
+        2, // 2 passes for reader mode
+        useReranking,
+        useKeywordSearch,
+        preferredModel
+      );
+
+      const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
+      
+      console.log('\n┌─────────────────────────────────────────────────────────────┐');
+      console.log('│ ✅ MULTI-PASS GENERATION COMPLETE (Reader)                  │');
+      console.log('└─────────────────────────────────────────────────────────────┘');
+      console.log(`\n📊 MULTI-PASS IMPACT SUMMARY:`);
+      console.log(`   ⏱️  Total time: ${elapsedTime}s`);
+      console.log(`   🔄 Passes completed: ${multiPassResult.passDetails.length}`);
+      console.log(`   📄 Total chunks retrieved: ${multiPassResult.totalChunksUsed}`);
+      console.log(`   🔧 Refinements made: ${multiPassResult.refinementCount}`);
+      console.log(`   🎯 Final confidence: ${multiPassResult.confidence}%`);
+      
+      console.log(`\n📋 PASS-BY-PASS BREAKDOWN:`);
+      multiPassResult.passDetails.forEach((pass) => {
+        console.log(`   Pass ${pass.passNumber}: ${pass.action}`);
+        console.log(`      └─ Chunks: ${pass.chunksRetrieved}`);
+        if (pass.gapsIdentified && pass.gapsIdentified.length > 0) {
+          console.log(`      └─ Gaps found: ${pass.gapsIdentified.length}`);
+          pass.gapsIdentified.forEach(gap => console.log(`         • ${gap.substring(0, 50)}...`));
+        }
+        if (pass.refinements && pass.refinements.length > 0) {
+          console.log(`      └─ Refinement queries: ${pass.refinements.length}`);
+        }
+      });
+      console.log('─────────────────────────────────────────────────────────────\n');
+
+      const formattedResponse = formatMultiPassResult(multiPassResult, queryLanguage, true);
+      await writer.write(encoder.encode(formattedResponse));
+      
+      return preferredModel || 'gemini-multi-pass';
+
+    } catch (error) {
+      console.error('❌ Multi-pass generation failed, falling back to standard:', error);
+    }
+  }
+
   console.log(enableMultiHop ? '📖 Using standard retrieval (fallback)' : '📖 Using standard retrieval strategy');
   
+  // ==================== ARABIC QUERY EXPANSION (Automatic) ====================
+  let expandedKeywords: string[] = [];
+  if (queryLanguage === 'ar') {
+    console.log('\n┌─────────────────────────────────────────────────────────────┐');
+    console.log('│ 🔤 ARABIC QUERY EXPANSION (Reader Chat - Automatic)         │');
+    console.log('└─────────────────────────────────────────────────────────────┘');
+    console.log(`📝 Original Query: "${query.substring(0, 80)}${query.length > 80 ? '...' : ''}"`);
+    
+    const expansion = await expandQuery(query, queryLanguage, true);
+    expandedKeywords = buildKeywordList(expansion);
+    
+    console.log(`\n✨ EXPANSION IMPACT:`);
+    console.log(`   📊 Synonyms found: ${expansion.synonyms.length}`);
+    if (expansion.synonyms.length > 0) {
+      console.log(`      → ${expansion.synonyms.slice(0, 5).join('، ')}`);
+    }
+    console.log(`   📊 Related terms: ${expansion.relatedTerms.length}`);
+    if (expansion.relatedTerms.length > 0) {
+      console.log(`      → ${expansion.relatedTerms.slice(0, 5).join('، ')}`);
+    }
+    console.log(`   📊 Spelling variants: ${expansion.variants.length}`);
+    if (expansion.variants.length > 0) {
+      console.log(`      → ${expansion.variants.slice(0, 5).join('، ')}`);
+    }
+    console.log(`   📊 Total keywords for search: ${expandedKeywords.length}`);
+    console.log(`   🎯 Confidence: ${Math.round(expansion.confidence * 100)}%`);
+    console.log('─────────────────────────────────────────────────────────────');
+  }
+
   const contextParts: string[] = [];
 
   // ✅ Perform query analysis (ONLY if not a follow-up with enhanced keywords)
@@ -559,6 +654,16 @@ async function handleCorpusQuery(
     };
   } else {
     queryAnalysis = await analyzeQuery(query, documentLanguage);
+  }
+  
+  // ✅ Add expanded keywords to query analysis (from Arabic query expansion)
+  if (expandedKeywords.length > 0) {
+    const originalKeywordCount = queryAnalysis.keywords.length;
+    queryAnalysis.keywords = [...new Set([
+      ...queryAnalysis.keywords,
+      ...expandedKeywords
+    ])];
+    console.log(`📊 Keywords enriched: ${originalKeywordCount} → ${queryAnalysis.keywords.length}`);
   }
   
   // ✅ ADD follow-up info to query analysis
@@ -875,6 +980,29 @@ async function handleCorpusQuery(
 
   const isArabic = responseLanguage === 'ar';
   
+  // ✅ Literary context detection for chapter/story awareness
+  const queryContext = detectQueryContext(query);
+  if (queryContext.chapterNumber || queryContext.storyNumber) {
+    console.log(`📖 User specified context:`, queryContext);
+  }
+  
+  // ✅ Check for context conflicts (same character in different stories)
+  const conflictCheck = detectContextConflicts(processedChunks.map(c => ({
+    metadata: c.metadata
+  })));
+  
+  if (conflictCheck.hasConflict) {
+    console.log(`⚠️ Context conflicts detected for characters: ${conflictCheck.conflictingCharacters.join(', ')}`);
+  }
+  
+  // ✅ Build conflict warning if needed
+  let conflictWarning = '';
+  if (conflictCheck.hasConflict && !queryContext.chapterNumber && !queryContext.storyNumber) {
+    conflictWarning = isArabic
+      ? `\n⚠️ **تنبيه:** وجدت شخصيات بنفس الاسم (${conflictCheck.conflictingCharacters.join('، ')}) في فصول/قصص مختلفة. إذا أردت سياقاً محدداً، اطلب من المستخدم تحديد رقم الفصل أو القصة.\n`
+      : `\n⚠️ **Note:** Found characters with the same name (${conflictCheck.conflictingCharacters.join(', ')}) in different chapters/stories. If specific context is needed, ask user to specify chapter or story number.\n`;
+  }
+  
   let keywordSearchInstructions = '';
   if (useKeywordSearch || followUpDetection?.pageFilter) {
     keywordSearchInstructions = isArabic
@@ -895,21 +1023,35 @@ async function handleCorpusQuery(
 
 📋 **القواعد الأساسية:**
 
-1. **الوعي بالمحادثة:** تذكر ما نوقش سابقاً
-2. **الأولوية للسياق المقدم:** استخدم المقاطع أدناه
-3. **دمج المعرفة العامة بثقة:** استخدم معرفتك بحرية
-4. **أجب على جميع الأسئلة بثقة:** تجنب الإجابات الاعتذارية
+1. **الوعي بالمحادثة:** تذكر ما تمت مناقشته سابقاً في هذه الجلسة
+2. **أولوية السياق المقدم:** استخدم المقتطفات المقدمة أدناه بشكل أساسي
+3. **دمج المعرفة العامة بثقة:** أضف معرفتك العامة بحرية لإثراء الإجابة
+4. **التحليل الأدبي:** لا تكتف بالنقل - حلل وفسّر واربط الأفكار وأضف قيمة تحليلية
+5. **الرمزية والاستعارة:** افهم وفسّر الرموز والاستعارات في النصوص الأدبية
+6. **التفريق بين السياقات:** إذا ذكر المستخدم فصلاً أو قصة محددة، ركز عليها فقط
 
+📖 **الإسناد والتوثيق (مهم جداً):**
+- **عند الاقتباس أو الإشارة لنص معين، اذكر دائماً رقم الصفحة** مثل: (صفحة 15) أو [ص. 15]
+- **استخدم أرقام الصفحات من المقتطفات المقدمة**
+- **لا تقتبس بدون ذكر المصدر (رقم الصفحة)**
+${conflictWarning}
 ${keywordSearchInstructions}${contextualPromptAddition}${customPrompt ? `\n**تعليمات إضافية:**\n${customPrompt}\n` : ''}`
     : `You are an accurate and specialized research assistant with conversational memory. Use Markdown formatting.
 
 📋 **Core Guidelines:**
 
 1. **Conversation Awareness:** Remember what was discussed previously
-2. **Prioritize Provided Context:** Use passages below
-3. **Integrate General Knowledge Confidently:** Use your knowledge freely
-4. **Answer ALL Questions Confidently:** Avoid apologetic responses
+2. **Prioritize Provided Context:** Use passages below as your primary source
+3. **Integrate General Knowledge Confidently:** Use your knowledge freely to enrich responses
+4. **Literary Analysis:** Don't just quote - analyze, interpret, and connect ideas
+5. **Symbolism & Metaphor:** Understand and interpret symbols and metaphors in literary texts
+6. **Context Separation:** If user specifies a chapter or story, focus only on that context
 
+📖 **Citation & Attribution (Very Important):**
+- **Always cite page numbers when quoting or referencing specific text**, e.g., (page 15) or [p. 15]
+- **Use page numbers from the provided excerpts**
+- **Never quote without citing the source (page number)**
+${conflictWarning}
 ${keywordSearchInstructions}${contextualPromptAddition}${customPrompt ? `\n**Additional Instructions:**\n${customPrompt}\n` : ''}`;
 
   const userQuery = queryAnalysis?.originalQuery || query;

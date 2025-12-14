@@ -10,7 +10,6 @@ const FALLBACK_MODELS = [
   'gemini-2.0-flash-exp',
   'gemini-2.5-flash-lite',
   'gemini-2.5-flash',
-  'gemini-2.5-pro',  
 ];
 
 interface QueryAnalysis {
@@ -39,19 +38,57 @@ interface QueryAnalysis {
 }
 
 /**
- * ✅ NEW: Detect page references in queries
- * Handles patterns like:
- * - "in page 6", "on page 6", "page 6"
- * - "صفحة 6", "في صفحة 6", "من صفحة 6"
- * - "check page 6", "look at page 6"
- * - "around page 6", "near page 6"
+ * ✅ Enhanced page reference detection with range support
+ * Detects:
+ * - Single pages: "page 6", "صفحة 6"
+ * - Page ranges: "page 10 to 18", "from page 10 to 18", "pages 10-18"
+ * - Arabic ranges: "من صفحة 10 إلى 18", "صفحات 10-18"
  */
 export function detectPageReference(query: string): {
   pageNumber: number;
+  endPageNumber?: number;  // ✅ NEW: For page ranges
+  isRange: boolean;        // ✅ NEW: Indicates if this is a range
   isExact: boolean;
   context: 'check' | 'search' | 'find' | 'read' | 'general';
 } | null {
-  // Patterns for exact page references
+  
+  // ✅ NEW: Page RANGE patterns (check these first - they're more specific)
+  const rangePatterns = [
+    // English range patterns
+    /(?:from\s*)?page[s]?\s*(\d+)\s*(?:to|through|until|-|–|—)\s*(?:page\s*)?(\d+)/i,
+    /page[s]?\s*(\d+)\s*(?:to|through|until|-|–|—)\s*(\d+)/i,
+    /(?:between\s*)?page[s]?\s*(\d+)\s*(?:and|&)\s*(?:page\s*)?(\d+)/i,
+    /p\.?\s*(\d+)\s*(?:-|–|—|to)\s*(?:p\.?\s*)?(\d+)/i,
+    // "it is from page X to Y" pattern
+    /(?:is\s*)?(?:from\s*)?page\s*(\d+)\s*to\s*(\d+)/i,
+    
+    // Arabic range patterns
+    /(?:من\s*)?صفحة\s*(\d+)\s*(?:إلى|الى|حتى|-|–)\s*(?:صفحة\s*)?(\d+)/i,
+    /صفحات?\s*(\d+)\s*(?:إلى|الى|حتى|-|–|و)\s*(\d+)/i,
+    /(?:بين\s*)?صفحة\s*(\d+)\s*و(?:صفحة\s*)?(\d+)/i,
+    /ص\.?\s*(\d+)\s*(?:-|–|—|إلى)\s*(?:ص\.?\s*)?(\d+)/i,
+  ];
+  
+  // Check range patterns first
+  for (const pattern of rangePatterns) {
+    const match = query.match(pattern);
+    if (match && match[1] && match[2]) {
+      const startPage = parseInt(match[1], 10);
+      const endPage = parseInt(match[2], 10);
+      if (startPage > 0 && endPage > 0 && startPage < 10000 && endPage < 10000 && startPage <= endPage) {
+        console.log(`   📄 PAGE RANGE DETECTED: Pages ${startPage} to ${endPage}`);
+        return {
+          pageNumber: startPage,
+          endPageNumber: endPage,
+          isRange: true,
+          isExact: true,
+          context: 'general',
+        };
+      }
+    }
+  }
+  
+  // Patterns for exact single page references
   const exactPatterns = [
     // English patterns
     /(?:in|on|at|check|look\s*at|see|read|view)\s*page\s*(\d+)/i,
@@ -95,6 +132,7 @@ export function detectPageReference(query: string): {
       if (pageNum > 0 && pageNum < 10000) {
         return {
           pageNumber: pageNum,
+          isRange: false,
           isExact: false,
           context: 'general',
         };
@@ -120,6 +158,7 @@ export function detectPageReference(query: string): {
 
         return {
           pageNumber: pageNum,
+          isRange: false,
           isExact: true,
           context,
         };
@@ -424,10 +463,14 @@ export async function analyzeQuery(
   const queryLang = detectLanguage(query);
   console.log(`   Query language: ${queryLang}, Document language: ${documentLanguage}`);
 
-  // ✅ NEW: Detect page references FIRST
+  // ✅ NEW: Detect page references FIRST (including ranges)
   const pageReference = detectPageReference(query);
   if (pageReference) {
-    console.log(`   📄 Page reference detected: Page ${pageReference.pageNumber} (${pageReference.isExact ? 'exact' : 'approximate'}, context: ${pageReference.context})`);
+    if (pageReference.isRange && pageReference.endPageNumber) {
+      console.log(`   📄 Page RANGE detected: Pages ${pageReference.pageNumber} to ${pageReference.endPageNumber}`);
+    } else {
+      console.log(`   📄 Page reference detected: Page ${pageReference.pageNumber} (${pageReference.isExact ? 'exact' : 'approximate'}, context: ${pageReference.context})`);
+    }
   }
 
   // Translate if languages don't match
