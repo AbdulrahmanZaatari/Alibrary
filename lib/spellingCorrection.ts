@@ -7,7 +7,7 @@ export async function correctSpelling(
   language: 'ar' | 'en',
   aggressive: boolean = false
 ): Promise<string> {
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-lite' });
+  const model = genAI.getGenerativeModel({ model: 'gemma-3-27b-it' });
 
   const prompt = language === 'ar'
     ? `صحح الأخطاء الإملائية في النص التالي. ${aggressive ? 'صحح جميع الأخطاء.' : 'صحح الأخطاء الواضحة فقط، واحتفظ بالكلمات النادرة أو التاريخية.'}

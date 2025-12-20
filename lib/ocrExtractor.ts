@@ -12,9 +12,11 @@ const safetySettings = [
 
 // Gemma models for OCR (high RPD limits)
 const OCR_MODELS = [
-    'gemma-3-27b-it',        // 14,000 RPD - Best quality
-    'gemma-3-12b-it',        // 14,000 RPD - Fallback
-    'gemini-2.5-flash',      // 500 RPD - Last resort
+    'gemma-3-27b-it',      
+    'gemma-3-12b-it',
+    'gemini-2.5-flash-lite',        
+    'gemini-2.5-flash',  
+    'gemini-3.0-flash'   
 ];
 
 /**

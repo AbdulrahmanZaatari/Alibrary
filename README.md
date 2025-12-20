@@ -202,10 +202,10 @@ islamic-research-assistant/
 
 ### Model Selection
 The app supports multiple Gemini models with automatic fallback:
-- **gemini-2.5-pro**: Best quality, slower
-- **gemini-2.5-flash**: Fast and smart (default)
-- **gemini-2.5-flash-lite**: Lightweight
-- **gemini-2.0-flash**: Standard fallback
+- **gemini-3.0-flash**
+- **gemini-2.5-flash**
+- **gemini-2.5-flash-lite**
+-**gemma models: 4b- 12b - 27b**
 
 ### Embedding Configuration
 Located in [`lib/vectorStore.ts`](lib/vectorStore.ts ):

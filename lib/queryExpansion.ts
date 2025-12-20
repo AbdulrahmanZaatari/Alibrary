@@ -6,6 +6,7 @@ const EXPANSION_MODELS = [
   'gemma-3-27b-it',
   'gemma-3-12b-it',
   'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
 ];
 
 /**

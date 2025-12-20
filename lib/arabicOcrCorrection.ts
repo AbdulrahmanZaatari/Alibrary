@@ -9,8 +9,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 const OCR_CORRECTION_MODELS = [
   'gemma-3-27b-it',  // Best for Arabic orthographic correction
   'gemma-3-12b-it',
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-lite',
+  'gemini-2.5-flash-lite',
 ];
 
 /**

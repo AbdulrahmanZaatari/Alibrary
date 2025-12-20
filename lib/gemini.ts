@@ -21,9 +21,9 @@ const OPENROUTER_MODELS = [
 const CHAT_MODELS = [
   'gemma-3-27b-it',
   'gemma-3-12b-it',
-  'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
-  'gemini-2.0-flash'
+  'gemini-2.5-flash',
+  'gemini-3.0-flash'
 ];
 
 
@@ -31,8 +31,8 @@ const RERANK_MODELS = [
   'gemma-3-27b-it',
   'gemma-3-12b-it',
   'gemini-2.5-flash-lite',
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-lite'
+  'gemini-2.5-flash',
+  'gemini-3.0-flash',
 ];
 
 // Embed text using Gemini

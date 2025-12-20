@@ -194,7 +194,7 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     { id: 'gemma-3-12b-it', name: 'Gemma 3 12B It', tier: 'standard' },
     { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Fast & Smart)', tier: 'premium' },
     { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', tier: 'standard' },
-    { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', tier: 'standard' }
+    { id: 'gemini-3.0-flash', name: 'Gemini 3.0 Flash (Best)', tier: 'premium' }
   ];
 
   // Refs

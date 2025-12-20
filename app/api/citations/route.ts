@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
       : '- No metadata available';
 
     // Use AI to generate citation with metadata
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemma-3-27b-it' });
 
     const prompt = `Generate a proper ${citationStyle} citation for this book excerpt.
 

@@ -16,12 +16,10 @@ const BOOKS_BUCKET = 'reader-books';
 // --- User-Requested Fallback Models ---
 const FALLBACK_MODELS = [
   'gemma-3-12b-it',
-  'gemma-3-27b-it',
-  'gemini-2.0-flash', 
-  'gemini-2.0-flash-lite',
-  'gemini-2.0-flash-exp',
+  'gemma-3-27b-it', 
   'gemini-2.5-flash-lite',
   'gemini-2.5-flash',
+  'gemini-3.0-flash'
 ];
 
 // Removed metadataSchema as structured output is no longer being used.

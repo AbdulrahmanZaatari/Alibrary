@@ -128,7 +128,7 @@ function applyRegexCorrections(text: string): string {
 async function aiValidateCorrections(regexCorrected: string, original: string): Promise<string> {
   try {
     const model = genAI.getGenerativeModel({ 
-      model: 'gemini-2.0-flash',
+      model: 'gemma-3-27b-it',
       generationConfig: {
         temperature: 0.05, // ✅ Lower temperature for consistency
         maxOutputTokens: 3000,
