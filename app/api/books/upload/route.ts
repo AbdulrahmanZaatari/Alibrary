@@ -19,7 +19,7 @@ const FALLBACK_MODELS = [
   'gemma-3-27b-it', 
   'gemini-2.5-flash-lite',
   'gemini-2.5-flash',
-  'gemini-3.0-flash'
+  'gemini-3-flash-preview'
 ];
 
 // Removed metadataSchema as structured output is no longer being used.

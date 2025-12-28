@@ -202,7 +202,7 @@ islamic-research-assistant/
 
 ### Model Selection
 The app supports multiple Gemini models with automatic fallback:
-- **gemini-3.0-flash**
+- **gemini-3-flash-preview**
 - **gemini-2.5-flash**
 - **gemini-2.5-flash-lite**
 -**gemma models: 4b- 12b - 27b**
