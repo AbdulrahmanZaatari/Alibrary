@@ -8,6 +8,8 @@ import React from 'react';
 import ResearchDepthSlider, { ResearchDepth, DEPTH_CONFIGS } from './ResearchDepthSlider';
 import QuickResearchButton from './QuickResearchButton';
 import WordScanResults from './WordScanResults';
+import TerminologyAnalysis from './TerminologyAnalysis';
+import CommentsSynthesis from './CommentsSynthesis';
 import { detectWordScanQuery } from '@/lib/wordScanDetection';
 import { 
   ChevronLeft, 
@@ -133,6 +135,10 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [selectedTextForComment, setSelectedTextForComment] = useState('');
   const [expandedCommentId, setExpandedCommentId] = useState<string | null>(null);
   const [commentView, setCommentView] = useState<'current' | 'all'>('current');
+  
+  // ✅ Comments Synthesis State
+  const [showCommentsSynthesis, setShowCommentsSynthesis] = useState(false);
+  
   // Citation State
   const [showCitationMenu, setShowCitationMenu] = useState(false);
   const [citationPosition, setCitationPosition] = useState<{ 
@@ -199,6 +205,9 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   // ✅ Word Scan State
   const [wordScanResult, setWordScanResult] = useState<any | null>(null);
   const [isWordScanning, setIsWordScanning] = useState(false);
+  
+  // ✅ Terminology Analysis State
+  const [showTerminology, setShowTerminology] = useState(false);
 
   const AVAILABLE_MODELS = [
     { id: 'qwen/qwen3-235b-a22b:free', name: 'Qwen 235B (Free - 50/day)', tier: 'free' },
@@ -2135,6 +2144,23 @@ async function extractPageText() {
                     ))}
                   </select>
                 </div>
+
+                {/* ✅ Terminology Analysis Button */}
+                <div>
+                  <button
+                    onClick={() => setShowTerminology(true)}
+                    disabled={selectedCorpus.length === 0}
+                    className="w-full px-3 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium flex items-center justify-center gap-2"
+                  >
+                    <BookOpen size={16} />
+                    تحليل المصطلحات / Terminology Analysis
+                  </button>
+                  {selectedCorpus.length === 0 && (
+                    <p className="text-xs text-slate-500 mt-1 text-center">
+                      Select documents first
+                    </p>
+                  )}
+                </div>
               </div>
             )}
 
@@ -2401,6 +2427,17 @@ async function extractPageText() {
       <div className="flex items-center justify-between mb-3">
         <h3 className="font-semibold text-slate-800">Comments</h3>
         <div className="flex items-center gap-2">
+          {/* ✅ Synthesize Comments Button */}
+          {comments.length >= 2 && (
+            <button
+              onClick={() => setShowCommentsSynthesis(true)}
+              className="px-2 py-1 bg-amber-500 text-white rounded-lg hover:bg-amber-600 text-sm flex items-center gap-1"
+              title="تحليل وتلخيص الملاحظات"
+            >
+              <Sparkles size={14} />
+              ملخص
+            </button>
+          )}
           <button
             onClick={() => setShowCommentDialog(true)}
             className="px-3 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
@@ -2885,6 +2922,42 @@ async function extractPageText() {
     </div>
   </div>
 )}
+
+      {/* ✅ Terminology Analysis Modal */}
+      <TerminologyAnalysis
+        isOpen={showTerminology}
+        onClose={() => setShowTerminology(false)}
+        documentIds={selectedCorpus}
+        bookId={selectedBook?.id}
+        bookTitle={selectedBook?.title}
+        onTermClick={(term) => {
+          // Trigger word scan for this term
+          setShowTerminology(false);
+          // Navigate to word scan for this term
+          setLastUserQuery(`جميع استخدامات كلمة "${term}"`);
+        }}
+        onPageClick={(pageNumber) => {
+          // Navigate to the page
+          if (selectedBook) {
+            setCurrentPage(pageNumber);
+            setShowTerminology(false);
+          }
+        }}
+      />
+
+      {/* ✅ Comments Synthesis Modal */}
+      {selectedBook && (
+        <CommentsSynthesis
+          isOpen={showCommentsSynthesis}
+          onClose={() => setShowCommentsSynthesis(false)}
+          bookId={selectedBook.id}
+          bookTitle={selectedBook.title}
+          onPageClick={(pageNumber) => {
+            setCurrentPage(pageNumber);
+            setShowCommentsSynthesis(false);
+          }}
+        />
+      )}
   </div>
   );
 }

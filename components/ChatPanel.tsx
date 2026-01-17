@@ -7,6 +7,7 @@ import remarkGfm from 'remark-gfm';
 import ResearchDepthSlider, { ResearchDepth, DEPTH_CONFIGS } from './ResearchDepthSlider';
 import QuickResearchButton from './QuickResearchButton';
 import WordScanResults from './WordScanResults';
+import TerminologyAnalysis from './TerminologyAnalysis';
 import { detectWordScanQuery } from '@/lib/wordScanDetection';
 
 /**
@@ -77,6 +78,9 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
   // ✅ Word Scan State
   const [wordScanResult, setWordScanResult] = useState<any | null>(null);
   const [isWordScanning, setIsWordScanning] = useState(false);
+  
+  // ✅ Terminology Analysis State
+  const [showTerminology, setShowTerminology] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -582,6 +586,16 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                 listOutput={listOutput}
                 onListOutputChange={setListOutput}
               />
+
+              {/* ✅ Terminology Analysis Button */}
+              <button
+                onClick={() => setShowTerminology(true)}
+                disabled={selectedDocuments.length === 0}
+                className="w-full px-3 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium flex items-center justify-center gap-2"
+              >
+                <BookOpen size={16} />
+                تحليل المصطلحات / Terminology Analysis
+              </button>
             </div>
           )}
 
@@ -920,6 +934,17 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
           </form>
         </div>
       </div>
+
+      {/* ✅ Terminology Analysis Modal */}
+      <TerminologyAnalysis
+        isOpen={showTerminology}
+        onClose={() => setShowTerminology(false)}
+        documentIds={selectedDocuments}
+        onTermClick={(term) => {
+          setShowTerminology(false);
+          setInput(`جميع استخدامات كلمة "${term}"`);
+        }}
+      />
     </div>
   );
 }

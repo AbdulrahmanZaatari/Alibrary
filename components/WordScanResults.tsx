@@ -115,7 +115,7 @@ export default function WordScanResults({
             </div>
             <div>
               <h3 className="font-bold text-lg">
-                {isArabic ? 'نتائج البحث عن:' : 'Word Scan Results:'} "{data.word}"
+                {isArabic ? 'نتائج البحث عن:' : 'Word Scan Results:'} &quot;{data.word}&quot;
               </h3>
               <p className="text-blue-100 text-sm">
                 {isArabic 
