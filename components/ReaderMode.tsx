@@ -5,6 +5,10 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import React from 'react';
+import ResearchDepthSlider, { ResearchDepth, DEPTH_CONFIGS } from './ResearchDepthSlider';
+import QuickResearchButton from './QuickResearchButton';
+import WordScanResults from './WordScanResults';
+import { detectWordScanQuery } from '@/lib/wordScanDetection';
 import { 
   ChevronLeft, 
   ChevronRight, 
@@ -149,7 +153,6 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [streamingContent, setStreamingContent] = useState<string>(''); 
   const [isStreaming, setIsStreaming] = useState(false); 
   const [chatLoading, setChatLoading] = useState(false);
-  const [enableMultiHop, setEnableMultiHop] = useState(false);
   const [bookSessions, setBookSessions] = useState<Array<{
     id: string;
     name: string;
@@ -184,9 +187,18 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
   const [modelError, setModelError] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
-  const [useReranking, setUseReranking] = useState(true);
-  const [useKeywordSearch, setUseKeywordSearch] = useState(false);
-  const [enableMultiPass, setEnableMultiPass] = useState(false);
+  
+  // ✅ NEW: Research Mode State (replaces individual toggles)
+  const [researchDepth, setResearchDepth] = useState<ResearchDepth>(2);
+  const [verificationMode, setVerificationMode] = useState(false);
+  const [listOutput, setListOutput] = useState(false);
+  
+  // ✅ Last query context for Quick Research button
+  const [lastUserQuery, setLastUserQuery] = useState<string | null>(null);
+  
+  // ✅ Word Scan State
+  const [wordScanResult, setWordScanResult] = useState<any | null>(null);
+  const [isWordScanning, setIsWordScanning] = useState(false);
 
   const AVAILABLE_MODELS = [
     { id: 'qwen/qwen3-235b-a22b:free', name: 'Qwen 235B (Free - 50/day)', tier: 'free' },
@@ -918,6 +930,49 @@ async function extractPageText() {
   }
 }
 
+  // ✅ NEW: Handle word scan queries
+  async function performWordScan(word: string) {
+    setIsWordScanning(true);
+    setWordScanResult(null);
+    
+    try {
+      // Determine which documents to scan - corpus if selected, otherwise try current book's corpus
+      const documentIds = selectedCorpus.length > 0 ? selectedCorpus : [];
+      
+      const response = await fetch('/api/word-scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          word,
+          documentIds
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error('Word scan failed');
+      }
+      
+      const result = await response.json();
+      setWordScanResult(result);
+      
+      // Add a message showing the scan was performed
+      setChatMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `🔍 تم البحث عن "${word}" - النتائج معروضة أدناه`
+      }]);
+      
+    } catch (error) {
+      console.error('Word scan error:', error);
+      setChatMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `❌ فشل البحث عن الكلمة: ${error instanceof Error ? error.message : 'Unknown error'}`
+      }]);
+    } finally {
+      setIsWordScanning(false);
+      setChatLoading(false);
+    }
+  }
+
   async function sendChatMessage(userMessage: string) {
     if (!userMessage.trim() || !selectedBook) return;
 
@@ -925,6 +980,14 @@ async function extractPageText() {
     
     setChatMessages(prev => [...prev, { role: 'user', content: trimmedMessage }]);
     setChatLoading(true);
+    
+    // ✅ Check if this is a word scan query
+    const wordScanDetection = detectWordScanQuery(trimmedMessage);
+    if (wordScanDetection.isWordScan && wordScanDetection.targetWord && selectedCorpus.length > 0) {
+      console.log(`🔍 Detected word scan query for: "${wordScanDetection.targetWord}"`);
+      await performWordScan(wordScanDetection.targetWord);
+      return;
+    }
 
     try {
       if (!currentSessionId) {
@@ -977,6 +1040,9 @@ async function extractPageText() {
     
     const endpoint = '/api/reader-chat';
     
+    // ✅ Get depth configuration for backwards compatibility
+    const depthConfig = DEPTH_CONFIGS[researchDepth];
+    
     const body = {
       message: userMessage,
       sessionId: sessionId,
@@ -987,14 +1053,22 @@ async function extractPageText() {
       extractedText: extractedText || undefined,
       correctSpelling: false, 
       customPrompt: selectedPrompt || '',
-      enableMultiHop: enableMultiHop,
-      enableMultiPass: enableMultiPass,
       preferredModel: selectedModel,
-      useReranking: useKeywordSearch ? false : useReranking,
-      useKeywordSearch: useKeywordSearch,
+      // ✅ NEW: Research mode settings
+      researchDepth,
+      verificationMode,
+      listOutput,
+      // ✅ Legacy flags derived from depth config
+      enableMultiHop: depthConfig.enableMultiHop,
+      enableMultiPass: depthConfig.enableMultiPass,
+      useReranking: depthConfig.useReranking,
+      useKeywordSearch: depthConfig.useKeywordSearch,
     };
+    
+    // ✅ Store last query for Quick Research button
+    setLastUserQuery(userMessage);
 
-    console.log('🔄 Sending to:', endpoint, 'Model:', selectedModel);
+    console.log('🔄 Sending to:', endpoint, 'Model:', selectedModel, 'Depth:', researchDepth);
 
     setModelError(null);
     setUsedModel(null);
@@ -2000,29 +2074,16 @@ async function extractPageText() {
                   )}
                 </div>
 
-                <div className="flex items-center justify-between p-2 bg-gray-50 rounded">
-                  <div className="flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-purple-600" />
-                    <span className="text-xs font-medium">AI Reranking</span>
-                  </div>
-                  <button
-                    onClick={() => setUseReranking(!useReranking)}
-                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                      useReranking ? 'bg-purple-600' : 'bg-gray-300'
-                    }`}
-                  >
-                    <span
-                      className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                        useReranking ? 'translate-x-5' : 'translate-x-1'
-                      }`}
-                    />
-                  </button>
-                </div>
-                <p className="text-xs text-gray-500 mt-1">
-                  {useReranking 
-                    ? "Using AI to select 15 most relevant passages" 
-                    : "Returning up to 50 passages without AI filtering"}
-                </p>
+                {/* ✅ NEW: Research Depth Slider - replaces all toggles */}
+                <ResearchDepthSlider
+                  depth={researchDepth}
+                  onDepthChange={setResearchDepth}
+                  verificationMode={verificationMode}
+                  onVerificationChange={setVerificationMode}
+                  listOutput={listOutput}
+                  onListOutputChange={setListOutput}
+                  compact={true}
+                />
 
                 {/* Corpus Selection */}
                 <div>
@@ -2074,67 +2135,6 @@ async function extractPageText() {
                     ))}
                   </select>
                 </div>
-
-                {/* Keyword-First Search Toggle */}
-              <div className="flex items-center justify-between p-2 bg-amber-50 rounded border border-amber-200">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2">
-                    <FileText className="w-4 h-4 text-amber-600" />
-                    <span className="text-xs font-medium text-amber-900">Keyword Search</span>
-                  </div>
-                  <p className="text-xs text-amber-700 mt-1">
-                    Find ALL exact word occurrences
-                  </p>
-                </div>
-                <button
-                  onClick={() => {
-                    setUseKeywordSearch(!useKeywordSearch);
-                    if (!useKeywordSearch) {
-                      setUseReranking(false); // Auto-disable reranking
-                    }
-                  }}
-                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                    useKeywordSearch ? 'bg-amber-600' : 'bg-gray-300'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                      useKeywordSearch ? 'translate-x-5' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              {useKeywordSearch && (
-                <div className="p-2 bg-amber-100 rounded text-xs text-amber-800 space-y-1">
-                  <p><strong>🔑 Keyword Mode:</strong> Searches for exact text matches</p>
-                  <p><strong>✅ Best for:</strong> Finding specific Arabic words/phrases</p>
-                  <p><strong>📊 Returns:</strong> Up to 150 passages with matches</p>
-                  <p><strong>⚠️ Note:</strong> Bypasses AI embeddings completely</p>
-                </div>
-              )}
-
-                {/* Multi-Hop Reasoning */}
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={enableMultiHop}
-                    onChange={(e) => setEnableMultiHop(e.target.checked)}
-                    className="rounded text-blue-600 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-slate-700">Enable Multi-Hop Reasoning</span>
-                </label>
-
-                {/* Multi-Pass Generation */}
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={enableMultiPass}
-                    onChange={(e) => setEnableMultiPass(e.target.checked)}
-                    className="rounded text-purple-600 focus:ring-purple-500"
-                  />
-                  <span className="text-sm text-slate-700">Multi-Pass Generation</span>
-                </label>
               </div>
             )}
 
@@ -2220,6 +2220,62 @@ async function extractPageText() {
                     <div className="flex items-center gap-2 text-sm text-blue-600">
                       <Loader2 className="animate-spin" size={16} />
                       <span>Receiving response...</span>
+                    </div>
+                  )}
+                  
+                  {/* ✅ Word Scan Results Display */}
+                  {wordScanResult && (
+                    <WordScanResults
+                      data={wordScanResult}
+                      onClose={() => setWordScanResult(null)}
+                      onGoToPage={(pageNumber) => {
+                        setCurrentPage(pageNumber);
+                      }}
+                      isArabic={true}
+                    />
+                  )}
+                  
+                  {/* Word Scanning Indicator */}
+                  {isWordScanning && (
+                    <div className="flex items-center gap-2 text-sm text-blue-600 p-3 bg-blue-50 rounded-lg">
+                      <Loader2 className="animate-spin" size={16} />
+                      <span>جاري البحث عن جميع الحالات...</span>
+                    </div>
+                  )}
+                  
+                  {/* ✅ Quick Research Button - shows after last response */}
+                  {chatMessages.length > 0 && 
+                   chatMessages[chatMessages.length - 1].role === 'assistant' && 
+                   !isStreaming && 
+                   lastUserQuery && (
+                    <div className="mt-2 pt-2 border-t border-slate-100">
+                      <QuickResearchButton
+                        compact
+                        disabled={chatLoading || isStreaming}
+                        onResearch={(mode) => {
+                          // Set appropriate depth/modes based on quick action
+                          if (mode === 'deeper') {
+                            setResearchDepth(3);
+                            setVerificationMode(false);
+                            setListOutput(false);
+                          } else if (mode === 'verify') {
+                            setResearchDepth(2);
+                            setVerificationMode(true);
+                            setListOutput(true);
+                          } else { // list
+                            setResearchDepth(4);
+                            setVerificationMode(false);
+                            setListOutput(true);
+                          }
+                          // Re-send the last query with new settings
+                          const prefix = mode === 'deeper' 
+                            ? 'Search deeper: '
+                            : mode === 'verify'
+                            ? 'Verify with evidence for and against: '
+                            : 'List all occurrences of: ';
+                          sendChatMessage(prefix + lastUserQuery);
+                        }}
+                      />
                     </div>
                   )}
                   <div ref={messagesEndRef} />

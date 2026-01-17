@@ -26,6 +26,7 @@ import {
 import { performMultiPassGeneration, formatMultiPassResult } from '@/lib/multiPassGeneration';
 import { expandQuery, buildKeywordList } from '@/lib/queryExpansion';
 import { detectQueryContext, detectContextConflicts } from '@/lib/literaryPrompts';
+import { detectPageRange } from '@/lib/wordScanDetection';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -243,7 +244,11 @@ export async function POST(req: NextRequest) {
         useReranking = true,
         useKeywordSearch = false,
         cachedChunks,
-        reuseCachedContext = false
+        reuseCachedContext = false,
+        // ✅ NEW: Research mode settings
+        researchDepth = 2,
+        verificationMode = false,
+        listOutput = false,
       } = body;
 
       const userMessage = message || query;
@@ -258,7 +263,10 @@ export async function POST(req: NextRequest) {
         preferredModel,
         useKeywordSearch,
         hasCachedChunks: !!cachedChunks,
-        reuseCachedContext
+        reuseCachedContext,
+        researchDepth,
+        verificationMode,
+        listOutput
       });
 
       if (!userMessage) {
@@ -396,7 +404,10 @@ export async function POST(req: NextRequest) {
           useKeywordSearch,
           followUpDetection,
           cachedChunks,
-          reuseCachedContext
+          reuseCachedContext,
+          // ✅ NEW: Pass research mode settings
+          verificationMode,
+          listOutput
         );
         
         modelUsed = usedModel;
@@ -465,7 +476,10 @@ async function handleCorpusQuery(
     pageFilter?: number;
   },
   cachedChunks?: any[],
-  reuseCachedContext: boolean = false
+  reuseCachedContext: boolean = false,
+  // ✅ NEW: Research mode settings
+  verificationMode: boolean = false,
+  listOutput: boolean = false
 ): Promise<string> {
   let conversationContextString = '';
   let contextualPromptAddition = '';
@@ -515,6 +529,18 @@ async function handleCorpusQuery(
   const responseLanguage = queryLanguage;
   console.log(`💬 Response will be in: ${responseLanguage}`);
 
+  // ✅ Detect page range in query
+  const pageRangeDetection = detectPageRange(query);
+  let pageRange: { startPage: number; endPage: number } | undefined;
+  
+  if (pageRangeDetection.hasPageRange && pageRangeDetection.startPage && pageRangeDetection.endPage) {
+    pageRange = {
+      startPage: pageRangeDetection.startPage,
+      endPage: pageRangeDetection.endPage
+    };
+    console.log(`📄 Page range detected: ${pageRange.startPage} - ${pageRange.endPage} (confidence: ${pageRangeDetection.confidence})`);
+  }
+
   const requiresMultiHop = enableMultiHop && isComplexQuery(query);
   
   if (requiresMultiHop) {
@@ -526,7 +552,10 @@ async function handleCorpusQuery(
         documentIds,
         docLanguages,
         4,
-        responseLanguage
+        responseLanguage,
+        false, // correctSpelling
+        false, // aggressiveCorrection
+        pageRange // Pass page range filter
       );
       
       let conversationPrefix = '';
@@ -869,6 +898,39 @@ async function handleCorpusQuery(
     console.log(`💾 Cached ${processedChunks.length} chunks with ${keywords.length} keywords`);
   }
 
+  // ✅ Apply page range filter if detected (for standard retrieval path)
+  if (pageRange && processedChunks.length > 0) {
+    const originalCount = processedChunks.length;
+    processedChunks = processedChunks.filter(chunk => {
+      const pageNum = chunk.page_number || chunk.metadata?.page_number;
+      return pageNum >= pageRange.startPage && pageNum <= pageRange.endPage;
+    });
+    console.log(`📄 Page range filter applied: ${originalCount} → ${processedChunks.length} chunks (pages ${pageRange.startPage}-${pageRange.endPage})`);
+    
+    // If filtering removed all chunks, fetch specifically from those pages
+    if (processedChunks.length === 0) {
+      console.log(`⚠️ No chunks in page range, fetching directly from pages ${pageRange.startPage}-${pageRange.endPage}`);
+      
+      const { data: pageChunks, error } = await supabaseAdmin
+        .from('embeddings')
+        .select('*')
+        .in('document_id', documentIds)
+        .gte('page_number', pageRange.startPage)
+        .lte('page_number', pageRange.endPage)
+        .order('page_number', { ascending: true });
+      
+      if (!error && pageChunks && pageChunks.length > 0) {
+        processedChunks = pageChunks.map(chunk => ({
+          ...chunk,
+          chunk_text: chunk.chunk_text,
+          content: chunk.chunk_text,
+          similarity: 1.0
+        }));
+        console.log(`✅ Direct fetch: ${processedChunks.length} chunks from pages ${pageRange.startPage}-${pageRange.endPage}`);
+      }
+    }
+  }
+
   console.log(`\n📊 Final Retrieval Summary:
    - Strategy: ${retrievalStrategy}
    - Chunks: ${processedChunks.length}
@@ -1016,6 +1078,116 @@ async function handleCorpusQuery(
    - **Do not summarize - list everything found**\n`;
   }
   
+  // ✅ NEW: Verification Mode Instructions
+  let verificationInstructions = '';
+  if (verificationMode) {
+    verificationInstructions = isArabic
+      ? `\n\n⚖️ **وضع التحقق (البحث عن أدلة مؤيدة ومعارضة):**
+
+**تنسيق الإخراج المطلوب:**
+
+## ✅ أدلة مؤيدة
+لكل دليل:
+📄 **صفحة X** - [اسم المستند]
+> "الاقتباس المباشر..."
+🏷️ السياق: [ملاحظة مختصرة]
+
+---
+
+## ⚠️ أدلة معارضة أو مخففة
+[نفس التنسيق]
+
+---
+
+## ⚖️ التقييم
+- قوة الأدلة المؤيدة: [قوية/متوسطة/ضعيفة]
+- قوة الأدلة المعارضة: [قوية/متوسطة/ضعيفة]
+- الخلاصة: [جملة واحدة]
+
+**مهم: ابحث بنشاط عن الأدلة المعارضة، لا تكتفِ بالمؤيدة فقط**\n`
+      : `\n\n⚖️ **VERIFICATION MODE (Search for supporting AND opposing evidence):**
+
+**Required Output Format:**
+
+## ✅ Supporting Evidence
+For each piece of evidence:
+📄 **Page X** - [Document Name]
+> "Direct quote..."
+🏷️ Context: [Brief 1-line note]
+
+---
+
+## ⚠️ Opposing or Nuancing Evidence
+[Same format]
+
+---
+
+## ⚖️ Assessment
+- Strength of supporting evidence: [Strong/Moderate/Weak]
+- Strength of opposing evidence: [Strong/Moderate/Weak]
+- Conclusion: [One sentence]
+
+**Important: Actively search for opposing evidence, don't just confirm**\n`;
+  }
+  
+  // ✅ NEW: List Output Mode Instructions
+  let listOutputInstructions = '';
+  if (listOutput && !verificationMode) {
+    listOutputInstructions = isArabic
+      ? `\n\n�🚨🚨 **تحذير: وضع القائمة الصارم - ممنوع التحليل** 🚨🚨🚨
+
+**أنت الآن في وضع جمع الأدلة فقط. مهمتك الوحيدة هي سرد النتائج.**
+
+⛔ **ممنوع منعاً باتاً:**
+- ❌ لا تكتب أي تحليل أدبي أو رمزي
+- ❌ لا تكتب أي تعليقات أو تفسيرات
+- ❌ لا تكتب أي استنتاجات أو ملخصات
+- ❌ لا تكتب أي مقدمة أو خاتمة تحليلية
+- ❌ لا تضف أي قيمة تحليلية - فقط اسرد ما وجدته
+
+✅ **المطلوب فقط:**
+اسرد كل حالة بهذا الشكل الدقيق:
+
+📄 **ص. X**
+> "الاقتباس الحرفي من النص"
+
+📄 **ص. Y**
+> "الاقتباس التالي"
+
+(وهكذا لكل حالة...)
+
+---
+**المجموع:** X حالات
+
+⚠️ **تذكير أخير: لا تحلل - فقط اسرد. أي تحليل يعتبر خطأ.**\n`
+      : `\n\n🚨🚨🚨 **WARNING: STRICT LIST MODE - NO ANALYSIS ALLOWED** 🚨🚨🚨
+
+**You are now in evidence collection mode. Your ONLY task is to list findings.**
+
+⛔ **ABSOLUTELY FORBIDDEN:**
+- ❌ NO literary or symbolic analysis
+- ❌ NO commentary or interpretations  
+- ❌ NO conclusions or summaries
+- ❌ NO introductions or analytical endings
+- ❌ NO added value analysis - just list what you found
+
+✅ **REQUIRED OUTPUT ONLY:**
+List each occurrence in this exact format:
+
+📄 **p. X**
+> "Exact quote from text"
+
+📄 **p. Y**
+> "Next quote"
+
+(continue for each occurrence...)
+
+---
+**Total:** X occurrences
+
+⚠️ **FINAL REMINDER: Do NOT analyze - just LIST. Any analysis is an error.**\n`;
+  }
+  
   const systemPrompt = isArabic
     ? `أنت مساعد بحثي دقيق ومتخصص يتذكر السياق. استخدم تنسيق Markdown في إجاباتك.
 
@@ -1035,7 +1207,7 @@ async function handleCorpusQuery(
 - **استخدم أرقام الصفحات من المقتطفات المقدمة**
 - **لا تقتبس بدون ذكر المصدر (رقم الصفحة)**
 ${conflictWarning}
-${keywordSearchInstructions}${contextualPromptAddition}${customPrompt ? `\n**تعليمات إضافية:**\n${customPrompt}\n` : ''}`
+${keywordSearchInstructions}${verificationInstructions}${listOutputInstructions}${contextualPromptAddition}${customPrompt ? `\n**تعليمات إضافية:**\n${customPrompt}\n` : ''}`
     : `You are an accurate and specialized research assistant with conversational memory. Use Markdown formatting.
 
 📋 **Core Guidelines:**
@@ -1052,7 +1224,7 @@ ${keywordSearchInstructions}${contextualPromptAddition}${customPrompt ? `\n**ت�
 - **Use page numbers from the provided excerpts**
 - **Never quote without citing the source (page number)**
 ${conflictWarning}
-${keywordSearchInstructions}${contextualPromptAddition}${customPrompt ? `\n**Additional Instructions:**\n${customPrompt}\n` : ''}`;
+${keywordSearchInstructions}${verificationInstructions}${listOutputInstructions}${contextualPromptAddition}${customPrompt ? `\n**Additional Instructions:**\n${customPrompt}\n` : ''}`;
 
   const userQuery = queryAnalysis?.originalQuery || query;
 

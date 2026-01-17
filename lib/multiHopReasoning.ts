@@ -68,13 +68,17 @@ export async function performMultiHopReasoning(
   maxHops: number = 4,
   responseLanguage: 'ar' | 'en' = 'ar',
   correctSpelling: boolean = false,
-  aggressiveCorrection: boolean = false
+  aggressiveCorrection: boolean = false,
+  pageRange?: { startPage: number; endPage: number }
 ): Promise<MultiHopResult> {
   console.log(`\n🧠 ========== MULTI-HOP REASONING STARTED ==========`);
   console.log(`📋 Query: "${complexQuery}"`);
   console.log(`📚 Documents: ${documentIds.length}`);
   console.log(`🔄 Max hops: ${maxHops}`);
   console.log(`🗣️ Language: ${responseLanguage}`);
+  if (pageRange) {
+    console.log(`📄 Page filter: ${pageRange.startPage} - ${pageRange.endPage}`);
+  }
   
   const steps: ReasoningStep[] = [];
   let currentQuery = complexQuery;
@@ -94,12 +98,22 @@ export async function performMultiHopReasoning(
     const embedding = await embedText(currentQuery);
     
     // ✅ STEP 2: Retrieve relevant evidence
-    const chunks = await searchSimilarChunks(
+    let chunks = await searchSimilarChunks(
       embedding,
       documentIds,
-      15,
+      pageRange ? 50 : 15, // Get more chunks if filtering by page
       0.30
     );
+    
+    // ✅ STEP 2.5: Filter by page range if specified
+    if (pageRange && chunks.length > 0) {
+      const originalCount = chunks.length;
+      chunks = chunks.filter(chunk => {
+        const pageNum = chunk.page_number || chunk.metadata?.page_number;
+        return pageNum >= pageRange.startPage && pageNum <= pageRange.endPage;
+      });
+      console.log(`📄 Page filter applied: ${originalCount} → ${chunks.length} chunks (pages ${pageRange.startPage}-${pageRange.endPage})`);
+    }
     
     let stepUsedGeneralKnowledge = false;
     

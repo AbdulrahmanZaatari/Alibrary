@@ -33,7 +33,11 @@ export async function POST(request: NextRequest) {
         multiPassCount = 2,
         preferredModel,
         useReranking = true,
-        useKeywordSearch = false
+        useKeywordSearch = false,
+        // ✅ NEW: Research mode settings
+        researchDepth = 2,
+        verificationMode = false,
+        listOutput = false,
       } = await request.json();
 
       const queryLanguage = detectQueryLanguage(query);
@@ -41,7 +45,7 @@ export async function POST(request: NextRequest) {
       console.log('📝 Query:', query);
       console.log('📚 Documents:', documentIds?.length || 0);
       console.log('🌐 Language:', queryLanguage);
-      console.log('⚙️ Options:', { enableMultiPass, useReranking, useKeywordSearch });
+      console.log('⚙️ Options:', { enableMultiPass, useReranking, useKeywordSearch, researchDepth, verificationMode, listOutput });
 
       if (!query || !documentIds || documentIds.length === 0) {
         await writer.write(encoder.encode(
@@ -212,6 +216,104 @@ export async function POST(request: NextRequest) {
         multiDocInstruction = '\n\n**IMPORTANT:** Multiple documents are provided. Analyze information from ALL documents and synthesize findings.\n\n';
       }
 
+      // ✅ NEW: Build verification and list output instructions
+      let modeInstructions = '';
+      
+      if (verificationMode) {
+        modeInstructions = queryLanguage === 'ar'
+          ? `\n\n⚖️ **وضع التحقق:**
+اتبع هذا التنسيق بالضبط:
+
+## ✅ أدلة مؤيدة
+لكل دليل:
+📄 **صفحة X** - [اسم المستند]
+> "الاقتباس المباشر..."
+🏷️ السياق: [ملاحظة مختصرة]
+
+---
+
+## ⚠️ أدلة معارضة أو مخففة
+[نفس التنسيق]
+
+---
+
+## ⚖️ التقييم
+- قوة الأدلة المؤيدة: [قوية/متوسطة/ضعيفة]
+- قوة الأدلة المعارضة: [قوية/متوسطة/ضعيفة]
+- الخلاصة: [جملة واحدة]
+
+**ابحث بنشاط عن الأدلة المعارضة!**\n`
+          : `\n\n⚖️ **VERIFICATION MODE:**
+Follow this format exactly:
+
+## ✅ Supporting Evidence
+📄 **Page X** - [Document Name]
+> "Direct quote..."
+🏷️ Context: [Brief note]
+
+---
+
+## ⚠️ Opposing/Nuancing Evidence
+[Same format]
+
+---
+
+## ⚖️ Assessment
+- Supporting evidence strength: [Strong/Moderate/Weak]
+- Opposing evidence strength: [Strong/Moderate/Weak]
+- Conclusion: [One sentence]
+
+**Actively search for opposing evidence!**\n`;
+      } else if (listOutput) {
+        modeInstructions = queryLanguage === 'ar'
+          ? `\n\n�🚨🚨 **تحذير: وضع القائمة الصارم - ممنوع التحليل** 🚨🚨🚨
+
+**أنت الآن في وضع جمع الأدلة فقط. مهمتك الوحيدة هي سرد النتائج.**
+
+⛔ **ممنوع منعاً باتاً:**
+- ❌ لا تكتب أي تحليل أدبي أو رمزي
+- ❌ لا تكتب أي تعليقات أو تفسيرات
+- ❌ لا تكتب أي استنتاجات أو ملخصات
+- ❌ لا تكتب أي مقدمة أو خاتمة تحليلية
+
+✅ **المطلوب فقط:**
+اسرد كل حالة بهذا الشكل الدقيق:
+
+📄 **ص. X**
+> "الاقتباس الحرفي من النص"
+
+📄 **ص. Y**
+> "الاقتباس التالي"
+
+---
+**المجموع:** X حالات
+
+⚠️ **لا تحلل - فقط اسرد!**\n`
+          : `\n\n🚨🚨🚨 **WARNING: STRICT LIST MODE - NO ANALYSIS** 🚨🚨🚨
+
+**You are in evidence collection mode. Your ONLY task is to list findings.**
+
+⛔ **ABSOLUTELY FORBIDDEN:**
+- ❌ NO literary or symbolic analysis
+- ❌ NO commentary or interpretations
+- ❌ NO conclusions or summaries
+- ❌ NO introductions or analytical endings
+
+✅ **REQUIRED OUTPUT ONLY:**
+List each occurrence in this exact format:
+
+📄 **p. X**
+> "Exact quote from text"
+
+📄 **p. Y**
+> "Next quote"
+
+---
+**Total:** X occurrences
+
+⚠️ **Do NOT analyze - just LIST!**\n`;
+      }
+
       const prompt = `You are an expert literary and research assistant with deep knowledge of Arabic and Islamic studies.
 
 **RESPONSE STRATEGY:**
@@ -228,7 +330,7 @@ export async function POST(request: NextRequest) {
 - For narrative questions, discuss themes, character development, symbolism
 - Only say "insufficient information" if excerpts are truly unrelated
 
-${multiDocInstruction}**Document Excerpts:**
+${multiDocInstruction}${modeInstructions}**Document Excerpts:**
 
 ${documentContexts}
 

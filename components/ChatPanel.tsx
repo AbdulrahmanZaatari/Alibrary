@@ -1,9 +1,13 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Send, Loader2, Sparkles, BookOpen, FileText, Trash2, Plus, Settings, X, Copy, Pencil } from 'lucide-react';
+import { Send, Loader2, Sparkles, BookOpen, FileText, Trash2, Plus, Settings, X, Copy, Pencil, Check } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import ResearchDepthSlider, { ResearchDepth, DEPTH_CONFIGS } from './ResearchDepthSlider';
+import QuickResearchButton from './QuickResearchButton';
+import WordScanResults from './WordScanResults';
+import { detectWordScanQuery } from '@/lib/wordScanDetection';
 
 /**
  * Detect text direction based on content
@@ -56,18 +60,23 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [mode, setMode] = useState<'corpus' | 'general'>('corpus');
   const [showSettings, setShowSettings] = useState(false);
-  const [enableMultiHop, setEnableMultiHop] = useState(false);
   
   // ✅ NEW: Model Selection State
   const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
   const [modelError, setModelError] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
-  const [useReranking, setUseReranking] = useState(true);
-  const [useKeywordSearch, setUseKeywordSearch] = useState(false); // ✅ Exhaustive keyword search
   
-  // ✅ NEW: Multi-Pass Generation
-  const [enableMultiPass, setEnableMultiPass] = useState(false);
-  const [multiPassCount, setMultiPassCount] = useState<2 | 3>(2);
+  // ✅ NEW: Research Mode State (replaces individual toggles)
+  const [researchDepth, setResearchDepth] = useState<ResearchDepth>(2);
+  const [verificationMode, setVerificationMode] = useState(false);
+  const [listOutput, setListOutput] = useState(false);
+  
+  // ✅ Last query context for Quick Research button
+  const [lastUserQuery, setLastUserQuery] = useState<string | null>(null);
+  
+  // ✅ Word Scan State
+  const [wordScanResult, setWordScanResult] = useState<any | null>(null);
+  const [isWordScanning, setIsWordScanning] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -192,6 +201,52 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
     }
   };
 
+  // ✅ NEW: Handle word scan queries
+  const performWordScan = async (word: string) => {
+    setIsWordScanning(true);
+    setWordScanResult(null);
+    
+    try {
+      const response = await fetch('/api/word-scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          word,
+          documentIds: selectedDocuments
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error('Word scan failed');
+      }
+      
+      const result = await response.json();
+      setWordScanResult(result);
+      
+      // Add a message showing the scan was performed
+      const scanMessage: Message = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: `🔍 تم البحث عن "${word}" - النتائج معروضة أدناه`,
+        timestamp: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, scanMessage]);
+      
+    } catch (error) {
+      console.error('Word scan error:', error);
+      const errorMessage: Message = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: `❌ فشل البحث عن الكلمة: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        timestamp: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsWordScanning(false);
+      setLoading(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || loading || !currentSession) return;
@@ -215,6 +270,20 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
     setInput('');
     setLoading(true);
     setModelError(null); // ✅ Clear previous errors
+    setLastUserQuery(userMessageContent); // ✅ Store for Quick Research
+
+    // ✅ Check if this is a word scan query (only in corpus mode)
+    if (mode === 'corpus' && selectedDocuments.length > 0) {
+      const wordScanDetection = detectWordScanQuery(userMessageContent);
+      if (wordScanDetection.isWordScan && wordScanDetection.targetWord) {
+        console.log(`🔍 Detected word scan query for: "${wordScanDetection.targetWord}"`);
+        await performWordScan(wordScanDetection.targetWord);
+        return;
+      }
+    }
+
+    // ✅ Get depth configuration for backwards compatibility
+    const depthConfig = DEPTH_CONFIGS[researchDepth];
 
     try {
       const endpoint = mode === 'corpus' ? '/api/query' : '/api/chat';
@@ -222,26 +291,34 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
         ? { 
             query: userMessageContent, 
             documentIds: selectedDocuments,
-            enableMultiHop,
-            enableMultiPass,
-            multiPassCount,
             preferredModel: selectedModel,
-            useReranking,
-            useKeywordSearch
+            // ✅ NEW: Research mode settings
+            researchDepth,
+            verificationMode,
+            listOutput,
+            // ✅ Legacy flags derived from depth config
+            enableMultiHop: depthConfig.enableMultiHop,
+            enableMultiPass: depthConfig.enableMultiPass,
+            useReranking: depthConfig.useReranking,
+            useKeywordSearch: depthConfig.useKeywordSearch
           }
         : { 
             message: userMessageContent, 
             sessionId: currentSession,
             documentIds: selectedDocuments.length > 0 ? selectedDocuments : undefined,
-            enableMultiHop,
-            enableMultiPass,
-            multiPassCount,
             preferredModel: selectedModel,
-            useReranking,
-            useKeywordSearch
+            // ✅ NEW: Research mode settings
+            researchDepth,
+            verificationMode,
+            listOutput,
+            // ✅ Legacy flags derived from depth config
+            enableMultiHop: depthConfig.enableMultiHop,
+            enableMultiPass: depthConfig.enableMultiPass,
+            useReranking: depthConfig.useReranking,
+            useKeywordSearch: depthConfig.useKeywordSearch
           };
 
-      console.log('🔄 Sending request:', { endpoint, mode, enableMultiHop, enableMultiPass, model: selectedModel, useKeywordSearch, hasDocuments: selectedDocuments.length > 0 });
+      console.log('🔄 Sending request:', { endpoint, mode, depth: researchDepth, verificationMode, listOutput, model: selectedModel, hasDocuments: selectedDocuments.length > 0 });
 
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -462,7 +539,7 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
             </div>
           </div>
 
-          {/* ✅ UPDATED: Settings Panel with Model Selection */}
+          {/* ✅ UPDATED: Settings Panel with Research Depth Slider */}
           {showSettings && (
             <div className="mb-3 p-4 bg-slate-50 rounded-lg space-y-4">
               {/* Model Selection */}
@@ -496,77 +573,15 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                 )}
               </div>
 
-              {/* Multi-Hop Reasoning */}
-              <div className="flex items-center justify-between">
-                <div>
-                  <label className="text-sm font-medium text-slate-700">Multi-Hop Reasoning</label>
-                  <p className="text-xs text-slate-500 mt-0.5">For complex analysis questions</p>
-                </div>
-                <button
-                  onClick={() => setEnableMultiHop(!enableMultiHop)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                    enableMultiHop 
-                      ? 'bg-blue-600 text-white' 
-                      : 'bg-slate-200 text-slate-700'
-                  }`}
-                >
-                  {enableMultiHop ? 'ON' : 'OFF'}
-                </button>
-              </div>
-
-              {/* Reranking Toggle */}
-              <div className="flex items-center justify-between">
-                <div>
-                  <label className="text-sm font-medium text-slate-700">Reranking</label>
-                  <p className="text-xs text-slate-500 mt-0.5">Improve result relevance</p>
-                </div>
-                <button
-                  onClick={() => setUseReranking(!useReranking)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                    useReranking 
-                      ? 'bg-emerald-600 text-white' 
-                      : 'bg-slate-200 text-slate-700'
-                  }`}
-                >
-                  {useReranking ? 'ON' : 'OFF'}
-                </button>
-              </div>
-
-              {/* Exhaustive Keyword Search Toggle */}
-              <div className="flex items-center justify-between">
-                <div>
-                  <label className="text-sm font-medium text-slate-700">Exhaustive Keyword Search</label>
-                  <p className="text-xs text-slate-500 mt-0.5">Find all keyword matches</p>
-                </div>
-                <button
-                  onClick={() => setUseKeywordSearch(!useKeywordSearch)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                    useKeywordSearch 
-                      ? 'bg-orange-600 text-white' 
-                      : 'bg-slate-200 text-slate-700'
-                  }`}
-                >
-                  {useKeywordSearch ? 'ON' : 'OFF'}
-                </button>
-              </div>
-
-              {/* Multi-Pass Mode Toggle */}
-              <div className="flex items-center justify-between">
-                <div>
-                  <label className="text-sm font-medium text-slate-700">Multi-Pass Generation</label>
-                  <p className="text-xs text-slate-500 mt-0.5">Draft → Gap analysis → Refined answer</p>
-                </div>
-                <button
-                  onClick={() => setEnableMultiPass(!enableMultiPass)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                    enableMultiPass 
-                      ? 'bg-purple-600 text-white' 
-                      : 'bg-slate-200 text-slate-700'
-                  }`}
-                >
-                  {enableMultiPass ? 'ON' : 'OFF'}
-                </button>
-              </div>
+              {/* ✅ NEW: Research Depth Slider - replaces all toggles */}
+              <ResearchDepthSlider
+                depth={researchDepth}
+                onDepthChange={setResearchDepth}
+                verificationMode={verificationMode}
+                onVerificationChange={setVerificationMode}
+                listOutput={listOutput}
+                onListOutputChange={setListOutput}
+              />
             </div>
           )}
 
@@ -579,9 +594,14 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                   : `Searching ${selectedDocuments.length} document${selectedDocuments.length > 1 ? 's' : ''}`
                 }
               </span>
-              {enableMultiHop && selectedDocuments.length > 0 && (
+              {researchDepth >= 3 && selectedDocuments.length > 0 && (
                 <span className="ml-auto text-xs text-blue-600 font-medium">
-                  🧠 Multi-hop enabled
+                  🧠 {researchDepth === 4 ? 'Exhaustive' : 'Deep'} search
+                </span>
+              )}
+              {verificationMode && (
+                <span className="ml-auto text-xs text-indigo-600 font-medium">
+                  ⚖️ Verification mode
                 </span>
               )}
             </div>
@@ -593,9 +613,9 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
               <span className="text-sm text-blue-800">
                 Using {selectedDocuments.length} document{selectedDocuments.length > 1 ? 's' : ''} as context
               </span>
-              {enableMultiHop && (
+              {researchDepth >= 3 && (
                 <span className="ml-auto text-xs text-blue-600 font-medium">
-                  🧠 Multi-hop enabled
+                  🧠 {researchDepth === 4 ? 'Exhaustive' : 'Deep'} search
                 </span>
               )}
             </div>
@@ -624,9 +644,14 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                     ⚠️ Please select documents from the corpus library first
                   </p>
                 )}
-                {enableMultiHop && selectedDocuments.length > 0 && (
+                {researchDepth >= 3 && selectedDocuments.length > 0 && (
                   <p className="text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded-lg p-3 mt-2">
-                    🧠 Multi-hop reasoning is enabled for complex queries
+                    🧠 {researchDepth === 4 ? 'Exhaustive search' : 'Deep search with multi-hop reasoning'} is enabled
+                  </p>
+                )}
+                {verificationMode && (
+                  <p className="text-sm text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg p-3 mt-2">
+                    ⚖️ Verification mode: Will search for supporting and opposing evidence
                   </p>
                 )}
               </div>
@@ -777,6 +802,68 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                   )}
                 </div>
               ))}
+              
+              {/* ✅ Quick Research Button - shows after last response */}
+              {messages.length > 0 && 
+               messages[messages.length - 1].role === 'assistant' && 
+               !loading && 
+               lastUserQuery && (
+                <div className="flex justify-start ml-14">
+                  <div className="mt-2 pt-2 border-t border-slate-100">
+                    <QuickResearchButton
+                      compact
+                      disabled={loading}
+                      onResearch={(mode) => {
+                        // Set appropriate depth/modes based on quick action
+                        if (mode === 'deeper') {
+                          setResearchDepth(3);
+                          setVerificationMode(false);
+                          setListOutput(false);
+                        } else if (mode === 'verify') {
+                          setResearchDepth(2);
+                          setVerificationMode(true);
+                          setListOutput(true);
+                        } else { // list
+                          setResearchDepth(4);
+                          setVerificationMode(false);
+                          setListOutput(true);
+                        }
+                        // Re-send the last query with new settings
+                        const prefix = mode === 'deeper' 
+                          ? 'Search deeper: '
+                          : mode === 'verify'
+                          ? 'Verify with evidence for and against: '
+                          : 'List all occurrences of: ';
+                        setInput(prefix + lastUserQuery);
+                        // Submit the form programmatically after setting input
+                        setTimeout(() => {
+                          const form = document.querySelector('form');
+                          if (form) form.requestSubmit();
+                        }, 100);
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+              
+              {/* ✅ Word Scan Results Display */}
+              {wordScanResult && (
+                <div className="mx-4">
+                  <WordScanResults
+                    data={wordScanResult}
+                    onClose={() => setWordScanResult(null)}
+                    isArabic={true}
+                  />
+                </div>
+              )}
+              
+              {/* Word Scanning Indicator */}
+              {isWordScanning && (
+                <div className="flex items-center gap-2 text-sm text-blue-600 p-3 mx-4 bg-blue-50 rounded-lg">
+                  <Loader2 className="animate-spin" size={16} />
+                  <span>جاري البحث عن جميع الحالات...</span>
+                </div>
+              )}
               
               {loading && (
                 <div className="flex gap-4 justify-start">
