@@ -82,6 +82,9 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
   // ✅ Terminology Analysis State
   const [showTerminology, setShowTerminology] = useState(false);
   
+  // ✅ Query Expansion Toggle
+  const [queryExpansionEnabled, setQueryExpansionEnabled] = useState(true);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const AVAILABLE_MODELS = [
@@ -95,6 +98,11 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
 
   useEffect(() => {
     fetchSessions();
+    // Fetch query expansion setting
+    fetch('/api/settings')
+      .then(res => res.json())
+      .then(data => setQueryExpansionEnabled(data.queryExpansionEnabled ?? true))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -533,12 +541,15 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
 
               <button
                 onClick={() => setShowSettings(!showSettings)}
-                className={`p-2 rounded-lg transition-colors ${
+                className={`p-2 rounded-lg transition-colors relative ${
                   showSettings ? 'bg-emerald-100 text-emerald-600' : 'hover:bg-slate-100'
                 }`}
                 title="Chat Settings"
               >
                 <Settings size={20} />
+                {!queryExpansionEnabled && (
+                  <span className="absolute -top-1 -right-1 w-3 h-3 bg-amber-500 rounded-full" title="Query expansion disabled" />
+                )}
               </button>
             </div>
           </div>
@@ -586,6 +597,34 @@ export default function ChatPanel({ selectedDocuments }: ChatPanelProps) {
                 listOutput={listOutput}
                 onListOutputChange={setListOutput}
               />
+
+              {/* ✅ Query Expansion Toggle */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium text-slate-700">توسيع الاستعلام / Query Expansion</label>
+                  <p className="text-xs text-slate-500">Expands your query with related terms for better search results</p>
+                </div>
+                <button
+                  onClick={async () => {
+                    const newValue = !queryExpansionEnabled;
+                    setQueryExpansionEnabled(newValue);
+                    await fetch('/api/settings', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ queryExpansionEnabled: newValue })
+                    });
+                  }}
+                  className={`relative w-12 h-6 rounded-full transition-colors ${
+                    queryExpansionEnabled ? 'bg-emerald-500' : 'bg-slate-300'
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${
+                      queryExpansionEnabled ? 'translate-x-6' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
 
               {/* ✅ Terminology Analysis Button */}
               <button

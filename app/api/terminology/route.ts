@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { getTerminologyCache, saveTerminologyCache } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -13,13 +14,12 @@ const supabaseAdmin = createClient(
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-// ✅ Model hierarchy matching lib/gemini.ts
-const CHAT_MODELS = [
+// ✅ Models for parallel processing (2 requests each for redundancy)
+const PARALLEL_MODELS = [
+  'gemma-3-27b-it',
   'gemma-3-27b-it',
   'gemma-3-12b-it',
-  'gemini-2.5-flash-lite',
-  'gemini-2.5-flash',
-  'gemini-3-flash-preview'
+  'gemma-3-12b-it',
 ];
 
 // Comprehensive Arabic stopwords list
@@ -200,7 +200,98 @@ function extractTermFrequencies(
 }
 
 /**
- * Use AI to categorize and filter terms
+ * Split array into N chunks
+ */
+function chunkArray<T>(array: T[], numChunks: number): T[][] {
+  const chunks: T[][] = [];
+  const chunkSize = Math.ceil(array.length / numChunks);
+  for (let i = 0; i < array.length; i += chunkSize) {
+    chunks.push(array.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+/**
+ * Process a single chunk of terms with AI
+ */
+async function processTermChunk(
+  terms: TermFrequency[],
+  modelName: string,
+  chunkIndex: number,
+  documentLanguage: string = 'ar'
+): Promise<{ term: string; category: string; importance: string }[]> {
+  const termsList = terms.map(t => `${t.term} (${t.count}×)`).join('\n');
+  
+  const prompt = documentLanguage === 'ar' 
+    ? `أنت خبير في تحليل المصطلحات والمفاهيم في النصوص العربية والإسلامية.
+
+فيما يلي قائمة بكلمات متكررة في نص علمي/ديني (مع عدد مرات الورود):
+
+${termsList}
+
+مهمتك:
+1. حدد المصطلحات والمفاهيم المهمة فقط (تجاهل الكلمات العامة والشائعة)
+2. صنف كل مصطلح مهم: concept (مفهوم), name (علم/شخصية), technical (مصطلح فني), place (مكان)
+3. حدد أهمية كل مصطلح: high (عالية), medium (متوسطة), low (منخفضة)
+
+أجب بصيغة JSON فقط:
+{"terms": [{"term": "الكلمة", "category": "concept", "importance": "high"}, ...]}
+
+ملاحظات: اختر فقط المصطلحات ذات المعنى العلمي. تجاهل الكلمات العامة.`
+    : `You are an expert at analyzing terminology in academic texts.
+
+Here are frequent words from an academic text (with counts):
+
+${termsList}
+
+Task:
+1. Identify important terms only (ignore common words)
+2. Categorize: concept, name (person), technical, place
+3. Rate importance: high, medium, low
+
+Respond in JSON only:
+{"terms": [{"term": "word", "category": "concept", "importance": "high"}, ...]}
+
+Note: Select only meaningful terms. Ignore generic words.`;
+
+  try {
+    console.log(`🤖 [Chunk ${chunkIndex + 1}] Starting ${modelName} for ${terms.length} terms...`);
+    const model = genAI.getGenerativeModel({ model: modelName });
+    const result = await model.generateContent(prompt);
+    const response = result.response.text();
+    console.log(`✅ [Chunk ${chunkIndex + 1}] ${modelName} completed`);
+    
+    // Parse JSON from response
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.warn(`⚠️ [Chunk ${chunkIndex + 1}] No JSON found`);
+      return [];
+    }
+    
+    let jsonStr = jsonMatch[0];
+    jsonStr = jsonStr.replace(/,\s*([}\]])/g, '$1');
+    
+    try {
+      const parsed = JSON.parse(jsonStr);
+      return parsed.terms || [];
+    } catch {
+      // Fallback: extract terms via regex
+      const termPattern = /\{\s*"term"\s*:\s*"([^"]+)"\s*,\s*"category"\s*:\s*"([^"]+)"\s*,\s*"importance"\s*:\s*"([^"]+)"\s*\}/g;
+      const extractedTerms: Array<{term: string; category: string; importance: string}> = [];
+      let match;
+      while ((match = termPattern.exec(response)) !== null) {
+        extractedTerms.push({ term: match[1], category: match[2], importance: match[3] });
+      }
+      return extractedTerms;
+    }
+  } catch (error: any) {
+    console.warn(`⚠️ [Chunk ${chunkIndex + 1}] ${modelName} failed:`, error.message);
+    return [];
+  }
+}
+
+/**
+ * Use AI to categorize and filter terms - PARALLEL CHUNKED PROCESSING
  */
 async function categorizeTermsWithAI(
   terms: TermFrequency[],
@@ -209,134 +300,43 @@ async function categorizeTermsWithAI(
   // Take top 200 terms for AI analysis
   const topTerms = terms.slice(0, 200);
   
-  const termsList = topTerms.map(t => `${t.term} (${t.count}×)`).join('\n');
+  // Split terms into 4 chunks for parallel processing
+  const termChunks = chunkArray(topTerms, 4);
+  console.log(`🚀 [Terminology] Splitting ${topTerms.length} terms into ${termChunks.length} chunks for parallel processing...`);
   
-  const prompt = documentLanguage === 'ar' 
-    ? `أنت خبير في تحليل المصطلحات والمفاهيم في النصوص العربية والإسلامية.
-
-فيما يلي قائمة بأكثر الكلمات تكراراً في نص علمي/ديني (مع عدد مرات الورود):
-
-${termsList}
-
-مهمتك:
-1. حدد المصطلحات والمفاهيم المهمة (تجاهل الكلمات العامة والشائعة)
-2. صنف كل مصطلح مهم إلى إحدى الفئات: concept (مفهوم), name (علم/شخصية), technical (مصطلح فني), place (مكان)
-3. حدد أهمية كل مصطلح: high (عالية), medium (متوسطة), low (منخفضة)
-
-أجب بصيغة JSON فقط:
-{
-  "terms": [
-    {"term": "الكلمة", "category": "concept", "importance": "high"},
-    ...
-  ]
-}
-
-ملاحظات مهمة:
-- اختر فقط المصطلحات ذات المعنى والأهمية العلمية
-- تجاهل الكلمات العامة مثل: كتاب، قال، ذكر، باب، فصل، إلخ
-- ركز على المفاهيم والمصطلحات التي تمثل أفكاراً رئيسية
-- حدد ما لا يزيد عن 80 مصطلحاً من الأكثر أهمية`
-    : `You are an expert at analyzing terminology and concepts in academic texts.
-
-Here is a list of the most frequent words in an academic/scholarly text (with occurrence counts):
-
-${termsList}
-
-Your task:
-1. Identify important terms and concepts (ignore common/generic words)
-2. Categorize each important term: concept, name (person), technical (specialized term), place
-3. Rate importance: high, medium, low
-
-Respond in JSON only:
-{
-  "terms": [
-    {"term": "word", "category": "concept", "importance": "high"},
-    ...
-  ]
-}
-
-Important:
-- Select only meaningful, academically significant terms
-- Ignore generic words like: book, said, chapter, section, etc.
-- Focus on concepts representing key ideas
-- Select no more than 80 most important terms`;
-
   try {
-    // ✅ Try models with fallback
-    let response = '';
-    let lastError: Error | null = null;
+    // Process all chunks in parallel with different models
+    const chunkPromises = termChunks.map((chunk, index) => {
+      // Alternate between models for load balancing
+      const modelName = PARALLEL_MODELS[index % PARALLEL_MODELS.length];
+      return processTermChunk(chunk, modelName, index, documentLanguage);
+    });
     
-    for (const modelName of CHAT_MODELS) {
-      try {
-        console.log(`🤖 [Terminology] Trying model: ${modelName}`);
-        const model = genAI.getGenerativeModel({ model: modelName });
-        const result = await model.generateContent(prompt);
-        response = result.response.text();
-        console.log(`✅ [Terminology] Success with ${modelName}`);
-        break;
-      } catch (error: any) {
-        console.warn(`⚠️ [Terminology] ${modelName} failed:`, error.message);
-        lastError = error;
-        continue;
-      }
+    console.log(`🚀 [Terminology] Running ${chunkPromises.length} parallel AI requests...`);
+    const startTime = Date.now();
+    
+    // Wait for all parallel requests
+    const results = await Promise.all(chunkPromises);
+    
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`✅ [Terminology] All ${results.length} chunks completed in ${elapsed}s`);
+    
+    // Combine all results
+    const allAiTerms: Array<{term: string; category: string; importance: string}> = [];
+    for (const chunkResult of results) {
+      allAiTerms.push(...chunkResult);
     }
     
-    if (!response && lastError) {
-      throw lastError;
+    console.log(`📊 [Terminology] Combined ${allAiTerms.length} categorized terms from all chunks`);
+    
+    if (allAiTerms.length === 0) {
+      throw new Error('All parallel chunk requests returned empty results');
     }
     
-    // Parse JSON from response with cleanup
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      console.error('No JSON found in AI response');
-      return topTerms.slice(0, 50).map(t => ({
-        ...t,
-        category: 'other' as const,
-        categoryAr: 'أخرى',
-        importance: 'medium' as const
-      }));
-    }
-    
-    // Clean up common JSON issues from AI responses
-    let jsonStr = jsonMatch[0];
-    // Remove trailing commas before ] or }
-    jsonStr = jsonStr.replace(/,\s*([}\]])/g, '$1');
-    // Fix unescaped quotes in strings (basic attempt)
-    jsonStr = jsonStr.replace(/:\s*"([^"]*)"([^,}\]]*)"([^"]*?)"/g, ': "$1\'$2\'$3"');
-    
-    let parsed;
-    try {
-      parsed = JSON.parse(jsonStr);
-    } catch (parseError) {
-      console.error('JSON parse failed, attempting extraction of terms array...');
-      // Try to extract just the terms array
-      const termsMatch = response.match(/"terms"\s*:\s*\[([\s\S]*?)\]/);
-      if (termsMatch) {
-        try {
-          // Parse individual term objects
-          const termObjects = termsMatch[1].match(/\{[^{}]+\}/g) || [];
-          const terms = [];
-          for (const obj of termObjects) {
-            try {
-              const cleanObj = obj.replace(/,\s*([}\]])/g, '$1');
-              terms.push(JSON.parse(cleanObj));
-            } catch {
-              // Skip malformed objects
-            }
-          }
-          parsed = { terms };
-        } catch {
-          parsed = { terms: [] };
-        }
-      } else {
-        parsed = { terms: [] };
-      }
-    }
-    
-    const aiTerms = new Map<string, { category: string; importance: string }>();
-    
-    for (const t of parsed.terms || []) {
-      aiTerms.set(normalizeArabic(t.term), {
+    // Build map for lookup
+    const aiTermsMap = new Map<string, { category: string; importance: string }>();
+    for (const t of allAiTerms) {
+      aiTermsMap.set(normalizeArabic(t.term), {
         category: t.category,
         importance: t.importance
       });
@@ -347,7 +347,7 @@ Important:
     
     for (const term of topTerms) {
       const normalized = normalizeArabic(term.term);
-      const aiData = aiTerms.get(normalized);
+      const aiData = aiTermsMap.get(normalized);
       
       if (aiData) {
         const categoryMap: Record<string, string> = {
@@ -391,15 +391,30 @@ Important:
 
 export async function POST(req: NextRequest) {
   try {
-    const { documentIds, bookId } = await req.json();
+    const { documentIds, bookId, forceRefresh } = await req.json();
     
     const ids = documentIds || (bookId ? [bookId] : []);
+    const primaryId = ids[0]; // Use first ID for caching
     
     if (!ids || ids.length === 0) {
       return NextResponse.json({ error: 'Document IDs required' }, { status: 400 });
     }
     
-    console.log(`🔤 Starting terminology analysis for ${ids.length} document(s)`);
+    // ✅ Check cache first (unless force refresh)
+    if (!forceRefresh && primaryId) {
+      const cached = getTerminologyCache(primaryId);
+      if (cached) {
+        console.log(`📦 [Terminology] Returning cached results for ${primaryId}`);
+        const cachedData = JSON.parse(cached.terms_json);
+        return NextResponse.json({
+          ...cachedData,
+          fromCache: true,
+          cachedAt: cached.updated_at
+        });
+      }
+    }
+    
+    console.log(`🔤 Starting terminology analysis for ${ids.length} document(s)${forceRefresh ? ' (force refresh)' : ''}`);
     
     // Fetch all chunks for the documents
     const { data: chunks, error } = await supabaseAdmin
@@ -418,12 +433,6 @@ export async function POST(req: NextRequest) {
     }
     
     console.log(`📚 Processing ${chunks.length} chunks`);
-    
-    // Get document names
-    const { data: docs } = await supabaseAdmin
-      .from('embeddings')
-      .select('document_id')
-      .in('document_id', ids);
     
     // Extract term frequencies
     const termFrequencies = extractTermFrequencies(chunks);
@@ -463,7 +472,17 @@ export async function POST(req: NextRequest) {
       }
     };
     
-    return NextResponse.json(response);
+    // ✅ Save to cache
+    if (primaryId && categorizedTerms.length > 0) {
+      try {
+        saveTerminologyCache(primaryId, JSON.stringify(response), categorizedTerms.length, chunks.length);
+        console.log(`💾 [Terminology] Saved to cache for ${primaryId}`);
+      } catch (cacheError) {
+        console.warn('Failed to save terminology cache:', cacheError);
+      }
+    }
+    
+    return NextResponse.json({ ...response, fromCache: false });
     
   } catch (error) {
     console.error('Terminology analysis error:', error);

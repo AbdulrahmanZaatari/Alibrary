@@ -10,6 +10,7 @@ import QuickResearchButton from './QuickResearchButton';
 import WordScanResults from './WordScanResults';
 import TerminologyAnalysis from './TerminologyAnalysis';
 import CommentsSynthesis from './CommentsSynthesis';
+import GlossaryManager from './GlossaryManager';
 import { detectWordScanQuery } from '@/lib/wordScanDetection';
 import { 
   ChevronLeft, 
@@ -208,6 +209,12 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
   
   // ✅ Terminology Analysis State
   const [showTerminology, setShowTerminology] = useState(false);
+  
+  // ✅ Glossary Manager State
+  const [showGlossary, setShowGlossary] = useState(false);
+  
+  // ✅ Query Expansion Toggle
+  const [queryExpansionEnabled, setQueryExpansionEnabled] = useState(true);
 
   const AVAILABLE_MODELS = [
     { id: 'qwen/qwen3-235b-a22b:free', name: 'Qwen 235B (Free - 50/day)', tier: 'free' },
@@ -244,6 +251,11 @@ export default function ReaderMode({ persistedBookId, onBookSelect }: ReaderMode
     fetchBooks();
     fetchCorpusDocuments();
     fetchAvailablePrompts();
+    // Fetch query expansion setting
+    fetch('/api/settings')
+      .then(res => res.json())
+      .then(data => setQueryExpansionEnabled(data.queryExpansionEnabled ?? true))
+      .catch(() => {});
     const timer = setTimeout(() => {
       isMountingRef.current = false;
     }, 100);
@@ -2094,6 +2106,34 @@ async function extractPageText() {
                   compact={true}
                 />
 
+                {/* ✅ Query Expansion Toggle */}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-sm font-medium text-slate-700">توسيع الاستعلام / Query Expansion</label>
+                    <p className="text-xs text-slate-500">Expands query with related terms</p>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      const newValue = !queryExpansionEnabled;
+                      setQueryExpansionEnabled(newValue);
+                      await fetch('/api/settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ queryExpansionEnabled: newValue })
+                      });
+                    }}
+                    className={`relative w-12 h-6 rounded-full transition-colors ${
+                      queryExpansionEnabled ? 'bg-blue-500' : 'bg-slate-300'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${
+                        queryExpansionEnabled ? 'translate-x-6' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+
                 {/* Corpus Selection */}
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-2">
@@ -2160,6 +2200,18 @@ async function extractPageText() {
                       Select documents first
                     </p>
                   )}
+                </div>
+
+                {/* ✅ Glossary Manager Button */}
+                <div>
+                  <button
+                    onClick={() => setShowGlossary(true)}
+                    disabled={!selectedBook}
+                    className="w-full px-3 py-2 bg-amber-600 hover:bg-amber-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium flex items-center justify-center gap-2"
+                  >
+                    <FileText size={16} />
+                    قوائم المصطلحات / Glossaries
+                  </button>
                 </div>
               </div>
             )}
@@ -2956,6 +3008,24 @@ async function extractPageText() {
             setCurrentPage(pageNumber);
             setShowCommentsSynthesis(false);
           }}
+        />
+      )}
+
+      {/* ✅ Glossary Manager Modal */}
+      {showGlossary && selectedBook && (
+        <GlossaryManager
+          bookId={selectedBook.id}
+          bookTitle={selectedBook.title}
+          supabaseDocId={
+            // Find matching corpus document by name
+            corpusDocuments.find(doc => 
+              doc.display_name === selectedBook.title ||
+              doc.display_name === selectedBook.filename ||
+              doc.display_name.includes(selectedBook.title) ||
+              selectedBook.title.includes(doc.display_name)
+            )?.id
+          }
+          onClose={() => setShowGlossary(false)}
         />
       )}
   </div>

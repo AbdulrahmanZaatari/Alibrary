@@ -75,8 +75,10 @@ export default function TerminologyAnalysis({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [selectedTerm, setSelectedTerm] = useState<CategorizedTerm | null>(null);
+  const [fromCache, setFromCache] = useState(false);
+  const [cachedAt, setCachedAt] = useState<string | null>(null);
 
-  const fetchTerminology = useCallback(async () => {
+  const fetchTerminology = useCallback(async (forceRefresh = false) => {
     setLoading(true);
     setError(null);
     
@@ -86,7 +88,8 @@ export default function TerminologyAnalysis({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           documentIds: documentIds.length > 0 ? documentIds : undefined,
-          bookId 
+          bookId,
+          forceRefresh
         })
       });
       
@@ -97,6 +100,8 @@ export default function TerminologyAnalysis({
       
       const result = await response.json();
       setData(result);
+      setFromCache(result.fromCache || false);
+      setCachedAt(result.cachedAt || null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
@@ -104,9 +109,13 @@ export default function TerminologyAnalysis({
     }
   }, [documentIds, bookId]);
 
+  const handleRefresh = () => {
+    fetchTerminology(true);
+  };
+
   useEffect(() => {
     if (isOpen && !data && !loading) {
-      fetchTerminology();
+      fetchTerminology(false);
     }
   }, [isOpen, data, loading, fetchTerminology]);
 
@@ -174,10 +183,25 @@ export default function TerminologyAnalysis({
               {bookTitle && (
                 <p className="text-sm text-gray-500 dark:text-gray-400">{bookTitle}</p>
               )}
+              {fromCache && cachedAt && (
+                <p className="text-xs text-amber-600 dark:text-amber-400">
+                  📦 من الذاكرة المؤقتة ({new Date(cachedAt).toLocaleDateString('ar')})
+                </p>
+              )}
             </div>
           </div>
           
           <div className="flex items-center gap-2">
+            {/* Refresh Button */}
+            <button
+              onClick={handleRefresh}
+              disabled={loading}
+              className="p-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white disabled:opacity-50"
+              title="إعادة التحليل"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+            
             {/* View Mode Toggle */}
             <div className="flex rounded-lg border border-gray-200 dark:border-gray-600 overflow-hidden">
               <button
@@ -213,7 +237,7 @@ export default function TerminologyAnalysis({
             </button>
             
             <button
-              onClick={fetchTerminology}
+              onClick={() => fetchTerminology()}
               className="p-2 rounded-lg bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300"
               title="تحديث"
               disabled={loading}
@@ -294,7 +318,7 @@ export default function TerminologyAnalysis({
                 <p className="text-sm">{error}</p>
               </div>
               <button
-                onClick={fetchTerminology}
+                onClick={() => fetchTerminology()}
                 className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
               >
                 إعادة المحاولة

@@ -1,10 +1,11 @@
 import { NextRequest } from 'next/server';
-import { getDb } from '@/lib/db';
+import { getDb, getUserSettings, getTerminologyCache } from '@/lib/db';
 import { generateResponse } from '@/lib/gemini';
 import { analyzeQuery } from '@/lib/queryProcessor';
 import { retrieveSmartContext } from '@/lib/smartRetrieval';
 import { performMultiPassGeneration, formatMultiPassResult } from '@/lib/multiPassGeneration';
 import { expandQuery, buildKeywordList } from '@/lib/queryExpansion';
+import { handleSpecialQuery } from '@/lib/specialQueryHandlers';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -54,6 +55,64 @@ export async function POST(request: NextRequest) {
         ));
         await writer.close();
         return;
+      }
+
+      // ==================== SPECIAL QUERY HANDLING ====================
+      // Check for special query types: word analysis, de-jargon, glossary
+      const specialQuery = await handleSpecialQuery(query, documentIds);
+      
+      if (specialQuery.detected) {
+        if (specialQuery.type === 'glossary') {
+          // Redirect to glossary endpoint
+          await writer.write(encoder.encode(
+            `🔖 **Glossary Request Detected**\n\n` +
+            `لقد طلبت إنشاء قائمة مصطلحات للصفحات ${specialQuery.params.pageStart} إلى ${specialQuery.params.pageEnd}.\n\n` +
+            `استخدم زر "إنشاء قائمة مصطلحات" في الإعدادات أو اطلب ذلك من خلال واجهة المصطلحات.\n\n` +
+            `---\n\n` +
+            `You requested a glossary for pages ${specialQuery.params.pageStart}-${specialQuery.params.pageEnd}.\n` +
+            `Use the "Generate Glossary" button in settings or request through the terminology interface.`
+          ));
+          await writer.close();
+          return;
+        }
+        
+        // For word-analysis and de-jargon, we have special context
+        if (specialQuery.context && (specialQuery.type === 'word-analysis' || specialQuery.type === 'de-jargon')) {
+          console.log(`🎯 Processing ${specialQuery.type} query with ${specialQuery.chunks?.length || 0} chunks`);
+          
+          // Check if there's cached terminology data for context
+          let terminologyContext = '';
+          if (documentIds.length > 0) {
+            const cached = getTerminologyCache(documentIds[0]);
+            if (cached) {
+              try {
+                const termsData = JSON.parse(cached.terms_json);
+                if (termsData.terms && termsData.terms.length > 0) {
+                  const relevantTerms = termsData.terms.slice(0, 20).map((t: any) => t.term).join('، ');
+                  terminologyContext = `\n\nالمصطلحات الرئيسية في الكتاب: ${relevantTerms}`;
+                }
+              } catch { /* ignore */ }
+            }
+          }
+          
+          const enhancedContext = specialQuery.context + terminologyContext;
+          
+          // Generate response with special context
+          const prompt = `${query}\n\n${enhancedContext}`;
+          const { stream: specialStream } = await generateResponse(
+            prompt,
+            preferredModel
+          );
+          
+          for await (const chunk of specialStream) {
+            const text = chunk.text();
+            if (text) {
+              await writer.write(encoder.encode(text));
+            }
+          }
+          await writer.close();
+          return;
+        }
       }
 
       // ==================== MULTI-PASS GENERATION PATH ====================
@@ -117,7 +176,10 @@ export async function POST(request: NextRequest) {
 
       // ==================== ARABIC QUERY EXPANSION (Automatic) ====================
       let expandedKeywords: string[] = [];
-      if (queryLanguage === 'ar') {
+      const settings = getUserSettings();
+      const queryExpansionEnabled = settings?.query_expansion_enabled === 1;
+      
+      if (queryLanguage === 'ar' && queryExpansionEnabled) {
         console.log('\n┌─────────────────────────────────────────────────────────────┐');
         console.log('│ 🔤 ARABIC QUERY EXPANSION (Automatic)                       │');
         console.log('└─────────────────────────────────────────────────────────────┘');
@@ -142,6 +204,8 @@ export async function POST(request: NextRequest) {
         console.log(`   📊 Total keywords for search: ${expandedKeywords.length}`);
         console.log(`   🎯 Confidence: ${Math.round(expansion.confidence * 100)}%`);
         console.log('─────────────────────────────────────────────────────────────');
+      } else if (queryLanguage === 'ar' && !queryExpansionEnabled) {
+        console.log('⏭️ Query expansion disabled by user setting');
       }
 
       // ✅ Step 1: Analyze query

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getComments } from '@/lib/db';
+import { getComments, getSynthesisCache, saveSynthesisCache } from '@/lib/db';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import OpenAI from 'openai';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -9,20 +8,11 @@ export const maxDuration = 60;
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-// ✅ Model hierarchy matching lib/gemini.ts
-const CHAT_MODELS = [
+// ✅ Models for parallel processing - race to get fastest response
+const PARALLEL_MODELS = [
   'gemma-3-27b-it',
   'gemma-3-12b-it',
-  'gemini-2.5-flash-lite',
-  'gemini-2.5-flash',
-  'gemini-3-flash-preview'
 ];
-
-// OpenRouter fallback
-const openRouterClient = new OpenAI({
-  baseURL: 'https://openrouter.ai/api/v1',
-  apiKey: process.env.OPENROUTER_API_KEY,
-});
 
 interface Comment {
   id: string;
@@ -55,11 +45,13 @@ interface SynthesisResponse {
   }>;
   sections: SynthesizedSection[];
   rawComments: Comment[];
+  fromCache?: boolean;
+  cachedAt?: string;
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const { bookId, bookTitle } = await req.json();
+    const { bookId, bookTitle, forceRefresh } = await req.json();
     
     if (!bookId) {
       return NextResponse.json({ error: 'Book ID required' }, { status: 400 });
@@ -75,7 +67,23 @@ export async function POST(req: NextRequest) {
       }, { status: 404 });
     }
     
-    console.log(`📝 Synthesizing ${comments.length} comments for book: ${bookTitle || bookId}`);
+    // ✅ Check cache first (unless force refresh)
+    if (!forceRefresh) {
+      const cached = getSynthesisCache(bookId);
+      if (cached && cached.total_comments === comments.length) {
+        console.log(`📦 [Synthesis] Returning cached results for ${bookId}`);
+        const cachedData = JSON.parse(cached.synthesis_json);
+        // Update raw comments to current (in case of edits)
+        cachedData.rawComments = comments;
+        return NextResponse.json({
+          ...cachedData,
+          fromCache: true,
+          cachedAt: cached.updated_at
+        });
+      }
+    }
+    
+    console.log(`📝 Synthesizing ${comments.length} comments for book: ${bookTitle || bookId}${forceRefresh ? ' (force refresh)' : ''}`);
     
     // Prepare comments for AI analysis
     const commentsText = comments.map((c, i) => {
@@ -129,28 +137,56 @@ ${commentsText}
 - رقم التعليق (commentIndices) يبدأ من 1
 - اجعل الأقسام مفيدة للباحث في كتابة بحثه`;
 
-    // ✅ Try models with fallback
-    let responseText = '';
-    let lastError: Error | null = null;
+    // ✅ Run parallel requests and use Promise.race to get the FASTEST response
+    console.log(`🚀 [Synthesize] Racing ${PARALLEL_MODELS.length} parallel AI requests for fastest response...`);
+    const startTime = Date.now();
     
-    for (const modelName of CHAT_MODELS) {
+    // Create promises that resolve on success or never resolve on failure
+    const racePromises = PARALLEL_MODELS.map(async (modelName) => {
       try {
-        console.log(`🤖 [Synthesize] Trying model: ${modelName}`);
+        console.log(`🤖 [Synthesize] Starting ${modelName}...`);
         const model = genAI.getGenerativeModel({ model: modelName });
         const result = await model.generateContent(prompt);
-        responseText = result.response.text();
-        console.log(`✅ [Synthesize] Success with ${modelName}`);
-        break;
+        const response = result.response.text();
+        console.log(`✅ [Synthesize] ${modelName} completed first!`);
+        return { modelName, response, success: true };
       } catch (error: any) {
         console.warn(`⚠️ [Synthesize] ${modelName} failed:`, error.message);
-        lastError = error;
-        continue;
+        // Return a promise that never resolves so Promise.race ignores failures
+        return new Promise(() => {}) as Promise<never>;
+      }
+    });
+    
+    // Also add a timeout fallback
+    const timeoutPromise = new Promise<{ modelName: string; response: string; success: boolean }>((_, reject) => {
+      setTimeout(() => reject(new Error('All AI requests timed out after 90 seconds')), 90000);
+    });
+    
+    // Race all requests - first successful one wins
+    let successfulResult;
+    try {
+      successfulResult = await Promise.race([...racePromises, timeoutPromise]);
+    } catch {
+      // If race fails, try Promise.all as fallback
+      console.log('⚠️ [Synthesize] Race failed, trying Promise.all fallback...');
+      const allResults = await Promise.all(PARALLEL_MODELS.map(async (modelName) => {
+        try {
+          const model = genAI.getGenerativeModel({ model: modelName });
+          const result = await model.generateContent(prompt);
+          return { modelName, response: result.response.text(), success: true };
+        } catch {
+          return { modelName, response: '', success: false };
+        }
+      }));
+      successfulResult = allResults.find(r => r.success && r.response);
+      if (!successfulResult) {
+        throw new Error('All parallel AI requests failed');
       }
     }
     
-    if (!responseText && lastError) {
-      throw lastError;
-    }
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    const responseText = successfulResult.response;
+    console.log(`✅ [Synthesize] Got response from ${successfulResult.modelName} in ${elapsed}s`);
     
     // Parse JSON from response with cleanup
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
@@ -166,7 +202,7 @@ ${commentsText}
     let aiResult;
     try {
       aiResult = JSON.parse(jsonStr);
-    } catch (parseError) {
+    } catch {
       console.error('JSON parse failed, attempting basic extraction...');
       // Extract what we can
       const summaryMatch = responseText.match(/"summary"\s*:\s*"([^"]+)"/);
@@ -217,7 +253,17 @@ ${commentsText}
     
     console.log(`✅ Synthesis complete: ${synthesis.sections.length} sections, ${synthesis.themes.length} themes`);
     
-    return NextResponse.json(synthesis);
+    // ✅ Save to cache
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { rawComments: _rawComments, ...cacheData } = synthesis;
+      saveSynthesisCache(bookId, JSON.stringify(cacheData), comments.length);
+      console.log(`💾 [Synthesis] Saved to cache for ${bookId}`);
+    } catch (cacheError) {
+      console.warn('Failed to save synthesis cache:', cacheError);
+    }
+    
+    return NextResponse.json({ ...synthesis, fromCache: false });
     
   } catch (error) {
     console.error('Comments synthesis error:', error);

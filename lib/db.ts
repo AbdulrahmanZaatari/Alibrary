@@ -901,4 +901,281 @@ export const updateSessionTimestamp = (sessionId: string) => {
   return stmt.run(sessionId);
 };
 
+// ==================== TERMINOLOGY CACHE FUNCTIONS ====================
+
+// Create terminology_cache table if not exists (NO foreign key - uses Supabase IDs)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS terminology_cache (
+    id TEXT PRIMARY KEY,
+    book_id TEXT NOT NULL UNIQUE,
+    terms_json TEXT NOT NULL,
+    total_terms INTEGER DEFAULT 0,
+    total_chunks INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_terminology_book ON terminology_cache(book_id);
+`);
+
+// Migration: Remove foreign key constraint from terminology_cache
+try {
+  // Check if table has foreign key by looking at SQL definition
+  const tableSQL = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='terminology_cache'").get() as { sql: string } | undefined;
+  if (tableSQL && tableSQL.sql.includes('FOREIGN KEY')) {
+    console.log('🔧 Migrating terminology_cache to remove FOREIGN KEY constraint...');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS terminology_cache_new (
+        id TEXT PRIMARY KEY,
+        book_id TEXT NOT NULL UNIQUE,
+        terms_json TEXT NOT NULL,
+        total_terms INTEGER DEFAULT 0,
+        total_chunks INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      INSERT OR IGNORE INTO terminology_cache_new SELECT * FROM terminology_cache;
+      DROP TABLE terminology_cache;
+      ALTER TABLE terminology_cache_new RENAME TO terminology_cache;
+      CREATE INDEX IF NOT EXISTS idx_terminology_book ON terminology_cache(book_id);
+    `);
+    console.log('✅ terminology_cache migration complete (removed FK constraint)');
+  }
+} catch {
+  console.log('ℹ️ terminology_cache table is new or migration not needed');
+}
+
+export const getTerminologyCache = (bookId: string) => {
+  const stmt = db.prepare('SELECT * FROM terminology_cache WHERE book_id = ?');
+  return stmt.get(bookId) as { 
+    id: string; 
+    book_id: string; 
+    terms_json: string; 
+    total_terms: number;
+    total_chunks: number;
+    created_at: string;
+    updated_at: string;
+  } | undefined;
+};
+
+export const saveTerminologyCache = (bookId: string, termsJson: string, totalTerms: number, totalChunks: number) => {
+  const id = `term-${bookId}-${Date.now()}`;
+  const stmt = db.prepare(`
+    INSERT OR REPLACE INTO terminology_cache (id, book_id, terms_json, total_terms, total_chunks, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+  `);
+  return stmt.run(id, bookId, termsJson, totalTerms, totalChunks);
+};
+
+export const deleteTerminologyCache = (bookId: string) => {
+  const stmt = db.prepare('DELETE FROM terminology_cache WHERE book_id = ?');
+  return stmt.run(bookId);
+};
+
+// ==================== COMMENTS SYNTHESIS CACHE FUNCTIONS ====================
+
+// Create synthesis_cache table if not exists (NO foreign key - uses Supabase IDs)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS synthesis_cache (
+    id TEXT PRIMARY KEY,
+    book_id TEXT NOT NULL UNIQUE,
+    synthesis_json TEXT NOT NULL,
+    total_comments INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_synthesis_book ON synthesis_cache(book_id);
+`);
+
+// Migration: Remove foreign key constraint from synthesis_cache
+try {
+  const tableSQL = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='synthesis_cache'").get() as { sql: string } | undefined;
+  if (tableSQL && tableSQL.sql.includes('FOREIGN KEY')) {
+    console.log('🔧 Migrating synthesis_cache to remove FOREIGN KEY constraint...');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS synthesis_cache_new (
+        id TEXT PRIMARY KEY,
+        book_id TEXT NOT NULL UNIQUE,
+        synthesis_json TEXT NOT NULL,
+        total_comments INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      INSERT OR IGNORE INTO synthesis_cache_new SELECT * FROM synthesis_cache;
+      DROP TABLE synthesis_cache;
+      ALTER TABLE synthesis_cache_new RENAME TO synthesis_cache;
+      CREATE INDEX IF NOT EXISTS idx_synthesis_book ON synthesis_cache(book_id);
+    `);
+    console.log('✅ synthesis_cache migration complete (removed FK constraint)');
+  }
+} catch {
+  console.log('ℹ️ synthesis_cache table is new or migration not needed');
+}
+
+export const getSynthesisCache = (bookId: string) => {
+  const stmt = db.prepare('SELECT * FROM synthesis_cache WHERE book_id = ?');
+  return stmt.get(bookId) as { 
+    id: string; 
+    book_id: string; 
+    synthesis_json: string; 
+    total_comments: number;
+    created_at: string;
+    updated_at: string;
+  } | undefined;
+};
+
+export const saveSynthesisCache = (bookId: string, synthesisJson: string, totalComments: number) => {
+  const id = `synth-${bookId}-${Date.now()}`;
+  const stmt = db.prepare(`
+    INSERT OR REPLACE INTO synthesis_cache (id, book_id, synthesis_json, total_comments, created_at, updated_at)
+    VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+  `);
+  return stmt.run(id, bookId, synthesisJson, totalComments);
+};
+
+export const deleteSynthesisCache = (bookId: string) => {
+  const stmt = db.prepare('DELETE FROM synthesis_cache WHERE book_id = ?');
+  return stmt.run(bookId);
+};
+
+// ==================== USER SETTINGS FUNCTIONS ====================
+
+// Create user_settings table if not exists
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_settings (
+    id TEXT PRIMARY KEY DEFAULT 'default',
+    query_expansion_enabled INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+// Initialize default settings if not exist
+try {
+  const existing = db.prepare('SELECT * FROM user_settings WHERE id = ?').get('default');
+  if (!existing) {
+    db.prepare('INSERT INTO user_settings (id, query_expansion_enabled) VALUES (?, ?)').run('default', 1);
+  }
+} catch {
+  // Table might have just been created
+}
+
+export const getUserSettings = () => {
+  const stmt = db.prepare('SELECT * FROM user_settings WHERE id = ?');
+  return stmt.get('default') as { 
+    id: string; 
+    query_expansion_enabled: number;
+    created_at: string;
+    updated_at: string;
+  } | undefined;
+};
+
+export const updateUserSettings = (settings: { query_expansion_enabled?: boolean }) => {
+  const current = getUserSettings();
+  const queryExpansion = settings.query_expansion_enabled !== undefined 
+    ? (settings.query_expansion_enabled ? 1 : 0) 
+    : (current?.query_expansion_enabled ?? 1);
+  
+  const stmt = db.prepare(`
+    INSERT INTO user_settings (id, query_expansion_enabled, updated_at)
+    VALUES ('default', ?, datetime('now'))
+    ON CONFLICT(id) DO UPDATE SET
+      query_expansion_enabled = excluded.query_expansion_enabled,
+      updated_at = datetime('now')
+  `);
+  return stmt.run(queryExpansion);
+};
+
+// ==================== GLOSSARY FUNCTIONS ====================
+
+// Create glossaries table if not exists
+db.exec(`
+  CREATE TABLE IF NOT EXISTS glossaries (
+    id TEXT PRIMARY KEY,
+    book_id TEXT NOT NULL,
+    book_title TEXT,
+    page_start INTEGER NOT NULL,
+    page_end INTEGER NOT NULL,
+    query TEXT NOT NULL,
+    terms_json TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_glossary_book ON glossaries(book_id);
+`);
+
+export interface GlossaryTerm {
+  term: string;
+  definition: string;
+  page: number;
+  category?: string;
+}
+
+export interface Glossary {
+  id: string;
+  book_id: string;
+  book_title: string | null;
+  page_start: number;
+  page_end: number;
+  query: string;
+  terms: GlossaryTerm[];
+  created_at: string;
+  updated_at: string;
+}
+
+export const getGlossaries = (bookId?: string) => {
+  if (bookId) {
+    const stmt = db.prepare('SELECT * FROM glossaries WHERE book_id = ? ORDER BY created_at DESC');
+    const rows = stmt.all(bookId) as any[];
+    return rows.map(row => ({
+      ...row,
+      terms: JSON.parse(row.terms_json)
+    })) as Glossary[];
+  }
+  const stmt = db.prepare('SELECT * FROM glossaries ORDER BY created_at DESC');
+  const rows = stmt.all() as any[];
+  return rows.map(row => ({
+    ...row,
+    terms: JSON.parse(row.terms_json)
+  })) as Glossary[];
+};
+
+export const getGlossary = (id: string) => {
+  const stmt = db.prepare('SELECT * FROM glossaries WHERE id = ?');
+  const row = stmt.get(id) as any;
+  if (!row) return undefined;
+  return {
+    ...row,
+    terms: JSON.parse(row.terms_json)
+  } as Glossary;
+};
+
+export const saveGlossary = (
+  bookId: string, 
+  bookTitle: string | null,
+  pageStart: number, 
+  pageEnd: number, 
+  query: string, 
+  terms: GlossaryTerm[]
+) => {
+  const id = `gloss-${bookId}-${Date.now()}`;
+  const stmt = db.prepare(`
+    INSERT INTO glossaries (id, book_id, book_title, page_start, page_end, query, terms_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+  `);
+  stmt.run(id, bookId, bookTitle, pageStart, pageEnd, query, JSON.stringify(terms));
+  return id;
+};
+
+export const updateGlossary = (id: string, terms: GlossaryTerm[]) => {
+  const stmt = db.prepare(`
+    UPDATE glossaries SET terms_json = ?, updated_at = datetime('now') WHERE id = ?
+  `);
+  return stmt.run(JSON.stringify(terms), id);
+};
+
+export const deleteGlossary = (id: string) => {
+  const stmt = db.prepare('DELETE FROM glossaries WHERE id = ?');
+  return stmt.run(id);
+};
+
 export default db;

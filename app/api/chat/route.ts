@@ -6,7 +6,8 @@ import {
   trackConversationContext,
   createSessionSummary,
   trackGlobalMemory,
-  getSessionContexts
+  getSessionContexts,
+  getUserSettings
 } from '@/lib/db';
 import { analyzeQuery } from '@/lib/queryProcessor';
 import { retrieveSmartContext, detectFollowUpWithAI } from '@/lib/smartRetrieval';
@@ -327,9 +328,12 @@ export async function POST(request: NextRequest) {
       if (documentIds && documentIds.length > 0) {
         console.log('📚 Documents provided - performing retrieval-based chat');
         
-        // ✅ Apply query expansion for Arabic queries (AUTOMATIC)
+        // ✅ Apply query expansion for Arabic queries (AUTOMATIC - respects user setting)
         let expandedKeywords: string[] = [];
-        if (queryLanguage === 'ar') {
+        const settings = getUserSettings();
+        const queryExpansionEnabled = settings?.query_expansion_enabled === 1;
+        
+        if (queryLanguage === 'ar' && queryExpansionEnabled) {
           console.log('\n┌─────────────────────────────────────────────────────────────┐');
           console.log('│ 🔤 ARABIC QUERY EXPANSION (Automatic)                       │');
           console.log('└─────────────────────────────────────────────────────────────┘');
@@ -354,6 +358,8 @@ export async function POST(request: NextRequest) {
           console.log(`   📊 Total keywords for search: ${expandedKeywords.length}`);
           console.log(`   🎯 Confidence: ${Math.round(expansion.confidence * 100)}%`);
           console.log('─────────────────────────────────────────────────────────────');
+        } else if (queryLanguage === 'ar' && !queryExpansionEnabled) {
+          console.log('⏭️ Query expansion disabled by user setting');
         }
         
         // ✅ Perform query analysis

@@ -88,8 +88,10 @@ export default function CommentsSynthesis({
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [expandedThemes, setExpandedThemes] = useState<Set<string>>(new Set());
   const [showRawComments, setShowRawComments] = useState(false);
+  const [fromCache, setFromCache] = useState(false);
+  const [cachedAt, setCachedAt] = useState<string | null>(null);
 
-  const fetchSynthesis = useCallback(async () => {
+  const fetchSynthesis = useCallback(async (forceRefresh = false) => {
     setLoading(true);
     setError(null);
     
@@ -97,7 +99,7 @@ export default function CommentsSynthesis({
       const response = await fetch('/api/comments/synthesize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bookId, bookTitle })
+        body: JSON.stringify({ bookId, bookTitle, forceRefresh })
       });
       
       if (!response.ok) {
@@ -108,6 +110,8 @@ export default function CommentsSynthesis({
       const result = await response.json();
       setData(result);
       setEditedSummary(result.summary);
+      setFromCache(result.fromCache || false);
+      setCachedAt(result.cachedAt || null);
       
       // Expand first section by default
       if (result.sections.length > 0) {
@@ -120,9 +124,13 @@ export default function CommentsSynthesis({
     }
   }, [bookId, bookTitle]);
 
+  const handleRefresh = () => {
+    fetchSynthesis(true);
+  };
+
   useEffect(() => {
     if (isOpen && !data && !loading) {
-      fetchSynthesis();
+      fetchSynthesis(false);
     }
   }, [isOpen, data, loading, fetchSynthesis]);
 
@@ -241,6 +249,11 @@ export default function CommentsSynthesis({
                 ملخص الملاحظات
               </h2>
               <p className="text-sm text-gray-500 dark:text-gray-400">{bookTitle}</p>
+              {fromCache && cachedAt && (
+                <p className="text-xs text-amber-600 dark:text-amber-400">
+                  📦 من الذاكرة المؤقتة ({new Date(cachedAt).toLocaleDateString('ar')})
+                </p>
+              )}
             </div>
           </div>
           
@@ -255,8 +268,8 @@ export default function CommentsSynthesis({
             </button>
             
             <button
-              onClick={fetchSynthesis}
-              className="p-2 rounded-lg bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-600"
+              onClick={handleRefresh}
+              className="p-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white"
               title="إعادة التوليد"
               disabled={loading}
             >
@@ -288,7 +301,7 @@ export default function CommentsSynthesis({
                 <p className="text-sm">{error}</p>
               </div>
               <button
-                onClick={fetchSynthesis}
+                onClick={() => fetchSynthesis(true)}
                 className="px-4 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600"
               >
                 إعادة المحاولة

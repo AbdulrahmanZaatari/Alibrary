@@ -8,7 +8,8 @@ import {
   trackConversationContext,
   createSessionSummary,
   trackGlobalMemory,
-  getSessionContexts
+  getSessionContexts,
+  getUserSettings
 } from '@/lib/db';
 import { analyzeQuery } from '@/lib/queryProcessor';
 import { retrieveSmartContext, detectFollowUpWithAI } from '@/lib/smartRetrieval';
@@ -637,9 +638,12 @@ async function handleCorpusQuery(
 
   console.log(enableMultiHop ? '📖 Using standard retrieval (fallback)' : '📖 Using standard retrieval strategy');
   
-  // ==================== ARABIC QUERY EXPANSION (Automatic) ====================
+  // ==================== ARABIC QUERY EXPANSION (Automatic - respects user setting) ====================
   let expandedKeywords: string[] = [];
-  if (queryLanguage === 'ar') {
+  const settings = getUserSettings();
+  const queryExpansionEnabled = settings?.query_expansion_enabled === 1;
+  
+  if (queryLanguage === 'ar' && queryExpansionEnabled) {
     console.log('\n┌─────────────────────────────────────────────────────────────┐');
     console.log('│ 🔤 ARABIC QUERY EXPANSION (Reader Chat - Automatic)         │');
     console.log('└─────────────────────────────────────────────────────────────┘');
@@ -664,6 +668,8 @@ async function handleCorpusQuery(
     console.log(`   📊 Total keywords for search: ${expandedKeywords.length}`);
     console.log(`   🎯 Confidence: ${Math.round(expansion.confidence * 100)}%`);
     console.log('─────────────────────────────────────────────────────────────');
+  } else if (queryLanguage === 'ar' && !queryExpansionEnabled) {
+    console.log('⏭️ Query expansion disabled by user setting');
   }
 
   const contextParts: string[] = [];
