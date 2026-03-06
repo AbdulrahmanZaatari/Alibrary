@@ -2,10 +2,11 @@
  * Special Query Handlers
  * 
  * Detects and handles special query patterns:
- * 1. Word Analysis: "حلّل إستخدام كلمة X" - Analyze word usage in book
- * 2. De-Jargon: "Define X in context of Page Y" - Find definitions before page
- * 3. Glossary: "Generate glossary for pages X-Y" - Create glossary for range
- * 4. Term Follow-up: Questions about previously analyzed terminology
+ * 1. Word Analysis: "حلّل إستخدام كلمة X" - Analyze word usage in book (AI response)
+ * 2. Word List: "اذكر استخدامات كلمة X" - List word occurrences (CSV only)
+ * 3. De-Jargon: "Define X in context of Page Y" - Find definitions before page
+ * 4. Glossary: "Generate glossary for pages X-Y" - Create glossary for range
+ * 5. Term Follow-up: Questions about previously analyzed terminology
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -16,7 +17,7 @@ const supabaseAdmin = createClient(
 );
 
 export interface SpecialQueryResult {
-  type: 'word-analysis' | 'de-jargon' | 'glossary' | 'term-followup' | 'none';
+  type: 'word-analysis' | 'word-list' | 'de-jargon' | 'glossary' | 'term-followup' | 'none';
   detected: boolean;
   params: {
     word?: string;
@@ -27,37 +28,54 @@ export interface SpecialQueryResult {
   };
   context?: string;
   chunks?: any[];
+  totalOccurrences?: number;
+  pagesFound?: number[];
 }
 
 /**
- * Detect if query is a word analysis request
+ * Detect if query is a word ANALYSIS request (needs AI response)
  * Patterns: "حلّل استخدام كلمة X", "analyze usage of word X", "كيف يستخدم المؤلف كلمة X"
  */
-export function detectWordAnalysisQuery(query: string): { detected: boolean; word?: string } {
-  // Arabic patterns
-  const arabicPatterns = [
-    /حل[لّ]\s*(?:لي\s*)?(?:إ|ا)?ستخدام\s*كلمة\s*[«"']?([^»"'\s]+)[»"']?/i,
+export function detectWordAnalysisQuery(query: string): { detected: boolean; word?: string; isListOnly: boolean } {
+  // List-only verbs (show CSV without AI analysis)
+  const listVerbs = [
+    /(?:اذكر|أذكر|ذكر)\s*(?:لي\s*)?(?:كل\s*)?(?:إ|ا)?ستخدام(?:ات)?\s*كلمة\s*[«"']?([^»"'\s]+)[»"']?/i,
+    /(?:اعرض|أعرض|عرض)\s*(?:لي\s*)?(?:كل\s*)?(?:إ|ا)?ستخدام(?:ات)?\s*كلمة\s*[«"']?([^»"'\s]+)[»"']?/i,
+    /(?:أين|اين)\s*(?:تظهر|وردت|ذكرت)\s*كلمة\s*[«"']?([^»"'\s]+)[»"']?/i,
+    /(?:list|show|display)\s*(?:all\s*)?(?:occurrences?|usages?|instances?)\s*(?:of\s*)?(?:the\s*)?(?:word|term)\s*[«"']?([^»"'\s]+)[»"']?/i,
+    /(?:where|find)\s*(?:does\s*)?(?:the\s*)?(?:word|term)\s*[«"']?([^»"'\s]+)[»"']?\s*(?:appear|occur)/i,
+  ];
+  
+  // Analysis verbs (needs AI response)
+  const analysisPatterns = [
+    /حل[لّ]\s*(?:لي\s*)?(?:إ|ا)?ستخدام(?:ات)?\s*كلمة\s*[«"']?([^»"'\s]+)[»"']?/i,
     /كيف\s*(?:ي|ت)?ستخدم\s*(?:المؤلف|الكاتب|الكتاب)?\s*كلمة\s*[«"']?([^»"'\s]+)[»"']?/i,
     /ما\s*(?:هو\s*)?معنى\s*كلمة\s*[«"']?([^»"'\s]+)[»"']?\s*(?:في|عند|لدى)\s*(?:المؤلف|الكتاب)/i,
     /تحليل\s*(?:كلمة|مصطلح|مفهوم)\s*[«"']?([^»"'\s]+)[»"']?/i,
     /(?:إ|ا)?شرح\s*(?:لي\s*)?(?:كيف\s*)?(?:ي|ت)?ستخدم\s*(?:المؤلف\s*)?كلمة\s*[«"']?([^»"'\s]+)[»"']?/i,
-  ];
-  
-  // English patterns
-  const englishPatterns = [
     /analyze\s*(?:the\s*)?usage\s*(?:of\s*)?(?:the\s*)?(?:word|term)\s*[«"']?([^»"'\s]+)[»"']?/i,
     /how\s*does\s*(?:the\s*)?(?:author|book)\s*use\s*(?:the\s*)?(?:word|term)\s*[«"']?([^»"'\s]+)[»"']?/i,
     /what\s*does\s*(?:the\s*)?(?:word|term)\s*[«"']?([^»"'\s]+)[»"']?\s*mean\s*(?:in\s*)?(?:this\s*)?(?:book|context)/i,
+    /explain\s*(?:the\s*)?usage\s*(?:of\s*)?(?:the\s*)?(?:word|term)\s*[«"']?([^»"'\s]+)[»"']?/i,
   ];
   
-  for (const pattern of [...arabicPatterns, ...englishPatterns]) {
+  // First check for list-only verbs
+  for (const pattern of listVerbs) {
     const match = query.match(pattern);
     if (match && match[1]) {
-      return { detected: true, word: match[1].trim() };
+      return { detected: true, word: match[1].trim(), isListOnly: true };
     }
   }
   
-  return { detected: false };
+  // Then check for analysis verbs
+  for (const pattern of analysisPatterns) {
+    const match = query.match(pattern);
+    if (match && match[1]) {
+      return { detected: true, word: match[1].trim(), isListOnly: false };
+    }
+  }
+  
+  return { detected: false, isListOnly: false };
 }
 
 /**
@@ -133,19 +151,21 @@ export async function searchWordOccurrences(
   documentIds: string[],
   word: string
 ): Promise<{ chunks: any[]; totalOccurrences: number; pagesFound: number[] }> {
-  // Search for the word in chunks using ILIKE for case-insensitive match
+  // Search for the word in embeddings table using ILIKE for case-insensitive match
   const { data: chunks, error } = await supabaseAdmin
-    .from('document_chunks')
-    .select('id, content, page_number, document_id')
+    .from('embeddings')
+    .select('id, chunk_text, page_number, document_id')
     .in('document_id', documentIds)
-    .ilike('content', `%${word}%`)
+    .ilike('chunk_text', `%${word}%`)
     .order('page_number', { ascending: true })
-    .limit(50);
+    .limit(100);
   
   if (error || !chunks) {
     console.error('Error searching word occurrences:', error);
     return { chunks: [], totalOccurrences: 0, pagesFound: [] };
   }
+  
+  console.log(`🔍 Found ${chunks.length} chunks containing "${word}"`);
   
   // Count occurrences and extract pages
   let totalOccurrences = 0;
@@ -153,7 +173,7 @@ export async function searchWordOccurrences(
   
   for (const chunk of chunks) {
     const regex = new RegExp(word, 'gi');
-    const matches = chunk.content.match(regex);
+    const matches = chunk.chunk_text.match(regex);
     if (matches) {
       totalOccurrences += matches.length;
     }
@@ -161,6 +181,8 @@ export async function searchWordOccurrences(
       pagesFound.add(chunk.page_number);
     }
   }
+  
+  console.log(`📊 Total occurrences: ${totalOccurrences} in ${pagesFound.size} pages`);
   
   return { 
     chunks, 
@@ -191,13 +213,13 @@ export async function searchDefinitions(
     `نعني ب${term}`,
   ];
   
-  // Search chunks before the page
+  // Search chunks before the page in embeddings table
   const { data: chunks, error } = await supabaseAdmin
-    .from('document_chunks')
-    .select('id, content, page_number, document_id')
+    .from('embeddings')
+    .select('id, chunk_text, page_number, document_id')
     .in('document_id', documentIds)
     .lt('page_number', beforePage)
-    .ilike('content', `%${term}%`)
+    .ilike('chunk_text', `%${term}%`)
     .order('page_number', { ascending: true });
   
   if (error || !chunks) {
@@ -211,7 +233,7 @@ export async function searchDefinitions(
   
   for (const chunk of chunks) {
     for (const pattern of arabicPatterns) {
-      if (chunk.content.includes(pattern)) {
+      if (chunk.chunk_text.includes(pattern)) {
         if (!definitionChunks.find(c => c.id === chunk.id)) {
           definitionChunks.push(chunk);
         }
@@ -243,7 +265,7 @@ export function buildWordAnalysisPrompt(
   pagesFound: number[]
 ): string {
   const contextText = chunks.slice(0, 15).map(c => 
-    `[صفحة ${c.page_number}]: ${c.content}`
+    `[صفحة ${c.page_number}]: ${c.chunk_text}`
   ).join('\n\n---\n\n');
   
   return `أنت خبير في تحليل النصوص العربية والإسلامية.
@@ -278,7 +300,7 @@ export function buildDeJargonPrompt(
   definitionPatterns: string[]
 ): string {
   const contextText = chunks.map(c => 
-    `[صفحة ${c.page_number}]: ${c.content}`
+    `[صفحة ${c.page_number}]: ${c.chunk_text}`
   ).join('\n\n---\n\n');
   
   return `أنت خبير في تحليل النصوص العربية والإسلامية.
@@ -314,15 +336,32 @@ export async function handleSpecialQuery(
   // 1. Check for word analysis
   const wordAnalysis = detectWordAnalysisQuery(query);
   if (wordAnalysis.detected && wordAnalysis.word) {
-    console.log(`🔍 Detected word analysis query for: ${wordAnalysis.word}`);
+    const isListOnly = wordAnalysis.isListOnly || false;
+    console.log(`🔍 Detected ${isListOnly ? 'word LIST' : 'word ANALYSIS'} query for: ${wordAnalysis.word}`);
     const { chunks, totalOccurrences, pagesFound } = await searchWordOccurrences(documentIds, wordAnalysis.word);
+    
+    // For list queries, return without AI context - frontend will show CSV directly
+    // For analysis queries, build AI prompt to analyze the occurrences
+    if (isListOnly) {
+      return {
+        type: 'word-list',
+        detected: true,
+        params: { word: wordAnalysis.word },
+        chunks,
+        totalOccurrences,
+        pagesFound
+      };
+    }
+    
     const context = buildWordAnalysisPrompt(wordAnalysis.word, chunks, totalOccurrences, pagesFound);
     return {
       type: 'word-analysis',
       detected: true,
       params: { word: wordAnalysis.word },
       context,
-      chunks
+      chunks,
+      totalOccurrences,
+      pagesFound
     };
   }
   

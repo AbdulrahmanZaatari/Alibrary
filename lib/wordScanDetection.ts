@@ -2,7 +2,10 @@
  * Word Scan Query Detection Utility
  * 
  * Detects queries that ask for "all occurrences" of a word/phrase
- * and extracts the target word for dedicated scanning
+ * and extracts the target word for dedicated scanning.
+ * 
+ * NOTE: This only detects LIST queries (اذكر, اعرض, أين, list, show)
+ * ANALYSIS queries (حلّل, analyze, كيف يستخدم) are handled by the API
  */
 
 export interface WordScanDetection {
@@ -11,7 +14,10 @@ export interface WordScanDetection {
   confidence: 'high' | 'medium' | 'low';
 }
 
-// Arabic patterns for word occurrence queries
+// Analysis verbs that should NOT trigger word scan (let API handle them)
+const analysisVerbs = /^(?:حل[لّ]|تحليل|كيف\s*(?:ي|ت)?ستخدم|(?:إ|ا)?شرح|ما\s*(?:هو\s*)?معنى|analyze|explain|how\s*does)/i;
+
+// Arabic patterns for word occurrence queries (LIST only, not analysis)
 const arabicPatterns = [
   // جميع استخدامات كلمة "الله"
   /(?:جميع|كل|كافة)\s+(?:استخدامات|حالات|مواضع|مواقع|أماكن|ورود)\s+(?:كلمة|لفظ|لفظة|مصطلح)?\s*[""«»"]?([^""«»"]+)[""«»"]?/i,
@@ -22,8 +28,8 @@ const arabicPatterns = [
   // كم مرة ذكرت كلمة "الله"
   /(?:كم|عدد)\s+(?:مرة|مرات)\s+(?:ذكرت?|وردت?|استخدمت?|ظهرت?|تكررت?)\s+(?:كلمة|لفظ|لفظة)?\s*[""«»"]?([^""«»"]+)[""«»"]?/i,
   
-  // أريد جميع استخدامات كلمة الله
-  /(?:أريد|اعطني|اذكر|اسرد|اعرض)\s+(?:جميع|كل|كافة)\s+(?:استخدامات|حالات|مواضع|مواقع|أماكن|ورود)\s+(?:كلمة|لفظ|لفظة)?\s*[""«»"]?([^""«»"]+)[""«»"]?/i,
+  // أريد/اذكر/اعرض جميع استخدامات كلمة الله (LIST verbs only)
+  /(?:أريد|اعطني|اذكر|أذكر|اسرد|اعرض|أعرض)\s+(?:جميع|كل|كافة)\s+(?:استخدامات|حالات|مواضع|مواقع|أماكن|ورود)\s+(?:كلمة|لفظ|لفظة)?\s*[""«»"]?([^""«»"]+)[""«»"]?/i,
   
   // ابحث عن جميع مواضع كلمة
   /(?:ابحث|فتش)\s+(?:عن\s+)?(?:جميع|كل|كافة)\s+(?:مواضع|مواقع|أماكن|حالات)\s+(?:كلمة|لفظ)?\s*[""«»"]?([^""«»"]+)[""«»"]?/i,
@@ -57,10 +63,20 @@ const englishPatterns = [
 ];
 
 /**
- * Detect if a query is asking for word/phrase occurrences
+ * Detect if a query is asking for word/phrase occurrences (LIST only)
+ * Analysis queries (حلّل, analyze) are NOT detected - they go to API
  */
 export function detectWordScanQuery(query: string): WordScanDetection {
   const trimmedQuery = query.trim();
+  
+  // SKIP analysis queries - let them go to the API for AI processing
+  if (analysisVerbs.test(trimmedQuery)) {
+    console.log('⏭️ Skipping word scan - detected analysis verb, sending to API');
+    return {
+      isWordScan: false,
+      confidence: 'low'
+    };
+  }
   
   // Check Arabic patterns first
   for (const pattern of arabicPatterns) {

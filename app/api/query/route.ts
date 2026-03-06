@@ -76,6 +76,27 @@ export async function POST(request: NextRequest) {
           return;
         }
         
+        // For word-list (listing verbs like اذكر/list), just show an indicator - frontend shows CSV
+        if (specialQuery.type === 'word-list') {
+          console.log(`📋 Word list query - returning indicator for CSV display`);
+          const word = specialQuery.params.word;
+          const totalOccurrences = specialQuery.totalOccurrences || 0;
+          const pagesFound = specialQuery.pagesFound || [];
+          
+          await writer.write(encoder.encode(
+            `🔍 **بحث كلمة: "${word}"**\n\n` +
+            `---\n\n` +
+            `📊 **إحصائيات الورود:**\n` +
+            `- عدد مرات الورود: **${totalOccurrences}** مرة\n` +
+            `- الصفحات: ${pagesFound.slice(0, 30).join(', ')}${pagesFound.length > 30 ? '...' : ''}\n\n` +
+            `---\n\n` +
+            `✅ تم تحميل جميع المواضع في جدول البيانات أعلاه.\n\n` +
+            `💡 **للحصول على تحليل معمّق:** اسأل "حلّل استخدام كلمة ${word} في الكتاب"`
+          ));
+          await writer.close();
+          return;
+        }
+        
         // For word-analysis and de-jargon, we have special context
         if (specialQuery.context && (specialQuery.type === 'word-analysis' || specialQuery.type === 'de-jargon')) {
           console.log(`🎯 Processing ${specialQuery.type} query with ${specialQuery.chunks?.length || 0} chunks`);

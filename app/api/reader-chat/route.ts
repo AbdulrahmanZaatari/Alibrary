@@ -28,6 +28,7 @@ import { performMultiPassGeneration, formatMultiPassResult } from '@/lib/multiPa
 import { expandQuery, buildKeywordList } from '@/lib/queryExpansion';
 import { detectQueryContext, detectContextConflicts } from '@/lib/literaryPrompts';
 import { detectPageRange } from '@/lib/wordScanDetection';
+import { handleSpecialQuery } from '@/lib/specialQueryHandlers';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -482,6 +483,68 @@ async function handleCorpusQuery(
   verificationMode: boolean = false,
   listOutput: boolean = false
 ): Promise<string> {
+  // ==================== SPECIAL QUERY HANDLING ====================
+  // Check for word analysis, de-jargon, glossary queries FIRST
+  try {
+    const specialQuery = await handleSpecialQuery(query, documentIds);
+    
+    if (specialQuery.detected) {
+      if (specialQuery.type === 'glossary') {
+        await writer.write(encoder.encode(
+          `🔖 **طلب قائمة مصطلحات**\n\n` +
+          `لقد طلبت إنشاء قائمة مصطلحات للصفحات ${specialQuery.params.pageStart} إلى ${specialQuery.params.pageEnd}.\n\n` +
+          `استخدم زر "إنشاء قائمة مصطلحات" في الإعدادات.`
+        ));
+        await writer.close();
+        return 'special-glossary';
+      }
+      
+      // word-list: Show stats only, frontend shows CSV
+      if (specialQuery.type === 'word-list') {
+        console.log(`📋 Word list query - returning indicator for CSV display`);
+        const word = specialQuery.params.word;
+        const totalOccurrences = specialQuery.totalOccurrences || 0;
+        const pagesFound = specialQuery.pagesFound || [];
+        
+        await writer.write(encoder.encode(
+          `🔍 **بحث كلمة: "${word}"**\n\n` +
+          `---\n\n` +
+          `📊 **إحصائيات الورود:**\n` +
+          `- عدد مرات الورود: **${totalOccurrences}** مرة\n` +
+          `- الصفحات: ${pagesFound.slice(0, 30).join(', ')}${pagesFound.length > 30 ? '...' : ''}\n\n` +
+          `---\n\n` +
+          `✅ تم تحميل جميع المواضع في جدول البيانات أعلاه.\n\n` +
+          `💡 **للحصول على تحليل معمّق:** اسأل "حلّل استخدام كلمة ${word} في الكتاب"`
+        ));
+        await writer.close();
+        return 'special-word-list';
+      }
+      
+      // word-analysis and de-jargon: Generate AI response with context
+      if (specialQuery.context && (specialQuery.type === 'word-analysis' || specialQuery.type === 'de-jargon')) {
+        console.log(`🎯 Processing ${specialQuery.type} with ${specialQuery.chunks?.length || 0} chunks`);
+        
+        const prompt = `${query}\n\n${specialQuery.context}`;
+        const { stream: specialStream, modelUsed } = await generateResponse(
+          prompt,
+          preferredModel
+        );
+        
+        for await (const chunk of specialStream) {
+          const text = chunk.text();
+          if (text) {
+            await writer.write(encoder.encode(text));
+          }
+        }
+        await writer.close();
+        return modelUsed || 'gemini-special';
+      }
+    }
+  } catch (error) {
+    console.error('⚠️ Special query handling error, continuing with normal flow:', error);
+  }
+  // ==================== END SPECIAL QUERY HANDLING ====================
+
   let conversationContextString = '';
   let contextualPromptAddition = '';
   
