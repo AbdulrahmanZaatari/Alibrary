@@ -1,6 +1,7 @@
 {
   "name": "islamic-research-assistant",
   "version": "1.0",
+  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

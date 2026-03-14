@@ -8,7 +8,7 @@ if (!process.env.GEMINI_API_KEY) {
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // ✅ Initialize OpenRouter client
-const openRouter = process.env.OPENROUTER_API_KEY 
+const openRouter = process.env.OPENROUTER_API_KEY
   ? new OpenRouter({ apiKey: process.env.OPENROUTER_API_KEY })
   : null;
 
@@ -37,8 +37,8 @@ const RERANK_MODELS = [
 
 // Embed text using Gemini
 export const embedText = async (text: string): Promise<number[]> => {
-  const model = genAI.getGenerativeModel({ model: 'text-embedding-004' });
-  const result = await model.embedContent(text);
+  const model = genAI.getGenerativeModel({ model: 'gemini-embedding-001' });
+  const result = await model.embedContent({ content: { role: 'user', parts: [{ text }] }, outputDimensionality: 768 } as any);
   return result.embedding.values;
 };
 
@@ -54,7 +54,7 @@ async function* streamOpenRouterResponse(prompt: string, model: string): AsyncIt
   }
 
   console.log(`🌐 [OpenRouter] Streaming with ${model}...`);
-  
+
   const stream = await openRouter.chat.send({
     model,
     messages: [
@@ -101,46 +101,46 @@ export const generateResponse = async (
     const modelName = modelsToTry[i];
     try {
       console.log(`🤖 Trying model: ${modelName}`);
-      
-      const model = genAI.getGenerativeModel({ 
+
+      const model = genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
           temperature: 0.7,
           maxOutputTokens: 8192,
         }
       });
-      
+
       const result = await model.generateContentStream(prompt);
       console.log(`✅ Success with ${modelName}`);
-      
-      return { 
-        stream: result.stream, 
-        modelUsed: modelName 
+
+      return {
+        stream: result.stream,
+        modelUsed: modelName
       };
-      
+
     } catch (error: any) {
-      const isQuotaError = error?.status === 429 || 
-                          error?.message?.includes('quota') || 
-                          error?.message?.includes('RESOURCE_EXHAUSTED');
-      
-      const isUnsupported = error?.status === 400 || 
-                           error?.message?.includes('model not found') ||
-                           error?.message?.includes('Invalid model');
-      
+      const isQuotaError = error?.status === 429 ||
+        error?.message?.includes('quota') ||
+        error?.message?.includes('RESOURCE_EXHAUSTED');
+
+      const isUnsupported = error?.status === 400 ||
+        error?.message?.includes('model not found') ||
+        error?.message?.includes('Invalid model');
+
       const isLastModel = i === modelsToTry.length - 1;
-      
+
       let errorReason = 'Unknown error';
       if (isQuotaError) errorReason = 'Quota exceeded';
       else if (isUnsupported) errorReason = 'Model not available';
       else errorReason = error.message;
 
       errors.push({ model: modelName, error: error.message, reason: errorReason });
-      
+
       if ((isQuotaError || isUnsupported) && !isLastModel) {
         console.warn(`⚠️ ${modelName} failed (${errorReason}), trying next model...`);
         continue;
       }
-      
+
       console.error(`❌ ${modelName} failed:`, error.message);
       if (isLastModel) {
         const errorSummary = errors.map(e => `${e.model}: ${e.reason}`).join('\n');
@@ -148,13 +148,13 @@ export const generateResponse = async (
       }
     }
   }
-  
+
   throw new Error('Failed to generate response with all available models');
 };
 
 // ✅ PRODUCTION-GRADE CHUNKING FUNCTION
 export const chunkText = (
-  text: string, 
+  text: string,
   chunkSize: number = 1200,
   overlap: number = 200
 ): string[] => {
@@ -213,10 +213,10 @@ export const chunkText = (
   }
 
   console.log(`✅ Chunking complete: ${chunks.length} valid chunks created`);
-  
+
   const avgLength = chunks.reduce((sum, c) => sum + c.length, 0) / chunks.length;
   const tooShort = chunks.filter(c => c.length < 200).length;
-  
+
   console.log(`📊 Chunk Statistics:`);
   console.log(`   - Total chunks: ${chunks.length}`);
   console.log(`   - Average length: ${Math.round(avgLength)} chars`);
@@ -248,8 +248,8 @@ export async function rerankChunks(
   for (const modelName of RERANK_MODELS) {
     try {
       console.log(`🔄 Reranking with ${modelName}...`);
-      
-      const model = genAI.getGenerativeModel({ 
+
+      const model = genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
           temperature: 0.1,
@@ -272,11 +272,11 @@ Your response (numbers only):`;
 
       const result = await model.generateContent(prompt);
       const text = result.response.text().trim();
-      
+
       console.log(`📄 Reranker raw response: ${text.substring(0, 200)}`);
 
       let indices: number[] = [];
-      
+
       try {
         const parsed = JSON.parse(text);
         if (Array.isArray(parsed)) {
@@ -312,15 +312,15 @@ Your response (numbers only):`;
       const rerankedChunks = uniqueIndices
         .map(index => chunks[index])
         .filter(chunk => chunk);
-        
+
       console.log(`✅ Re-ranking complete with ${modelName}. Top ${rerankedChunks.length} chunks selected`);
-      
+
       return rerankedChunks.slice(0, targetTopN);
 
     } catch (error: any) {
       const isQuotaError = error?.status === 429 || error?.message?.includes('quota');
       console.error(`❌ ${modelName} reranking failed: ${error.message}`);
-      
+
       if (!isQuotaError) {
         break; // Non-quota error, don't try other models
       }
@@ -333,17 +333,17 @@ Your response (numbers only):`;
 
 function isSubstantialContent(text: string): boolean {
   const trimmed = text.trim();
-  
+
   if (trimmed.length < 150) return false;
   if (/^[-_\d\s.]+$/.test(trimmed)) return false;
   if (/^(الباب|الفصل|Chapter|Section)\s+[\u0600-\u06FF\w\s]+$/i.test(trimmed)) return false;
-  
+
   const sentenceCount = (trimmed.match(/[.!?؟]+/g) || []).length;
   if (sentenceCount < 3) return false;
-  
+
   const wordCount = trimmed.split(/\s+/).length;
   if (wordCount < 30) return false;
-  
+
   return true;
 }
 

@@ -1,8 +1,8 @@
 // ✅ Load env FIRST before any imports
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-require('dotenv').config({ 
+require('dotenv').config({
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  path: require('path').resolve(process.cwd(), '.env.local') 
+  path: require('path').resolve(process.cwd(), '.env.local')
 });
 
 import { createClient } from '@supabase/supabase-js';
@@ -27,7 +27,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 const FALLBACK_MODELS = [
   'gemma-3-12b-it',
-  'gemma-3-27b-it', 
+  'gemma-3-27b-it',
   'gemini-2.5-flash-lite',
   'gemini-2.5-flash',
 ];
@@ -36,8 +36,9 @@ const FALLBACK_MODELS = [
  * ✅ Embed text using Gemini (inline version for script)
  */
 async function embedText(text: string): Promise<number[]> {
-  const model = genAI.getGenerativeModel({ model: 'text-embedding-004' });
-  const result = await model.embedContent(text);
+  // Initialize the new Gemini embedding model
+  const model = genAI.getGenerativeModel({ model: 'gemini-embedding-001' });
+  const result = await model.embedContent({ content: { role: 'user', parts: [{ text }] }, outputDimensionality: 768 } as any);
   return result.embedding.values;
 }
 
@@ -85,7 +86,7 @@ ${text}
 
   for (const modelName of FALLBACK_MODELS) {
     try {
-      const model = genAI.getGenerativeModel({ 
+      const model = genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
           temperature: 0.1,
@@ -187,7 +188,7 @@ async function cleanAllChunks(documentId?: string) {
 
   // Filter chunks that need correction
   const corruptedChunks = chunks.filter(chunk => needsCorrection(chunk.chunk_text));
-  
+
   console.log(`🔍 Found ${corruptedChunks.length} potentially corrupted chunks\n`);
 
   if (corruptedChunks.length === 0) {

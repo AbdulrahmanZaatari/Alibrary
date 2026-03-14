@@ -26,7 +26,7 @@ let currentChapterState: ChapterState | null = null;
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-const BATCH_SIZE = 2; 
+const BATCH_SIZE = 2;
 const MAX_RETRIES = 3;
 const EMBEDDING_TIMEOUT = 30000;
 const RATE_LIMIT_DELAY = 12000;
@@ -45,33 +45,33 @@ async function fetchWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Prom
  */
 function detectLanguage(text: string): 'ar' | 'en' {
   if (!text) return 'en';
-  
+
   const cleanText = text.replace(/\s/g, '');
   if (cleanText.length === 0) return 'en';
-  
+
   // ✅ Extended Arabic Unicode ranges (includes all Arabic presentations)
   const arabicChars = (cleanText.match(/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/g) || []).length;
   const arabicRatio = arabicChars / cleanText.length;
-  
+
   // ✅ Common Arabic words check (backup method)
   const arabicWords = ['في', 'من', 'على', 'إلى', 'هذا', 'التي', 'الله', 'كان', 'قال', 'ثم', 'عن', 'ما', 'أن', 'لم', 'هو', 'بن'];
   const hasArabicWords = arabicWords.some(word => text.includes(word));
-  
+
   // English letters check
   const englishChars = (cleanText.match(/[a-zA-Z]/g) || []).length;
   const englishRatio = englishChars / cleanText.length;
-  
+
   console.log(`   🔍 Language detection:`);
   console.log(`      Total: ${cleanText.length} chars | Arabic: ${arabicChars} (${(arabicRatio * 100).toFixed(1)}%) | English: ${englishChars} (${(englishRatio * 100).toFixed(1)}%)`);
   console.log(`      Arabic words found: ${hasArabicWords}`);
   console.log(`      Text preview: "${text.substring(0, 50)}..."`);
-  
+
   // ✅ Decision: Arabic if >20% Arabic chars OR contains Arabic words
   if (arabicRatio > 0.2 || hasArabicWords) {
     console.log(`      ✅ Language: ARABIC`);
     return 'ar';
   }
-  
+
   console.log(`      ✅ Language: ENGLISH`);
   return 'en';
 }
@@ -80,64 +80,64 @@ function detectLanguage(text: string): 'ar' | 'en' {
  * ✅ Enhanced embedding function with detailed debugging
  */
 async function embedChunk(
-  chunkText: string, 
-  pageNum: number, 
-  chunkIndex: number, 
+  chunkText: string,
+  pageNum: number,
+  chunkIndex: number,
   attempt: number = 1
 ): Promise<number[] | null> {
   try {
     console.log(`   🔄 [Page ${pageNum + 1}, Chunk ${chunkIndex + 1}] Embedding attempt ${attempt}/${MAX_RETRIES}`);
-    console.log(`      Model: text-embedding-004`);
+    console.log(`      Model: gemini-embedding-001`);
     console.log(`      Text length: ${chunkText.length} chars`);
     console.log(`      Preview: "${chunkText.substring(0, 80)}..."`);
-    
-    const model = genAI.getGenerativeModel({ 
-      model: 'text-embedding-004' 
+
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-embedding-001'
     });
-    
+
     const startTime = Date.now();
     const result = await fetchWithTimeout(
-      model.embedContent(chunkText),
+      model.embedContent({ content: { role: 'user', parts: [{ text: chunkText }] }, outputDimensionality: 768 } as any),
       EMBEDDING_TIMEOUT
     );
     const elapsed = Date.now() - startTime;
-    
+
     const embedding = result.embedding.values;
-    
+
     // Validate embedding
     if (!Array.isArray(embedding)) {
       throw new Error(`Invalid embedding response: not an array (type: ${typeof embedding})`);
     }
-    
+
     if (embedding.length === 0) {
       throw new Error('Invalid embedding response: empty array');
     }
-    
+
     if (embedding.length !== 768) {
       throw new Error(`Invalid embedding dimensions: expected 768, got ${embedding.length}`);
     }
-    
+
     console.log(`   ✅ Embedding successful: ${embedding.length} dimensions in ${elapsed}ms`);
-    
+
     return embedding;
-    
+
   } catch (error) {
     const err = error as Error;
     console.error(`   ❌ [Page ${pageNum + 1}, Chunk ${chunkIndex + 1}] Embedding attempt ${attempt} failed:`);
     console.error(`      Error type: ${err.name}`);
     console.error(`      Error message: ${err.message}`);
-    
+
     // Detailed error analysis
     if (err.message.includes('quota') || err.message.includes('RESOURCE_EXHAUSTED')) {
       console.error(`      🚨 QUOTA ERROR: API quota exceeded - waiting 5s before retry`);
       await new Promise(resolve => setTimeout(resolve, 5000));
     } else if (err.message.includes('not found') || err.message.includes('invalid model')) {
-      console.error(`      🚨 MODEL ERROR: text-embedding-004 not available`);
+      console.error(`      🚨 MODEL ERROR: gemini-embedding-001 not available`);
       return null;
     } else if (err.message.includes('Timeout')) {
       console.error(`      🚨 TIMEOUT ERROR: Request exceeded ${EMBEDDING_TIMEOUT}ms`);
     }
-    
+
     return null;
   }
 }
@@ -151,23 +151,23 @@ async function processPage(
   documentId: string
 ): Promise<VectorChunk[]> {
   const chunks: VectorChunk[] = [];
-  
+
   console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
   console.log(`📄 [Page ${pageNum + 1}] Starting processing...`);
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  
+
   try {
     // ✅ STEP 1: Extract text with mupdf (for language detection)
     let rawText = '';
     let mupdfFailed = false;
-    
+
     try {
       console.log(`   🔧 [STEP 1] Attempting mupdf extraction...`);
       const doc = mupdf.Document.openDocument(pdfBytes, 'application/pdf');
       const page = doc.loadPage(pageNum);
       rawText = page.toStructuredText().asText().trim();
       doc.destroy();
-      
+
       if (!rawText || rawText.length < 20) {
         console.warn(`   ⚠️ mupdf extraction insufficient (${rawText.length} chars)`);
         mupdfFailed = true;
@@ -191,48 +191,48 @@ async function processPage(
     let finalText = rawText;
     let extractionMethod: 'mupdf' | 'ocr' = 'mupdf';
     let usedOcr = false;
-    
+
     // Force OCR if: Arabic detected OR mupdf failed OR text is very short
     const needsOcr = language === 'ar' || mupdfFailed || rawText.length < 50;
-    
+
     if (needsOcr) {
       const reason = language === 'ar'
         ? '🌙 Arabic detected - using OCR.space'
-        : mupdfFailed 
-          ? '❌ mupdf failed' 
+        : mupdfFailed
+          ? '❌ mupdf failed'
           : '📏 Text too short';
-      
+
       console.log(`   📸 [STEP 3] OCR REQUIRED: ${reason}`);
-      
+
       try {
         const doc = mupdf.Document.openDocument(pdfBytes, 'application/pdf');
         const page = doc.loadPage(pageNum);
-        
+
         const scale = 2.5;
         console.log(`   🖼️  Rendering page at ${scale}x resolution...`);
-        
+
         const pixmap = page.toPixmap(
-          mupdf.Matrix.scale(scale, scale), 
-          mupdf.ColorSpace.DeviceRGB, 
+          mupdf.Matrix.scale(scale, scale),
+          mupdf.ColorSpace.DeviceRGB,
           false
         );
         const imageBuffer = Buffer.from(pixmap.asPNG());
-        
+
         console.log(`   📦 PNG size: ${(imageBuffer.length / 1024).toFixed(1)} KB`);
-        
+
         let ocrText = '';
         let ocrSource = '';
-        
+
         // ✅ For Arabic: Try OCR.space first (25k free/month), then fall back to Gemma
         if (language === 'ar' && isOcrSpaceAvailable()) {
           console.log(`   🌐 [ARABIC] Trying OCR.space API...`);
           const ocrSpaceResult = await extractTextWithOcrSpace(imageBuffer, 'ara');
-          
+
           if (ocrSpaceResult.success && ocrSpaceResult.text.length > 20) {
             ocrText = ocrSpaceResult.text;
             ocrSource = 'OCR.space';
             console.log(`   ✅ OCR.space success: ${ocrText.length} chars`);
-            
+
             // ✅ Apply Gemma AI correction to OCR.space output
             console.log(`   🤖 Applying Gemma AI correction to OCR.space text...`);
             try {
@@ -249,41 +249,41 @@ async function processPage(
             console.log(`   ⚠️ OCR.space failed/insufficient, falling back to Gemma Vision...`);
           }
         }
-        
+
         // Fallback to Gemma Vision if OCR.space failed or not Arabic
         if (!ocrText || ocrText.length < 20) {
           console.log(`   🔄 Using Gemma Vision API for OCR...`);
           ocrText = await extractTextWithGeminiVision(imageBuffer);
           ocrSource = 'Gemma Vision';
         }
-        
+
         doc.destroy();
-        
+
         if (ocrText && ocrText.length > 20) {
           finalText = ocrText;
           extractionMethod = 'ocr';
           usedOcr = true;
-          
+
           // ✅ Re-detect language after OCR (in case mupdf was wrong)
           language = detectLanguage(ocrText);
-          
+
           console.log(`   ✅ OCR success (${ocrSource}): ${ocrText.length} chars (re-detected: ${language})`);
           console.log(`   📝 OCR preview: "${ocrText.substring(0, 100)}..."`);
         } else {
           console.warn(`   ⚠️ OCR returned insufficient text (${ocrText?.length || 0} chars)`);
-          
+
           if (mupdfFailed) {
             console.error(`   ❌ Both mupdf and OCR failed - skipping page`);
             return [];
           }
-          
+
           // Use mupdf fallback if available
           finalText = rawText;
         }
-        
+
       } catch (ocrErr) {
         console.error(`   ❌ OCR failed: ${(ocrErr as Error).message}`);
-        
+
         if (!mupdfFailed && rawText) {
           console.log(`   ↳ Fallback: Using mupdf text (${rawText.length} chars)`);
           finalText = rawText;
@@ -301,24 +301,24 @@ async function processPage(
     const disableAiCorrection = process.env.DISABLE_AI_OCR_CORRECTION === 'true';
     let correctedText = finalText;
     let correctionConfidence = 1.0;
-    
+
     if (disableAiCorrection) {
       console.log(`   ⚠️ [STEP 4] AI OCR correction DISABLED - using raw OCR output`);
       correctedText = finalText;
       correctionConfidence = 0.75;
     } else if (language === 'ar') {
       console.log(`   🤖 [STEP 4] Applying enhanced AI-powered Arabic OCR correction...`);
-      
+
       try {
         // ✅ FIRST: Apply specialized OCR correction (using 27B model for best quality)
         // This specifically targets: ي/ى, أ/ا, ذ/د, ة/ه, ئ/ي confusion
         const ocrCorrectionResult = await correctArabicOcrWithAI(finalText);
         const intermediateText = ocrCorrectionResult.correctedText;
         correctionConfidence = ocrCorrectionResult.confidence;
-        
+
         console.log(`   ✅ OCR correction complete (model: ${ocrCorrectionResult.modelUsed})`);
         console.log(`   📊 OCR corrections made: ${ocrCorrectionResult.corrections.length}`);
-        
+
         // ✅ SECOND: Apply general Arabic cleanup if still has issues
         if (hasArabicCorruption(intermediateText) || hasArabicOcrIssues(intermediateText)) {
           console.log(`   🔧 Applying additional Arabic cleanup...`);
@@ -328,7 +328,7 @@ async function processPage(
           correctedText = intermediateText;
           console.log(`   ✅ No additional cleanup needed`);
         }
-        
+
         console.log(`   ✅ Arabic text correction complete (confidence: ${(correctionConfidence * 100).toFixed(0)}%)`);
       } catch (aiError) {
         console.error(`   ❌ AI correction failed: ${(aiError as Error).message}`);
@@ -338,7 +338,7 @@ async function processPage(
     } else if (!disableAiCorrection) {
       // English: Check if transliteration fixes are needed
       const hasTransliteration = hasTransliterationIssues(finalText);
-      
+
       if (hasTransliteration) {
         console.log(`   🔧 [STEP 4] Applying transliteration fixes (English)...`);
         try {
@@ -362,7 +362,7 @@ async function processPage(
 
     // ✅ STEP 5: Extract metadata
     console.log(`   🔍 [STEP 5] Extracting metadata...`);
-    
+
     function extractDatesAndContext(t: string): { dates: string[]; context: string[] } {
       const datePatterns = [
         /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g,
@@ -390,22 +390,22 @@ async function processPage(
 
       return { dates: [...new Set(dates)], context };
     }
-    
+
     const { dates: extractedDates, context: extractedContext } = extractDatesAndContext(correctedText);
     console.log(`   ✅ Found ${extractedDates.length} date(s)`);
 
     // ✅ STEP 5.5: Detect chapter/story boundaries
     console.log(`   📖 [STEP 5.5] Detecting chapter/story boundaries...`);
     let chapterState: ChapterState | null = currentChapterState;
-    
+
     try {
       const boundary = detectChapterBoundary(correctedText, language);
-      
+
       if (boundary.isNewSection) {
         console.log(`   📚 NEW ${boundary.sectionType?.toUpperCase() || 'SECTION'} DETECTED!`);
         console.log(`      Number: ${boundary.number || 'N/A'}`);
         console.log(`      Title: ${boundary.title || 'N/A'}`);
-        
+
         // Update the chapter state
         chapterState = {
           chapterNumber: boundary.sectionType === 'chapter' ? boundary.number : null,
@@ -415,7 +415,7 @@ async function processPage(
           sectionName: boundary.title || null,
           boundaryType: boundary.sectionType || 'section',
         };
-        
+
         // Update the global chapter state for subsequent pages
         currentChapterState = chapterState;
       } else if (currentChapterState) {
@@ -434,7 +434,7 @@ async function processPage(
     // ✅ STEP 6: Chunk text
     console.log(`   📦 [STEP 6] Chunking text...`);
     const pageChunks = chunkText(correctedText, 1200, 200);
-    
+
     if (pageChunks.length === 0) {
       console.log(`   ⚠️ No valid chunks created - skipping page`);
       return [];
@@ -448,15 +448,15 @@ async function processPage(
     for (let i = 0; i < pageChunks.length; i++) {
       const chunkText = pageChunks[i];
       let embedding: number[] | null = null;
-      
+
       // Retry with exponential backoff
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         embedding = await embedChunk(chunkText, pageNum, i, attempt);
-        
+
         if (embedding) {
           break;
         }
-        
+
         if (attempt < MAX_RETRIES) {
           const backoffDelay = 2000 * Math.pow(2, attempt - 1);
           console.log(`   ⏳ Waiting ${backoffDelay}ms before retry...`);
@@ -485,7 +485,7 @@ async function processPage(
         chapterNumber: chapterState?.chapterNumber || null,
         storyTitle: chapterState?.storyTitle || chapterState?.chapterTitle || null,
         sectionName: chapterState?.sectionName || null,
-        chapterContext: chapterState?.boundaryType !== 'none' 
+        chapterContext: chapterState?.boundaryType !== 'none'
           ? `${chapterState?.boundaryType} ${chapterState?.chapterNumber || chapterState?.storyNumber || ''}`.trim()
           : null,
         metadata: {
@@ -525,13 +525,13 @@ export async function embedDocumentInBatches(
 ) {
   // ✅ Reset chapter state for new document
   currentChapterState = null;
-  
+
   console.log(`\n${'='.repeat(60)}`);
   console.log(`🚀 STARTING DOCUMENT EMBEDDING`);
   console.log(`${'='.repeat(60)}`);
   console.log(`📄 Document ID: ${documentId}`);
   console.log(`📂 PDF path: ${pdfPath}`);
-  console.log(`🤖 Embedding model: text-embedding-004`);
+  console.log(`🤖 Embedding model: gemini-embedding-001`);
   console.log(`📦 Batch size: ${BATCH_SIZE} pages`);
   console.log(`⏱️  Rate limit delay: ${RATE_LIMIT_DELAY}ms`);
   console.log(`🔄 Max retries per chunk: ${MAX_RETRIES}`);
@@ -567,7 +567,7 @@ export async function embedDocumentInBatches(
       }
 
       const batchResults = await Promise.all(batchPromises);
-      
+
       // Collect all chunks
       for (const pageChunks of batchResults) {
         allChunks.push(...pageChunks);
@@ -609,7 +609,7 @@ export async function embedDocumentInBatches(
     }
 
     updateDocumentEmbeddingStatus(documentId, 'completed', allChunks.length);
-    
+
     console.log(`🎉 EMBEDDING COMPLETED for document: ${documentId}\n`);
 
   } catch (error) {
@@ -619,7 +619,7 @@ export async function embedDocumentInBatches(
     console.error(`Error: ${(error as Error).message}`);
     console.error(`Stack: ${(error as Error).stack}`);
     console.error(`${'='.repeat(60)}\n`);
-    
+
     updateDocumentEmbeddingStatus(documentId, 'failed', 0);
     throw error;
   }
